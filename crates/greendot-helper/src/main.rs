@@ -59,13 +59,16 @@ impl Opts {
         Ok(opts)
     }
 
-    fn resolve_allowed_uid(&self) -> Result<u32> {
+    /// (uid allowed to connect, gid to own the socket — None with --allow-uid,
+    /// where the connecting test process owns the socket file anyway).
+    fn resolve_allowed_ids(&self) -> Result<(u32, Option<nix::unistd::Gid>)> {
         match self.allow_uid {
-            Some(uid) => Ok(uid),
-            None => Ok(nix::unistd::User::from_name(&self.allow_user)?
-                .with_context(|| format!("user {:?} does not exist", self.allow_user))?
-                .uid
-                .as_raw()),
+            Some(uid) => Ok((uid, None)),
+            None => {
+                let user = nix::unistd::User::from_name(&self.allow_user)?
+                    .with_context(|| format!("user {:?} does not exist", self.allow_user))?;
+                Ok((user.uid.as_raw(), Some(user.gid)))
+            }
         }
     }
 }
@@ -73,7 +76,7 @@ impl Opts {
 fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     let opts = Opts::parse(std::env::args().skip(1))?;
-    let allowed_uid = opts.resolve_allowed_uid()?;
+    let (allowed_uid, socket_gid) = opts.resolve_allowed_ids()?;
 
     if let Some(dir) = opts.socket.parent() {
         std::fs::create_dir_all(dir)?;
@@ -82,6 +85,10 @@ fn main() -> Result<()> {
     let listener = UnixListener::bind(&opts.socket)
         .with_context(|| format!("binding {}", opts.socket.display()))?;
     std::fs::set_permissions(&opts.socket, std::fs::Permissions::from_mode(0o660))?;
+    if socket_gid.is_some() {
+        // The web service connects via group permission on the socket file.
+        nix::unistd::chown(&opts.socket, None, socket_gid)?;
+    }
     info!(socket = %opts.socket.display(), allowed_uid, "listening");
 
     let ctx = Arc::new(dispatch::Ctx {

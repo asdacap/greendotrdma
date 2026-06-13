@@ -1,0 +1,24 @@
+#!/bin/sh
+set -e
+
+# Create the greendot user / greendot-admin group and runtime dirs before
+# the units start.
+systemd-sysusers
+systemd-tmpfiles --create
+
+# Self-signed TLS certificate on first install (logins carry system
+# passwords, so HTTP is not an acceptable default).
+if [ ! -f /etc/greendotrdma/cert.pem ]; then
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+        -keyout /etc/greendotrdma/key.pem -out /etc/greendotrdma/cert.pem \
+        -days 3650 -nodes \
+        -subj "/CN=$(hostname -f 2>/dev/null || hostname)" >/dev/null 2>&1
+    chmod 644 /etc/greendotrdma/cert.pem
+    chgrp greendot /etc/greendotrdma/key.pem
+    chmod 640 /etc/greendotrdma/key.pem
+fi
+
+#DEBHELPER#
+
+echo "GreenDotRDMA installed. Add admins with: usermod -aG greendot-admin <user>"
+echo "Then browse to https://$(hostname):8443/"

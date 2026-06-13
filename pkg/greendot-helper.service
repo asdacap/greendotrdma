@@ -1,0 +1,18 @@
+[Unit]
+Description=GreenDotRDMA privileged helper
+Documentation=https://github.com/asdacap/greendotrdma
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/greendotrdma/greendot-helper
+Restart=on-failure
+RestartSec=2
+# Must stay root for configfs/PAM/zfs, but lock down what we can.
+ProtectHome=yes
+PrivateTmp=yes
+RuntimeDirectory=greendotrdma
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target

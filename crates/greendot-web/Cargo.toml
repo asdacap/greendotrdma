@@ -3,6 +3,45 @@ name = "greendot-web"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Web UI making NVMe-oF/iSCSI exports over RDMA dead easy"
+
+# Build: cargo build --release --workspace && cargo deb -p greendot-web --no-build
+[package.metadata.deb]
+name = "greendotrdma"
+maintainer = "Amirul Ashraf <asdacap@gmail.com>"
+copyright = "2026, Amirul Ashraf"
+license-file = ["../../LICENSE", "0"]
+section = "admin"
+priority = "optional"
+extended-description = """
+GreenDotRDMA exposes ZFS zvols and partitions over NVMe-oF and iSCSI with a
+web UI whose green dot per export shows whether it is actually served via
+RDMA. Includes ZFS zvol management, GPT partitioning, scheduled snapshots
+with retention, metrics with a Prometheus endpoint, and Soft-RoCE enablement
+for RDMA on plain NICs."""
+depends = "$auto, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod"
+conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
+maintainer-scripts = "../../pkg/debian"
+assets = [
+    ["target/release/greendot-web", "usr/libexec/greendotrdma/", "755"],
+    ["target/release/greendot-helper", "usr/libexec/greendotrdma/", "755"],
+    ["../../pkg/sysusers.conf", "usr/lib/sysusers.d/greendotrdma.conf", "644"],
+    ["../../pkg/tmpfiles.conf", "usr/lib/tmpfiles.d/greendotrdma.conf", "644"],
+    ["../../pkg/pam.greendotrdma", "etc/pam.d/greendotrdma", "644"],
+    ["../../pkg/config.toml", "etc/greendotrdma/config.toml", "640"],
+]
+
+[[package.metadata.deb.systemd-units]]
+unit-name = "greendot-helper"
+unit-scripts = "../../pkg"
+enable = true
+start = true
+
+[[package.metadata.deb.systemd-units]]
+unit-name = "greendot-web"
+unit-scripts = "../../pkg"
+enable = true
+start = true
 
 [dependencies]
 anyhow = { workspace = true }

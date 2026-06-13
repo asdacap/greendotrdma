@@ -1,0 +1,8 @@
+# GreenDotRDMA web service configuration.
+listen = "0.0.0.0:8443"
+
+# Self-signed certificate generated at install time; replace with real
+# ones if you have them. Remove both lines to serve plain HTTP (NOT
+# recommended: logins use system passwords).
+tls_cert = "/etc/greendotrdma/cert.pem"
+tls_key = "/etc/greendotrdma/key.pem"

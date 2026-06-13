@@ -1,0 +1,21 @@
+[Unit]
+Description=GreenDotRDMA web UI
+Documentation=https://github.com/asdacap/greendotrdma
+Wants=greendot-helper.service network-online.target
+After=greendot-helper.service network-online.target
+
+[Service]
+Type=simple
+User=greendot
+Group=greendot
+ExecStart=/usr/libexec/greendotrdma/greendot-web /etc/greendotrdma/config.toml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/greendotrdma
+
+[Install]
+WantedBy=multi-user.target
