@@ -1,5 +1,6 @@
 //! Read-only system introspection. Everything here runs unprivileged.
 
+pub mod block;
 pub mod lio;
 pub mod nvmet;
 pub mod rdma;

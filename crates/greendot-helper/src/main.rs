@@ -7,6 +7,7 @@ mod lio;
 mod modules;
 mod nvmet;
 mod pam;
+mod partition;
 mod zfs;
 
 use anyhow::{Context, Result, bail};

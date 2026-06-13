@@ -2,8 +2,8 @@
 //! `Request` variant handled here.
 
 use crate::cmd::Runner;
-use crate::{lio, modules, nvmet, pam, zfs};
-use greendot_proto::{ErrKind, Request, Response};
+use crate::{lio, modules, nvmet, pam, partition, zfs};
+use greendot_proto::{Request, Response};
 use std::path::PathBuf;
 use std::sync::Mutex;
 
@@ -110,10 +110,19 @@ pub fn dispatch(ctx: &Ctx, req: Request) -> Response {
                 } => lio::tpg_set(&ctx.lio_root, &iqn, enabled, demo_mode, auth.as_ref()),
                 Request::EnsureModules { modules: list } => modules::ensure(runner, &list),
                 Request::RxeLinkAdd { netdev } => modules::rxe_link_add(runner, &netdev),
-                other => Response::err(
-                    ErrKind::Unsupported,
-                    format!("not yet implemented: {other:?}"),
-                ),
+                Request::PartitionTableCreate { disk } => partition::table_create(runner, &disk),
+                Request::PartitionCreate {
+                    disk,
+                    start_sector,
+                    size_sectors,
+                    label,
+                } => partition::partition_create(runner, &disk, start_sector, size_sectors, &label),
+                Request::PartitionDelete { disk, number } => {
+                    partition::partition_delete(runner, &disk, number)
+                }
+                // Every operation is implemented; this match is the complete
+                // allowlist of what the root helper will ever do.
+                Request::Ping | Request::Authenticate { .. } => unreachable!("handled above"),
             }
         }
     }

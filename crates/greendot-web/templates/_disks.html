@@ -1,0 +1,52 @@
+<div id="disks-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.disks.is_empty() %}
+  <p class="empty">No disks found.</p>
+  {% endif %}
+
+  {% for d in view.disks %}
+  <h2>/dev/{{ d.name }} <span class="muted">{{ d.size }} {{ d.model }} {{ d.serial }}</span></h2>
+  {% if d.partitions.is_empty() %}
+  <p class="empty">No partitions.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Partition</th><th>Size</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
+    <tbody>
+      {% for p in d.partitions %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.size }}</td>
+        <td>{{ p.label }}</td>
+        <td>{{ p.mountpoint }}</td>
+        <td>
+          {% if let Some(number) = p.number %}
+          <form class="inline" hx-post="/disks/part/delete" hx-target="#disks-content" hx-swap="outerHTML"
+                hx-confirm="Delete {{ p.name }}? Data on it becomes unreachable.">
+            <input type="hidden" name="disk" value="{{ d.name }}">
+            <input type="hidden" name="number" value="{{ number }}">
+            <button class="danger">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <form class="inline" hx-post="/disks/part/create" hx-target="#disks-content" hx-swap="outerHTML">
+    <input type="hidden" name="disk" value="{{ d.name }}">
+    <input name="size" size="6" placeholder="rest">
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <input name="label" size="10" placeholder="label" required>
+    <button>Add partition</button>
+  </form>
+  <form class="inline" hx-post="/disks/table" hx-target="#disks-content" hx-swap="outerHTML"
+        hx-confirm="Write a brand-new empty GPT to /dev/{{ d.name }}? ALL existing partitions and data are lost.">
+    <input type="hidden" name="disk" value="{{ d.name }}">
+    <button class="danger">New GPT (wipe)</button>
+  </form>
+  {% endfor %}
+</div>

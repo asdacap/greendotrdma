@@ -431,6 +431,7 @@ dependencies = [
  "rstest",
  "rusqlite",
  "serde",
+ "serde_json",
  "tokio",
  "toml",
  "tower",

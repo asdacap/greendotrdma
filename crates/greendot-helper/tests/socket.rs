@@ -56,7 +56,7 @@ fn call(helper: &Helper, req: &Request) -> Response {
 }
 
 #[test]
-fn ping_unimplemented_op_and_garbage_handling() {
+fn ping_real_op_and_garbage_handling() {
     let helper = Helper::start();
 
     // Ping answers Ok, twice on one connection (persistent connections work).
@@ -82,24 +82,6 @@ fn ping_unimplemented_op_and_garbage_handling() {
     assert_eq!(
         call(&helper, &Request::NvmetSubsysDelete { nqn }),
         Response::Ok
-    );
-
-    // A not-yet-implemented operation gets a clean Unsupported error.
-    let resp = call(
-        &helper,
-        &Request::PartitionTableCreate {
-            disk: greendot_proto::BlockDev::new("fakedisk").unwrap(),
-        },
-    );
-    assert!(
-        matches!(
-            resp,
-            Response::Err {
-                kind: ErrKind::Unsupported,
-                ..
-            }
-        ),
-        "{resp:?}"
     );
 
     // Garbage gets an error response and the connection is closed.
