@@ -139,6 +139,8 @@ mod tests {
     fn rdma_dev(addr: &str) -> RdmaDev {
         RdmaDev {
             name: "rxe0".into(),
+            netdev: Some("eth0".into()),
+            active: true,
             addrs: vec![addr.parse::<IpAddr>().unwrap()],
         }
     }

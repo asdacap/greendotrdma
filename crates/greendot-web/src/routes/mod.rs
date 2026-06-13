@@ -1,4 +1,5 @@
 pub mod exports;
+pub mod settings;
 pub mod zfs;
 
 use crate::auth::{self, CurrentUser};
@@ -35,6 +36,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/logout", post(auth::logout))
         .merge(zfs::router())
         .merge(exports::router())
+        .merge(settings::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,

@@ -1,0 +1,56 @@
+<div id="settings-content">
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  <h2>Target listen address</h2>
+  <form class="card" hx-post="/settings/listen" hx-target="#settings-content" hx-swap="outerHTML">
+    <label>Listen address (NVMe-oF and iSCSI targets bind here)
+      <input name="listen_addr" value="{{ view.listen_addr }}">
+    </label>
+    <button type="submit">Save &amp; reconcile</button>
+  </form>
+
+  <h2>RDMA devices</h2>
+  {% if view.rdma_devs.is_empty() %}
+  <p class="empty">No RDMA devices detected.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Device</th><th>Netdev</th><th>State</th><th>Addresses</th></tr></thead>
+    <tbody>
+      {% for d in view.rdma_devs %}
+      <tr>
+        <td>{{ d.name }}</td>
+        <td>{{ d.netdev }}</td>
+        <td>
+          {% if d.state == "active" %}<span class="dot dot-green"></span>{% else %}<span class="dot dot-red"></span>{% endif %}
+          {{ d.state }}
+        </td>
+        <td>{{ d.addrs }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Soft-RoCE</h2>
+  <p class="muted">Give a plain NIC real RDMA semantics (rxe). Useful for testing or when no RoCE hardware is present.</p>
+  {% if view.plain_netdevs.is_empty() %}
+  <p class="empty">All interfaces already have RDMA devices.</p>
+  {% else %}
+  <table>
+    <tbody>
+      {% for n in view.plain_netdevs %}
+      <tr>
+        <td>{{ n }}</td>
+        <td>
+          <form class="inline" hx-post="/settings/rxe" hx-target="#settings-content" hx-swap="outerHTML">
+            <input type="hidden" name="netdev" value="{{ n }}">
+            <button>Enable Soft-RoCE</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

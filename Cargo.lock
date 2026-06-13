@@ -426,6 +426,7 @@ dependencies = [
  "axum-server",
  "greendot-proto",
  "http-body-util",
+ "nix",
  "rand",
  "rstest",
  "rusqlite",

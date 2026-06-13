@@ -76,6 +76,7 @@ pub fn dispatch(ctx: &Ctx, req: Request) -> Response {
                     nvmet::host_remove(&ctx.nvmet_root, &nqn, &host_nqn)
                 }
                 Request::EnsureModules { modules: list } => modules::ensure(runner, &list),
+                Request::RxeLinkAdd { netdev } => modules::rxe_link_add(runner, &netdev),
                 other => Response::err(
                     ErrKind::Unsupported,
                     format!("not yet implemented: {other:?}"),
