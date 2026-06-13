@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Charts — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Charts</h1>
+<p>
+  {% for (label, active) in view.ranges %}
+  {% if *active %}<strong>{{ label }}</strong>{% else %}<a href="/charts?range={{ label }}">{{ label }}</a>{% endif %}
+  {% endfor %}
+  <span class="muted small">live = last 10 minutes, 5s resolution</span>
+</p>
+{% if view.cards.is_empty() %}
+<p class="empty">No metrics collected yet — give the collector a few seconds.</p>
+{% endif %}
+<div class="chartgrid" {% if view.live %}hx-get="/charts" hx-select=".chartgrid" hx-swap="outerHTML" hx-trigger="every 5s"{% endif %}>
+  {% for c in view.cards %}
+  <div class="chartcard">
+    <div class="muted small">{{ c.title }}</div>
+    {{ c.svg|safe }}
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

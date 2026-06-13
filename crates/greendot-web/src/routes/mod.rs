@@ -1,3 +1,4 @@
+pub mod charts;
 pub mod disks;
 pub mod exports;
 pub mod settings;
@@ -27,6 +28,7 @@ pub struct AppState {
     pub sessions: auth::Sessions,
     pub secure_cookies: bool,
     pub db: crate::state::Db,
+    pub metrics: crate::metrics::Metrics,
     pub nvmet_root: std::path::PathBuf,
     pub lio_root: std::path::PathBuf,
     /// Serializes reconcile passes (UI actions vs the periodic task).
@@ -42,6 +44,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(settings::router())
         .merge(disks::router())
         .merge(snapshots::router())
+        .merge(charts::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -50,6 +53,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(protected)
         .route("/login", get(auth::login_page).post(auth::login_post))
         .route("/healthz", get(async || "ok"))
+        .route("/metrics", get(charts::prometheus))
         .route(
             "/static/htmx.min.js",
             get(async || asset("text/javascript", HTMX_JS)),
@@ -155,6 +159,7 @@ pub(crate) mod testutil {
             sessions: Sessions::new(Duration::from_secs(3600)),
             secure_cookies: false,
             db: crate::state::Db::in_memory().unwrap(),
+            metrics: crate::metrics::Metrics::in_memory().unwrap(),
             lio_root: nvmet_root.join("lio"),
             nvmet_root,
             reconcile_lock: tokio::sync::Mutex::new(()),

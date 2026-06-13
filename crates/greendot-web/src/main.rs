@@ -4,6 +4,7 @@ mod config;
 mod dot;
 mod fmt;
 mod helper_client;
+mod metrics;
 mod reconcile;
 mod routes;
 mod snapshots;
@@ -39,6 +40,7 @@ async fn main() -> Result<()> {
         sessions: auth::Sessions::new(Duration::from_secs(24 * 3600)),
         secure_cookies: tls.is_some(),
         db: state::Db::open(&config.db_path)?,
+        metrics: metrics::Metrics::open(&config.metrics_db_path)?,
         nvmet_root: config.nvmet_root.clone(),
         lio_root: config.lio_root.clone(),
         reconcile_lock: tokio::sync::Mutex::new(()),
@@ -57,7 +59,8 @@ async fn main() -> Result<()> {
             }
         }
     });
-    tokio::spawn(snapshots::scheduler(state));
+    tokio::spawn(snapshots::scheduler(Arc::clone(&state)));
+    tokio::spawn(metrics::collect::collector(state));
 
     match tls {
         Some(tls) => {
