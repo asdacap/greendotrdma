@@ -39,6 +39,7 @@ async fn main() -> Result<()> {
         secure_cookies: tls.is_some(),
         db: state::Db::open(&config.db_path)?,
         nvmet_root: config.nvmet_root.clone(),
+        lio_root: config.lio_root.clone(),
         reconcile_lock: tokio::sync::Mutex::new(()),
     });
     let app = routes::app(Arc::clone(&state));

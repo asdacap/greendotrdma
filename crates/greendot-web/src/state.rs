@@ -2,14 +2,15 @@
 //! as a disposable cache that the reconciler keeps in sync.
 
 use anyhow::{Context, Result};
-use greendot_proto::Nqn;
+use greendot_proto::{Iqn, Nqn};
 use rusqlite::Connection;
 use std::path::Path;
 use std::sync::Mutex;
 
-/// Every export we create lives under this prefix; reconciliation never
-/// touches configfs objects outside it.
+/// Every export we create lives under these prefixes; reconciliation never
+/// touches configfs objects outside them.
 pub const OUR_NQN_PREFIX: &str = "nqn.2026-06.io.greendot:";
+pub const OUR_IQN_PREFIX: &str = "iqn.2026-06.io.greendot:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
@@ -36,6 +37,19 @@ impl Export {
     pub fn nqn(&self) -> Nqn {
         Nqn::new(format!("{OUR_NQN_PREFIX}{}", self.name))
             .expect("validated name forms a valid NQN")
+    }
+
+    pub fn iqn(&self) -> Iqn {
+        Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name))
+            .expect("validated name forms a valid IQN")
+    }
+
+    /// The configfs identity to blame reconcile failures on.
+    pub fn qualified_name(&self) -> String {
+        match self.kind {
+            ExportKind::Nvme => self.nqn().to_string(),
+            ExportKind::Iscsi => self.iqn().to_string(),
+        }
     }
 }
 

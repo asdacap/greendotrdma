@@ -22,6 +22,7 @@ impl Helper {
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_greendot-helper"))
             .args(["--socket", socket.to_str().unwrap(), "--allow-uid", &uid])
             .args(["--nvmet-root", nvmet_root.to_str().unwrap()])
+            .args(["--lio-root", dir.join("lio").to_str().unwrap()])
             .spawn()
             .unwrap();
         for _ in 0..200 {
@@ -86,8 +87,8 @@ fn ping_unimplemented_op_and_garbage_handling() {
     // A not-yet-implemented operation gets a clean Unsupported error.
     let resp = call(
         &helper,
-        &Request::LioTargetCreate {
-            iqn: greendot_proto::Iqn::new("iqn.2026-06.io.greendot:x").unwrap(),
+        &Request::PartitionTableCreate {
+            disk: greendot_proto::BlockDev::new("fakedisk").unwrap(),
         },
     );
     assert!(

@@ -1,6 +1,7 @@
 //! The green dot: per-export health derived purely from desired state,
 //! actual configfs state, and the RDMA device list.
 
+use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
 use crate::state::Export;
@@ -83,6 +84,64 @@ pub fn nvme_dot(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Dot 
         }
     } else {
         red(format!("no port serves this subsystem — {rdma_problem}"))
+    }
+}
+
+pub fn iscsi_dot(export: &Export, actual: &ActualLio, rdma: &[RdmaDev]) -> Dot {
+    if let Some(error) = &export.last_error {
+        return red(format!("reconcile failed: {error}"));
+    }
+    let iqn = export.iqn();
+    let Some(backstore) = actual.backstores.iter().find(|b| b.name == export.name) else {
+        return red("backstore not configured (reconcile pending?)");
+    };
+    if backstore.udev_path != export.device_path {
+        return red(format!(
+            "backstore backed by wrong device {:?}",
+            backstore.udev_path
+        ));
+    }
+    if !backstore.enabled {
+        return red("backstore disabled");
+    }
+    let Some(target) = actual.targets.iter().find(|t| t.iqn == iqn.as_str()) else {
+        return red("iSCSI target missing");
+    };
+    if !target.enabled {
+        return red("target portal group disabled");
+    }
+    if !target.luns.iter().any(|l| l == &export.name) {
+        return red("LUN not mapped");
+    }
+
+    if let Some(portal) = target
+        .portals
+        .iter()
+        .find(|p| p.iser && addr_served_by_rdma(p.addr(), rdma))
+    {
+        return Dot {
+            state: DotState::Green,
+            reason: format!("serving via iSER (RDMA) on {}", portal.addr_port),
+        };
+    }
+    let iser_portals: Vec<_> = target.portals.iter().filter(|p| p.iser).collect();
+    let rdma_problem = match (export.want_rdma, iser_portals.is_empty()) {
+        (false, _) => "RDMA (iSER) not requested for this export".to_owned(),
+        (true, true) => "RDMA requested but no iSER portal exists".to_owned(),
+        (true, false) => {
+            format!(
+                "no RDMA device backs iSER portal {}",
+                iser_portals[0].addr_port
+            )
+        }
+    };
+    if target.portals.iter().any(|p| !p.iser) {
+        Dot {
+            state: DotState::Yellow,
+            reason: format!("serving via plain iSCSI/TCP — {rdma_problem}"),
+        }
+    } else {
+        red(format!("no usable portal — {rdma_problem}"))
     }
 }
 
@@ -248,6 +307,111 @@ mod tests {
         #[case] reason_contains: &str,
     ) {
         let dot = nvme_dot(&export, &actual, &rdma);
+        assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
+        assert!(
+            dot.reason
+                .to_lowercase()
+                .contains(&reason_contains.to_lowercase()),
+            "reason {:?} should mention {:?}",
+            dot.reason,
+            reason_contains
+        );
+    }
+
+    use crate::actual::lio::{ActualLio, Backstore, Portal, Target};
+
+    const IQN: &str = "iqn.2026-06.io.greendot:vm1";
+
+    fn lio(
+        backstore_dev: Option<&str>,
+        tpg_enabled: bool,
+        lun_mapped: bool,
+        portals: Vec<Portal>,
+    ) -> ActualLio {
+        ActualLio {
+            backstores: backstore_dev
+                .map(|dev| {
+                    vec![Backstore {
+                        name: "vm1".into(),
+                        udev_path: dev.into(),
+                        enabled: true,
+                    }]
+                })
+                .unwrap_or_default(),
+            targets: vec![Target {
+                iqn: IQN.into(),
+                enabled: tpg_enabled,
+                demo_mode: false,
+                luns: if lun_mapped {
+                    vec!["vm1".into()]
+                } else {
+                    vec![]
+                },
+                portals,
+                acls: vec![],
+            }],
+        }
+    }
+
+    fn portal(addr_port: &str, iser: bool) -> Portal {
+        Portal {
+            addr_port: addr_port.into(),
+            iser,
+        }
+    }
+
+    #[rstest]
+    #[case::green_iser(
+        export(true, true, None),
+        lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true)]),
+        vec![rdma_dev("10.0.0.5")],
+        DotState::Green, "iser"
+    )]
+    #[case::yellow_plain_tcp(
+        export(false, true, None),
+        lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", false)]),
+        vec![],
+        DotState::Yellow, "not requested"
+    )]
+    #[case::yellow_iser_unbacked(
+        export(true, true, None),
+        lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true), portal("10.0.0.5:3261", false)]),
+        vec![],
+        DotState::Yellow, "no RDMA device"
+    )]
+    #[case::red_no_backstore(
+        export(true, true, None),
+        lio(None, true, true, vec![portal("10.0.0.5:3260", true)]),
+        vec![rdma_dev("10.0.0.5")],
+        DotState::Red, "backstore"
+    )]
+    #[case::red_tpg_disabled(
+        export(true, true, None),
+        lio(Some(DEV), false, true, vec![portal("10.0.0.5:3260", true)]),
+        vec![rdma_dev("10.0.0.5")],
+        DotState::Red, "disabled"
+    )]
+    #[case::red_lun_unmapped(
+        export(true, true, None),
+        lio(Some(DEV), true, false, vec![portal("10.0.0.5:3260", true)]),
+        vec![rdma_dev("10.0.0.5")],
+        DotState::Red, "LUN"
+    )]
+    #[case::red_no_portals(
+        export(true, true, None),
+        lio(Some(DEV), true, true, vec![]),
+        vec![rdma_dev("10.0.0.5")],
+        DotState::Red, "portal"
+    )]
+    fn iscsi_dot_truth_table(
+        #[case] mut export: Export,
+        #[case] actual: ActualLio,
+        #[case] rdma: Vec<RdmaDev>,
+        #[case] want_state: DotState,
+        #[case] reason_contains: &str,
+    ) {
+        export.kind = crate::state::ExportKind::Iscsi;
+        let dot = iscsi_dot(&export, &actual, &rdma);
         assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
         assert!(
             dot.reason

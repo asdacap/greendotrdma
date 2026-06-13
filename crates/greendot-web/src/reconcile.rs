@@ -4,9 +4,10 @@
 //! idempotent, so the plan can always be replayed. Subsystems we manage are
 //! recognized by [`OUR_NQN_PREFIX`]; anything else in configfs is left alone.
 
+use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
-use crate::state::{Export, ExportKind, OUR_NQN_PREFIX};
-use greendot_proto::{DevicePath, KernelModule, Nqn, Request, Transport};
+use crate::state::{Export, ExportKind, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+use greendot_proto::{BackstoreName, DevicePath, Iqn, KernelModule, Nqn, Request, Transport};
 use std::net::IpAddr;
 
 /// Fixed nvmet port ids, one per transport.
@@ -185,10 +186,156 @@ pub fn plan(exports: &[Export], actual: &ActualNvmet, cfg: &PortConfig) -> Vec<R
     requests
 }
 
-/// Which export (by NQN) a failed request should be blamed on; None means
-/// the failure is global (modules, ports).
-fn request_nqn(req: &Request) -> Option<&Nqn> {
-    match req {
+/// iSCSI desired state → helper requests. Same contract as `plan()`.
+pub fn plan_iscsi(exports: &[Export], actual: &ActualLio, cfg: &PortConfig) -> Vec<Request> {
+    let desired: Vec<&Export> = exports
+        .iter()
+        .filter(|e| e.kind == ExportKind::Iscsi && e.enabled)
+        .collect();
+    let mut requests = Vec::new();
+
+    if !desired.is_empty() {
+        let mut modules = vec![KernelModule::Iscsi];
+        if desired.iter().any(|e| e.want_rdma) {
+            modules.push(KernelModule::Iser);
+        }
+        requests.push(Request::EnsureModules { modules });
+    }
+
+    for e in &desired {
+        let iqn = e.iqn();
+        let (Ok(device_path), Ok(backstore)) =
+            (DevicePath::new(&e.device_path), BackstoreName::new(&e.name))
+        else {
+            tracing::error!(
+                export = e.name,
+                "invalid device path or backstore name in store"
+            );
+            continue;
+        };
+        requests.push(Request::LioBackstoreCreate {
+            name: backstore.clone(),
+            device_path,
+        });
+        requests.push(Request::LioTargetCreate { iqn: iqn.clone() });
+        requests.push(Request::LioLunMap {
+            iqn: iqn.clone(),
+            lun: 0,
+            backstore,
+        });
+
+        // Desired portals: iSER on 3260 when RDMA is wanted; plain TCP on
+        // 3260, or on 3261 when it must coexist with the iSER portal.
+        let mut want: Vec<(u16, bool)> = Vec::new();
+        if e.want_rdma {
+            want.push((3260, true));
+        }
+        if e.want_tcp {
+            want.push((if e.want_rdma { 3261 } else { 3260 }, false));
+        }
+        let target = actual.targets.iter().find(|t| t.iqn == iqn.as_str());
+        let current = target.map(|t| t.portals.as_slice()).unwrap_or_default();
+        let addr = cfg.listen_addr;
+        let dirname = |port: u16| match addr {
+            IpAddr::V4(v4) => format!("{v4}:{port}"),
+            IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+        };
+        for portal in current {
+            let keep = want
+                .iter()
+                .any(|(port, iser)| portal.addr_port == dirname(*port) && portal.iser == *iser);
+            if !keep {
+                // addr may have changed; parse what we can, skip junk
+                if let (addr_str, Some(port)) = (
+                    portal.addr().to_owned(),
+                    portal
+                        .addr_port
+                        .rsplit_once(':')
+                        .and_then(|(_, p)| p.parse::<u16>().ok()),
+                ) && let Ok(addr) = addr_str.parse()
+                {
+                    requests.push(Request::LioPortalDelete {
+                        iqn: iqn.clone(),
+                        addr,
+                        port,
+                    });
+                }
+            }
+        }
+        for (port, iser) in &want {
+            if !current
+                .iter()
+                .any(|p| p.addr_port == dirname(*port) && p.iser == *iser)
+            {
+                requests.push(Request::LioPortalSet {
+                    iqn: iqn.clone(),
+                    addr,
+                    port: *port,
+                    iser: *iser,
+                });
+            }
+        }
+
+        let current_acls: &[String] = target.map(|t| t.acls.as_slice()).unwrap_or_default();
+        if !e.allow_any_host {
+            for initiator in &e.initiators {
+                if !current_acls.contains(initiator)
+                    && let Ok(initiator) = Iqn::new(initiator.clone())
+                {
+                    requests.push(Request::LioAclAdd {
+                        iqn: iqn.clone(),
+                        initiator,
+                    });
+                }
+            }
+        }
+        for acl in current_acls {
+            if (e.allow_any_host || !e.initiators.contains(acl))
+                && let Ok(initiator) = Iqn::new(acl.clone())
+            {
+                requests.push(Request::LioAclRemove {
+                    iqn: iqn.clone(),
+                    initiator,
+                });
+            }
+        }
+
+        requests.push(Request::LioTpgSet {
+            iqn,
+            enabled: true,
+            demo_mode: e.allow_any_host,
+            auth: None,
+        });
+    }
+
+    // Tear down our targets (and their same-named backstores) that no
+    // enabled export wants. A stray backstore without a target lingers
+    // until an export of the same name is recreated — acceptable.
+    for target in &actual.targets {
+        if !target.iqn.starts_with(OUR_IQN_PREFIX)
+            || desired.iter().any(|e| e.iqn().as_str() == target.iqn)
+        {
+            continue;
+        }
+        let Ok(iqn) = Iqn::new(target.iqn.clone()) else {
+            continue;
+        };
+        requests.push(Request::LioTargetDelete { iqn });
+        if let Some(name) = target.iqn.strip_prefix(OUR_IQN_PREFIX)
+            && let Ok(backstore) = BackstoreName::new(name)
+            && actual.backstores.iter().any(|b| b.name == name)
+        {
+            requests.push(Request::LioBackstoreDelete { name: backstore });
+        }
+    }
+
+    requests
+}
+
+/// Which export a failed request should be blamed on (its NQN/IQN); None
+/// means the failure is global (modules, ports).
+fn request_key(req: &Request) -> Option<String> {
+    let nqn = match req {
         Request::NvmetSubsysCreate { nqn, .. }
         | Request::NvmetSubsysDelete { nqn }
         | Request::NvmetNamespaceSet { nqn, .. }
@@ -196,9 +343,25 @@ fn request_nqn(req: &Request) -> Option<&Nqn> {
         | Request::NvmetPortLink { nqn, .. }
         | Request::NvmetPortUnlink { nqn, .. }
         | Request::NvmetHostAllow { nqn, .. }
-        | Request::NvmetHostRemove { nqn, .. } => Some(nqn),
+        | Request::NvmetHostRemove { nqn, .. } => Some(nqn.as_str()),
         _ => None,
-    }
+    };
+    let iqn = match req {
+        Request::LioTargetCreate { iqn }
+        | Request::LioTargetDelete { iqn }
+        | Request::LioLunMap { iqn, .. }
+        | Request::LioPortalSet { iqn, .. }
+        | Request::LioPortalDelete { iqn, .. }
+        | Request::LioAclAdd { iqn, .. }
+        | Request::LioAclRemove { iqn, .. }
+        | Request::LioTpgSet { iqn, .. } => Some(iqn.as_str()),
+        // Backstores are named after the export; blame via the IQN prefix.
+        Request::LioBackstoreCreate { name, .. } | Request::LioBackstoreDelete { name } => {
+            return Some(format!("{OUR_IQN_PREFIX}{name}"));
+        }
+        _ => None,
+    };
+    nqn.or(iqn).map(ToOwned::to_owned)
 }
 
 pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
@@ -209,18 +372,23 @@ pub async fn run(
     db: &crate::state::Db,
     helper: &crate::helper_client::HelperClient,
     nvmet_root: &std::path::Path,
+    lio_root: &std::path::Path,
     cfg: &PortConfig,
 ) -> anyhow::Result<()> {
     use std::collections::HashMap;
 
     let exports = db.list_exports()?;
-    let actual = crate::actual::nvmet::read(nvmet_root);
-    let requests = plan(&exports, &actual, cfg);
+    let mut requests = plan(&exports, &crate::actual::nvmet::read(nvmet_root), cfg);
+    requests.extend(plan_iscsi(
+        &exports,
+        &crate::actual::lio::read(lio_root),
+        cfg,
+    ));
 
     let mut errors: HashMap<String, String> = HashMap::new();
     let mut global_error = None;
     for req in requests {
-        let blame = request_nqn(&req).map(|n| n.as_str().to_owned());
+        let blame = request_key(&req);
         let failure = match helper.call(req).await {
             Ok(greendot_proto::Response::Err { message, .. }) => Some(message),
             Err(e) => Some(format!("helper unavailable: {e:#}")),
@@ -238,10 +406,10 @@ pub async fn run(
             }
         }
     }
-    for export in exports.iter().filter(|e| e.kind == ExportKind::Nvme) {
+    for export in &exports {
         db.set_export_error(
             export.id,
-            errors.get(export.nqn().as_str()).map(String::as_str),
+            errors.get(&export.qualified_name()).map(String::as_str),
         )?;
     }
     db.set_setting(RECONCILE_ERROR_KEY, global_error.as_deref().unwrap_or(""))?;
@@ -316,6 +484,133 @@ mod tests {
                 enabled: true,
             }],
         }
+    }
+
+    #[test]
+    fn iscsi_fresh_creation_drift_and_teardown() {
+        use crate::actual::lio::{ActualLio, Backstore, Portal, Target};
+        let iqn_s = "iqn.2026-06.io.greendot:vm1";
+        let iqn = |s: &str| Iqn::new(s).unwrap();
+        let mut e = export();
+        e.kind = ExportKind::Iscsi;
+        e.initiators = vec!["iqn.1993-08.org.debian:01:abc".into()];
+        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+
+        // Fresh: full creation, iSER on 3260, TCP coexisting on 3261.
+        let requests = plan_iscsi(&[e.clone()], &ActualLio::default(), &cfg());
+        assert_eq!(
+            requests,
+            vec![
+                Request::EnsureModules {
+                    modules: vec![KernelModule::Iscsi, KernelModule::Iser]
+                },
+                Request::LioBackstoreCreate {
+                    name: BackstoreName::new("vm1").unwrap(),
+                    device_path: DevicePath::new(DEV).unwrap(),
+                },
+                Request::LioTargetCreate { iqn: iqn(iqn_s) },
+                Request::LioLunMap {
+                    iqn: iqn(iqn_s),
+                    lun: 0,
+                    backstore: BackstoreName::new("vm1").unwrap()
+                },
+                Request::LioPortalSet {
+                    iqn: iqn(iqn_s),
+                    addr,
+                    port: 3260,
+                    iser: true
+                },
+                Request::LioPortalSet {
+                    iqn: iqn(iqn_s),
+                    addr,
+                    port: 3261,
+                    iser: false
+                },
+                Request::LioAclAdd {
+                    iqn: iqn(iqn_s),
+                    initiator: iqn("iqn.1993-08.org.debian:01:abc")
+                },
+                Request::LioTpgSet {
+                    iqn: iqn(iqn_s),
+                    enabled: true,
+                    demo_mode: false,
+                    auth: None
+                },
+            ]
+        );
+
+        // Converged except a stale portal and a stray target of ours.
+        let actual = ActualLio {
+            backstores: vec![Backstore {
+                name: "vm1".into(),
+                udev_path: DEV.into(),
+                enabled: true,
+            }],
+            targets: vec![
+                Target {
+                    iqn: iqn_s.into(),
+                    enabled: true,
+                    demo_mode: false,
+                    luns: vec!["vm1".into()],
+                    portals: vec![
+                        Portal {
+                            addr_port: "10.0.0.5:3260".into(),
+                            iser: true,
+                        },
+                        Portal {
+                            addr_port: "10.0.0.5:3261".into(),
+                            iser: false,
+                        },
+                        Portal {
+                            addr_port: "192.168.9.9:3260".into(),
+                            iser: false,
+                        }, // stale
+                    ],
+                    acls: vec!["iqn.1993-08.org.debian:01:abc".into()],
+                },
+                Target {
+                    iqn: "iqn.2026-06.io.greendot:gone".into(),
+                    enabled: true,
+                    demo_mode: true,
+                    luns: vec![],
+                    portals: vec![],
+                    acls: vec![],
+                },
+            ],
+        };
+        let requests = plan_iscsi(&[e], &actual, &cfg());
+        assert_eq!(
+            requests,
+            vec![
+                Request::EnsureModules {
+                    modules: vec![KernelModule::Iscsi, KernelModule::Iser]
+                },
+                Request::LioBackstoreCreate {
+                    name: BackstoreName::new("vm1").unwrap(),
+                    device_path: DevicePath::new(DEV).unwrap(),
+                },
+                Request::LioTargetCreate { iqn: iqn(iqn_s) },
+                Request::LioLunMap {
+                    iqn: iqn(iqn_s),
+                    lun: 0,
+                    backstore: BackstoreName::new("vm1").unwrap()
+                },
+                Request::LioPortalDelete {
+                    iqn: iqn(iqn_s),
+                    addr: "192.168.9.9".parse().unwrap(),
+                    port: 3260
+                },
+                Request::LioTpgSet {
+                    iqn: iqn(iqn_s),
+                    enabled: true,
+                    demo_mode: false,
+                    auth: None
+                },
+                Request::LioTargetDelete {
+                    iqn: iqn("iqn.2026-06.io.greendot:gone")
+                },
+            ]
+        );
     }
 
     #[test]

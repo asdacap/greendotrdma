@@ -10,6 +10,7 @@ pub struct Config {
     pub helper_socket: PathBuf,
     pub db_path: PathBuf,
     pub nvmet_root: PathBuf,
+    pub lio_root: PathBuf,
     pub tls_cert: Option<PathBuf>,
     pub tls_key: Option<PathBuf>,
 }
@@ -21,6 +22,7 @@ impl Default for Config {
             helper_socket: "/run/greendotrdma/helper.sock".into(),
             db_path: "/var/lib/greendotrdma/state.db".into(),
             nvmet_root: "/sys/kernel/config/nvmet".into(),
+            lio_root: "/sys/kernel/config/target".into(),
             tls_cert: None,
             tls_key: None,
         }

@@ -2,7 +2,7 @@
 //! `Request` variant handled here.
 
 use crate::cmd::Runner;
-use crate::{modules, nvmet, pam, zfs};
+use crate::{lio, modules, nvmet, pam, zfs};
 use greendot_proto::{ErrKind, Request, Response};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -12,6 +12,7 @@ pub struct Ctx {
     pub auth_limiter: Mutex<pam::RateLimiter>,
     pub runner: Box<dyn Runner>,
     pub nvmet_root: PathBuf,
+    pub lio_root: PathBuf,
     /// Serializes all mutating operations so configfs changes never interleave.
     pub mutate_lock: Mutex<()>,
 }
@@ -75,6 +76,38 @@ pub fn dispatch(ctx: &Ctx, req: Request) -> Response {
                 Request::NvmetHostRemove { nqn, host_nqn } => {
                     nvmet::host_remove(&ctx.nvmet_root, &nqn, &host_nqn)
                 }
+                Request::LioBackstoreCreate { name, device_path } => {
+                    lio::backstore_create(&ctx.lio_root, &name, &device_path)
+                }
+                Request::LioBackstoreDelete { name } => lio::backstore_delete(&ctx.lio_root, &name),
+                Request::LioTargetCreate { iqn } => lio::target_create(&ctx.lio_root, &iqn),
+                Request::LioTargetDelete { iqn } => lio::target_delete(&ctx.lio_root, &iqn),
+                Request::LioLunMap {
+                    iqn,
+                    lun,
+                    backstore,
+                } => lio::lun_map(&ctx.lio_root, &iqn, lun, &backstore),
+                Request::LioPortalSet {
+                    iqn,
+                    addr,
+                    port,
+                    iser,
+                } => lio::portal_set(&ctx.lio_root, &iqn, addr, port, iser),
+                Request::LioPortalDelete { iqn, addr, port } => {
+                    lio::portal_delete(&ctx.lio_root, &iqn, addr, port)
+                }
+                Request::LioAclAdd { iqn, initiator } => {
+                    lio::acl_add(&ctx.lio_root, &iqn, &initiator)
+                }
+                Request::LioAclRemove { iqn, initiator } => {
+                    lio::acl_remove(&ctx.lio_root, &iqn, &initiator)
+                }
+                Request::LioTpgSet {
+                    iqn,
+                    enabled,
+                    demo_mode,
+                    auth,
+                } => lio::tpg_set(&ctx.lio_root, &iqn, enabled, demo_mode, auth.as_ref()),
                 Request::EnsureModules { modules: list } => modules::ensure(runner, &list),
                 Request::RxeLinkAdd { netdev } => modules::rxe_link_add(runner, &netdev),
                 other => Response::err(

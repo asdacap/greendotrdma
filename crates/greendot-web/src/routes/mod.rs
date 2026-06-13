@@ -26,6 +26,7 @@ pub struct AppState {
     pub secure_cookies: bool,
     pub db: crate::state::Db,
     pub nvmet_root: std::path::PathBuf,
+    pub lio_root: std::path::PathBuf,
     /// Serializes reconcile passes (UI actions vs the periodic task).
     pub reconcile_lock: tokio::sync::Mutex<()>,
 }
@@ -150,6 +151,7 @@ pub(crate) mod testutil {
             sessions: Sessions::new(Duration::from_secs(3600)),
             secure_cookies: false,
             db: crate::state::Db::in_memory().unwrap(),
+            lio_root: nvmet_root.join("lio"),
             nvmet_root,
             reconcile_lock: tokio::sync::Mutex::new(()),
         }))

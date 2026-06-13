@@ -1,6 +1,6 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
-use crate::dot::nvme_dot;
+use crate::dot::{iscsi_dot, nvme_dot};
 use crate::reconcile::RECONCILE_ERROR_KEY;
 use crate::state::{ExportKind, NewExport};
 use crate::{actual, reconcile};
@@ -35,12 +35,20 @@ pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
         listen_addr,
         trsvcid: 4420,
     };
-    reconcile::run(&state.db, &state.helper, &state.nvmet_root, &cfg).await
+    reconcile::run(
+        &state.db,
+        &state.helper,
+        &state.nvmet_root,
+        &state.lio_root,
+        &cfg,
+    )
+    .await
 }
 
 pub struct ExportRow {
     pub id: i64,
     pub name: String,
+    pub protocol: &'static str,
     pub dot_class: &'static str,
     pub dot_reason: String,
     pub device: String,
@@ -70,6 +78,7 @@ pub async fn gather(
         form_error,
     };
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
+    let actual_lio = actual::lio::read(&state.lio_root);
     let rdma = actual::rdma::devices();
     match state.db.list_exports() {
         Ok(exports) => {
@@ -79,7 +88,10 @@ pub async fn gather(
                     let (dot_class, dot_reason) = if !e.enabled {
                         ("dot-gray", "disabled".to_owned())
                     } else {
-                        let dot = nvme_dot(e, &actual_nvmet, &rdma);
+                        let dot = match e.kind {
+                            ExportKind::Nvme => nvme_dot(e, &actual_nvmet, &rdma),
+                            ExportKind::Iscsi => iscsi_dot(e, &actual_lio, &rdma),
+                        };
                         let class = match dot.state {
                             DotState::Green => "dot-green",
                             DotState::Yellow => "dot-yellow",
@@ -100,6 +112,10 @@ pub async fn gather(
                     ExportRow {
                         id: e.id,
                         name: e.name.clone(),
+                        protocol: match e.kind {
+                            ExportKind::Nvme => "NVMe-oF",
+                            ExportKind::Iscsi => "iSCSI",
+                        },
                         dot_class,
                         dot_reason,
                         device: e.device_path.clone(),
@@ -181,6 +197,8 @@ struct CreateForm {
     name: String,
     device: String,
     #[serde(default)]
+    kind: String,
+    #[serde(default)]
     want_rdma: Option<String>,
     #[serde(default)]
     want_tcp: Option<String>,
@@ -208,6 +226,10 @@ async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>
     let Ok(device) = DevicePath::new(form.device.trim()) else {
         return view_err(format!("invalid device path {:?}", form.device)).await;
     };
+    let kind = match form.kind.as_str() {
+        "iscsi" => ExportKind::Iscsi,
+        _ => ExportKind::Nvme,
+    };
     let initiators: Vec<String> = form
         .initiators
         .lines()
@@ -215,15 +237,19 @@ async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>
         .filter(|l| !l.is_empty())
         .map(Into::into)
         .collect();
-    if let Some(bad) = initiators.iter().find(|i| Nqn::new((*i).clone()).is_err()) {
-        return view_err(format!("invalid initiator NQN {bad:?}")).await;
+    let bad = initiators.iter().find(|i| match kind {
+        ExportKind::Nvme => Nqn::new((*i).clone()).is_err(),
+        ExportKind::Iscsi => greendot_proto::Iqn::new((*i).clone()).is_err(),
+    });
+    if let Some(bad) = bad {
+        return view_err(format!("invalid initiator name {bad:?}")).await;
     }
     let allow_any_host = form.allow_any_host.is_some() || initiators.is_empty();
     if !(form.want_rdma.is_some() || form.want_tcp.is_some() || form.want_loop.is_some()) {
         return view_err("select at least one transport".into()).await;
     }
     let new = NewExport {
-        kind: ExportKind::Nvme,
+        kind,
         name: name.to_string(),
         device_path: device.to_string(),
         want_rdma: form.want_rdma.is_some(),
@@ -306,6 +332,22 @@ mod tests {
         );
         assert!(body.contains("RDMA + TCP"), "{body}");
 
+        // iSCSI export with an IQN initiator works and shows its protocol.
+        let req = auth(form_post(
+            "/exports/create",
+            "kind=iscsi&name=tape&device=%2Fdev%2Fzvol%2Ftank%2Ftape&want_rdma=1&initiators=iqn.1993-08.org.debian%3A01%3Aabc",
+        ));
+        let (_, _, body) = send(&app, req).await;
+        assert!(body.contains("created export tape"), "{body}");
+        assert!(body.contains("iSCSI"), "{body}");
+        // ...but an NQN-style initiator on an iSCSI export is rejected.
+        let req = auth(form_post(
+            "/exports/create",
+            "kind=iscsi&name=bad&device=%2Fdev%2Fsda&want_tcp=1&initiators=nqn.2014-08.org.nvmexpress%3Ahost1",
+        ));
+        let (_, _, body) = send(&app, req).await;
+        assert!(body.contains("invalid initiator name"), "{body}");
+
         // Bad device path rejected.
         let req = auth(form_post(
             "/exports/create",
@@ -332,6 +374,11 @@ mod tests {
         .await;
         assert!(body.contains("dot-gray"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/exports/delete", "id=1"))).await;
+        assert!(
+            body.contains("tape"),
+            "iSCSI export must survive deleting the other: {body}"
+        );
+        let (_, _, body) = send(&app, auth(form_post("/exports/delete", "id=2"))).await;
         assert!(body.contains("No exports yet"), "{body}");
     }
 }

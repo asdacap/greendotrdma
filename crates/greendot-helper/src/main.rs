@@ -3,6 +3,7 @@
 
 mod cmd;
 mod dispatch;
+mod lio;
 mod modules;
 mod nvmet;
 mod pam;
@@ -27,6 +28,7 @@ struct Opts {
     pam_service: String,
     admin_group: String,
     nvmet_root: PathBuf,
+    lio_root: PathBuf,
 }
 
 impl Opts {
@@ -38,6 +40,7 @@ impl Opts {
             pam_service: "greendotrdma".into(),
             admin_group: "greendot-admin".into(),
             nvmet_root: "/sys/kernel/config/nvmet".into(),
+            lio_root: "/sys/kernel/config/target".into(),
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -48,6 +51,7 @@ impl Opts {
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
                 "--nvmet-root" => opts.nvmet_root = value()?.into(),
+                "--lio-root" => opts.lio_root = value()?.into(),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -91,6 +95,7 @@ fn main() -> Result<()> {
         )),
         runner: Box::new(cmd::SystemRunner),
         nvmet_root: opts.nvmet_root,
+        lio_root: opts.lio_root,
         mutate_lock: std::sync::Mutex::new(()),
     });
     let active = Arc::new(AtomicUsize::new(0));
