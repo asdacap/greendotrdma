@@ -6,7 +6,7 @@ use askama::Template;
 use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, Request, Response as HelperResponse};
+use greendot_proto::{DatasetName, Request};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -129,13 +129,15 @@ pub fn parse_size(value: &str, unit: &str) -> Option<u64> {
     value.checked_mul(mult).filter(|&b| b > 0)
 }
 
-/// Renders the partial after a mutation, reporting the helper outcome.
-async fn after_mutation(result: anyhow::Result<HelperResponse>, success: String) -> Response {
-    let view = match result {
-        Ok(HelperResponse::Ok) => gather(Some(success), None).await,
-        Ok(HelperResponse::Err { message, .. }) => gather(None, Some(message)).await,
-        Ok(other) => gather(None, Some(format!("unexpected helper response: {other:?}"))).await,
-        Err(e) => gather(None, Some(format!("helper unavailable: {e:#}"))).await,
+/// Runs the request as a recorded task and renders the partial with its
+/// outcome.
+async fn run(state: &AppState, req: Request, kind: &str, title: &str, success: String) -> Response {
+    let view = match crate::task_runner::run(state, req, kind, title).await {
+        Ok(outcome) => {
+            let (flash, error) = outcome.message(&success);
+            gather(flash, error).await
+        }
+        Err(e) => gather(None, Some(format!("{e:#}"))).await,
     };
     page(ZfsPartial { view })
 }
@@ -178,8 +180,11 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
         volblocksize,
         sparse: form.sparse.is_some(),
     };
-    after_mutation(
-        state.helper.call(req).await,
+    run(
+        &state,
+        req,
+        "zvol-create",
+        &format!("create zvol {dataset}"),
         format!("created zvol {dataset}"),
     )
     .await
@@ -203,7 +208,14 @@ async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<Resize
         dataset: dataset.clone(),
         new_size,
     };
-    after_mutation(state.helper.call(req).await, format!("resized {dataset}")).await
+    run(
+        &state,
+        req,
+        "zvol-resize",
+        &format!("resize {dataset}"),
+        format!("resized {dataset}"),
+    )
+    .await
 }
 
 #[derive(Deserialize)]
@@ -218,7 +230,14 @@ async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<Delete
     let req = Request::ZvolDelete {
         dataset: dataset.clone(),
     };
-    after_mutation(state.helper.call(req).await, format!("deleted {dataset}")).await
+    run(
+        &state,
+        req,
+        "zvol-delete",
+        &format!("delete {dataset}"),
+        format!("deleted {dataset}"),
+    )
+    .await
 }
 
 #[cfg(test)]

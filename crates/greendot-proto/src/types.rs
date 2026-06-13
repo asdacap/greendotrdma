@@ -1,6 +1,7 @@
 use crate::validate;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
@@ -96,6 +97,9 @@ validated_string!(
 validated_string!(
     /// Short export name; becomes the NQN/IQN suffix.
     ExportName, validate::export_name, "export name");
+validated_string!(
+    /// A Debian/Ubuntu package name (for the install task).
+    PackageName, validate::package_name, "package name");
 
 /// A string whose Debug/Display output must never leak (passwords).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,6 +159,131 @@ pub enum DotState {
     /// Not served.
     Red,
 }
+
+// ---- Desired-state documents (rendered to nvmetcli / targetctl JSON by the
+// helper and applied via their restore commands) ----
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvmetDesired {
+    pub subsystems: Vec<NvmetSubsysSpec>,
+    pub ports: Vec<NvmetPortSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvmetSubsysSpec {
+    pub nqn: Nqn,
+    pub allow_any_host: bool,
+    pub allowed_hosts: Vec<Nqn>,
+    pub namespaces: Vec<NvmetNsSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvmetNsSpec {
+    pub nsid: u32,
+    pub device_path: DevicePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NvmetPortSpec {
+    pub id: u16,
+    pub trtype: Transport,
+    pub traddr: IpAddr,
+    pub trsvcid: u16,
+    /// NQNs linked to this port.
+    pub subsystems: Vec<Nqn>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LioDesired {
+    pub backstores: Vec<LioBackstoreSpec>,
+    pub targets: Vec<LioTargetSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LioBackstoreSpec {
+    pub name: BackstoreName,
+    pub device_path: DevicePath,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LioTargetSpec {
+    pub iqn: Iqn,
+    pub enabled: bool,
+    pub demo_mode: bool,
+    pub luns: Vec<LioLunSpec>,
+    pub portals: Vec<LioPortalSpec>,
+    pub acls: Vec<Iqn>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LioLunSpec {
+    pub lun: u32,
+    pub backstore: BackstoreName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LioPortalSpec {
+    pub addr: IpAddr,
+    pub port: u16,
+    pub iser: bool,
+}
+
+// ---- Task streaming ----
+
+/// Frames the helper streams back while running a task (one CLI command).
+/// Terminated by exactly one `Finished`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "ev", rename_all = "snake_case")]
+pub enum TaskEvent {
+    /// The exact command being run; `stdin` is the input fed to it, if any.
+    Started {
+        command: String,
+        args: Vec<String>,
+        stdin: Option<String>,
+    },
+    Stdout {
+        data: String,
+    },
+    Stderr {
+        data: String,
+    },
+    /// `error` is set for spawn failures (e.g. the CLI is not installed) and
+    /// carries a human-actionable message; `ok` is the overall success.
+    Finished {
+        exit: i32,
+        ok: bool,
+        error: Option<String>,
+    },
+}
+
+/// Maps a required CLI to the Debian/Ubuntu package that provides it. Used
+/// both for the "not installed" hint and the install task.
+pub fn package_for_cli(cli: &str) -> Option<&'static str> {
+    Some(match cli {
+        "zfs" | "zpool" => "zfsutils-linux",
+        "sfdisk" | "lsblk" => "util-linux",
+        "modprobe" => "kmod",
+        "rdma" => "iproute2",
+        "nvme" => "nvme-cli",
+        "nvmetcli" => "nvmetcli",
+        "targetcli" | "targetctl" => "targetcli-fb",
+        "apt-get" => "apt",
+        _ => return None,
+    })
+}
+
+/// Every CLI GreenDotRDMA may invoke, for the dependency panel.
+pub const REQUIRED_CLIS: &[&str] = &[
+    "zfs",
+    "zpool",
+    "sfdisk",
+    "lsblk",
+    "modprobe",
+    "rdma",
+    "nvme",
+    "nvmetcli",
+    "targetctl",
+];
 
 #[cfg(test)]
 mod tests {
@@ -288,6 +417,31 @@ mod tests {
     #[case::leading_dash("-vm", false)]
     fn export_name(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(ExportName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::simple("nvmetcli", true)]
+    #[case::fb("targetcli-fb", true)]
+    #[case::plus("libstdc++6", true)]
+    #[case::empty("", false)]
+    #[case::space("a b", false)]
+    #[case::uppercase("Nvmetcli", false)]
+    #[case::shell_meta("foo;rm", false)]
+    fn package_name(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(PackageName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[test]
+    fn cli_to_package_map() {
+        assert_eq!(package_for_cli("nvmetcli"), Some("nvmetcli"));
+        assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
+        assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
+        assert_eq!(package_for_cli("nonesuch"), None);
+        // every required CLI maps to a valid package name
+        for cli in REQUIRED_CLIS {
+            let pkg = package_for_cli(cli).unwrap_or_else(|| panic!("no package for {cli}"));
+            assert!(PackageName::new(pkg).is_ok(), "{pkg}");
+        }
     }
 
     #[rstest]

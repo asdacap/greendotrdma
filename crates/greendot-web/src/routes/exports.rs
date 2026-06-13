@@ -23,26 +23,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/partials/exports", get(dots_partial))
 }
 
-/// Serialized full reconcile against current desired state.
+/// Serialized full reconcile against current desired state. Emits helper tasks
+/// only when actual configfs has drifted from desired.
 pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
     let _guard = state.reconcile_lock.lock().await;
-    let listen_addr = state
-        .db
-        .get_setting("listen_addr")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
-    let cfg = reconcile::PortConfig {
-        listen_addr,
-        trsvcid: 4420,
-    };
-    reconcile::run(
-        &state.db,
-        &state.helper,
-        &state.nvmet_root,
-        &state.lio_root,
-        &cfg,
-    )
-    .await
+    reconcile::run(state).await
 }
 
 pub struct ExportRow {

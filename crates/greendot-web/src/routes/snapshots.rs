@@ -8,7 +8,7 @@ use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{DatasetName, Request, Response as HelperResponse, SnapName};
+use greendot_proto::{DatasetName, Request, SnapName};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -287,21 +287,13 @@ async fn manual_snapshot(
         dataset: dataset.clone(),
         snap: snap.clone(),
     };
-    match state.helper.call(req).await {
-        Ok(HelperResponse::Ok) => {
-            render(&state, Some(format!("created {dataset}@{snap}")), None).await
-        }
-        Ok(HelperResponse::Err { message, .. }) => render(&state, None, Some(message)).await,
-        Ok(other) => {
-            render(
-                &state,
-                None,
-                Some(format!("unexpected response: {other:?}")),
-            )
-            .await
-        }
-        Err(e) => render(&state, None, Some(format!("helper unavailable: {e:#}"))).await,
-    }
+    let title = format!("snapshot {dataset}@{snap}");
+    let (flash, error) = match crate::task_runner::run(&state, req, "snapshot-create", &title).await
+    {
+        Ok(o) => o.message(&format!("created {dataset}@{snap}")),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+    render(&state, flash, error).await
 }
 
 #[derive(Deserialize)]
@@ -321,21 +313,13 @@ async fn snapshot_delete(
         return render(&state, None, Some("invalid snapshot name".into())).await;
     };
     let req = Request::SnapshotDestroy { dataset, snap };
-    match state.helper.call(req).await {
-        Ok(HelperResponse::Ok) => {
-            render(&state, Some(format!("destroyed {}", form.name)), None).await
-        }
-        Ok(HelperResponse::Err { message, .. }) => render(&state, None, Some(message)).await,
-        Ok(other) => {
-            render(
-                &state,
-                None,
-                Some(format!("unexpected response: {other:?}")),
-            )
-            .await
-        }
-        Err(e) => render(&state, None, Some(format!("helper unavailable: {e:#}"))).await,
-    }
+    let title = format!("destroy {}", form.name);
+    let (flash, error) =
+        match crate::task_runner::run(&state, req, "snapshot-destroy", &title).await {
+            Ok(o) => o.message(&format!("destroyed {}", form.name)),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+    render(&state, flash, error).await
 }
 
 #[cfg(test)]

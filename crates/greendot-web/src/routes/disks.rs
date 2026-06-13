@@ -7,7 +7,7 @@ use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{BlockDev, PartLabel, Request, Response as HelperResponse};
+use greendot_proto::{BlockDev, PartLabel, Request};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -100,12 +100,13 @@ async fn disks_page(
     })
 }
 
-async fn after_mutation(result: anyhow::Result<HelperResponse>, success: String) -> Response {
-    let view = match result {
-        Ok(HelperResponse::Ok) => gather(Some(success), None).await,
-        Ok(HelperResponse::Err { message, .. }) => gather(None, Some(message)).await,
-        Ok(other) => gather(None, Some(format!("unexpected helper response: {other:?}"))).await,
-        Err(e) => gather(None, Some(format!("helper unavailable: {e:#}"))).await,
+async fn run(state: &AppState, req: Request, kind: &str, title: &str, success: String) -> Response {
+    let view = match crate::task_runner::run(state, req, kind, title).await {
+        Ok(outcome) => {
+            let (flash, error) = outcome.message(&success);
+            gather(flash, error).await
+        }
+        Err(e) => gather(None, Some(format!("{e:#}"))).await,
     };
     page(DisksPartial { view })
 }
@@ -126,8 +127,11 @@ async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<Table
         return form_failed(format!("invalid disk name {:?}", form.disk)).await;
     };
     let req = Request::PartitionTableCreate { disk: disk.clone() };
-    after_mutation(
-        state.helper.call(req).await,
+    run(
+        &state,
+        req,
+        "gpt-create",
+        &format!("new GPT on {disk}"),
         format!("created new GPT on {disk}"),
     )
     .await
@@ -167,8 +171,11 @@ async fn part_create(
         size_sectors,
         label,
     };
-    after_mutation(
-        state.helper.call(req).await,
+    run(
+        &state,
+        req,
+        "partition-create",
+        &format!("create partition on {disk}"),
         format!("created partition on {disk}"),
     )
     .await
@@ -191,8 +198,11 @@ async fn part_delete(
         disk: disk.clone(),
         number: form.number,
     };
-    after_mutation(
-        state.helper.call(req).await,
+    run(
+        &state,
+        req,
+        "partition-delete",
+        &format!("delete partition {} on {disk}", form.number),
         format!("deleted partition {} on {disk}", form.number),
     )
     .await

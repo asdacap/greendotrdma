@@ -1,8 +1,7 @@
-//! On-demand kernel module loading from a fixed table. Failures surface to
-//! the UI as dot reasons instead of boot-time errors.
+//! Kernel module loading (`modprobe`) and Soft-RoCE setup (`rdma`) as tasks.
 
-use crate::cmd::{Runner, run_checked};
-use greendot_proto::{KernelModule, Response};
+use crate::cmd::TaskSpec;
+use greendot_proto::{KernelModule, NetdevName};
 
 fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
     match module {
@@ -15,93 +14,69 @@ fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
     }
 }
 
-pub fn ensure(runner: &dyn Runner, modules: &[KernelModule]) -> Response {
-    let mut argv: Vec<String> = vec!["modprobe".into(), "-a".into()];
+/// `modprobe -a <names>` for the requested set. `None` when the set is empty.
+pub fn ensure(modules: &[KernelModule]) -> Option<TaskSpec> {
+    let mut names: Vec<String> = vec!["-a".into()];
     for module in modules {
         for name in modprobe_names(*module) {
-            if !argv.iter().any(|a| a == name) {
-                argv.push((*name).into());
+            if !names.iter().any(|n| n == name) {
+                names.push((*name).into());
             }
         }
     }
-    if argv.len() == 2 {
-        return Response::Ok;
-    }
-    run_checked(runner, &argv)
+    (names.len() > 1).then(|| TaskSpec::new("modprobe", names))
 }
 
-/// Creates a Soft-RoCE (rxe) device on top of a netdev, giving real RDMA
-/// semantics on any NIC. Idempotent-ish: an existing link of the same name
-/// makes `rdma` exit non-zero, which surfaces as a CmdFailed the UI shows.
-pub fn rxe_link_add(runner: &dyn Runner, netdev: &greendot_proto::NetdevName) -> Response {
-    let argv: Vec<String> = [
+/// `rdma link add rxe-<netdev> type rxe netdev <netdev>` (Soft-RoCE).
+pub fn rxe_link_add(netdev: &NetdevName) -> TaskSpec {
+    TaskSpec::new(
         "rdma",
-        "link",
-        "add",
-        &format!("rxe-{netdev}"),
-        "type",
-        "rxe",
-        "netdev",
-        netdev.as_str(),
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect();
-    run_checked(runner, &argv)
+        [
+            "link",
+            "add",
+            &format!("rxe-{netdev}"),
+            "type",
+            "rxe",
+            "netdev",
+            netdev.as_str(),
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::test::Recorder;
 
     #[test]
-    fn modprobe_argv_is_deduplicated_and_empty_list_is_a_noop() {
-        let recorder = Recorder::default();
-        let resp = ensure(
-            &recorder,
-            &[
-                KernelModule::NvmetRdma,
-                KernelModule::NvmetTcp,
-                KernelModule::Rxe,
-            ],
-        );
-        assert_eq!(resp, Response::Ok);
+    fn modprobe_args_deduped_and_empty_is_none() {
+        let spec = ensure(&[
+            KernelModule::NvmetRdma,
+            KernelModule::NvmetTcp,
+            KernelModule::Rxe,
+        ])
+        .unwrap();
+        assert_eq!(spec.command, "modprobe");
         assert_eq!(
-            recorder.calls(),
-            vec![
-                [
-                    "modprobe",
-                    "-a",
-                    "nvmet",
-                    "nvmet_rdma",
-                    "nvmet_tcp",
-                    "rdma_rxe"
-                ]
+            spec.args,
+            ["-a", "nvmet", "nvmet_rdma", "nvmet_tcp", "rdma_rxe"]
                 .map(String::from)
                 .to_vec()
-            ]
         );
-
-        let recorder = Recorder::default();
-        assert_eq!(ensure(&recorder, &[]), Response::Ok);
-        assert!(recorder.calls().is_empty(), "no modules, no modprobe");
+        assert!(ensure(&[]).is_none());
     }
 
     #[test]
-    fn rxe_link_add_argv() {
-        let recorder = Recorder::default();
-        let netdev = greendot_proto::NetdevName::new("eth0").unwrap();
-        assert_eq!(rxe_link_add(&recorder, &netdev), Response::Ok);
+    fn rxe_link_add_args() {
+        let spec = rxe_link_add(&NetdevName::new("eth0").unwrap());
+        assert_eq!(spec.command, "rdma");
         assert_eq!(
-            recorder.calls(),
-            vec![
-                [
-                    "rdma", "link", "add", "rxe-eth0", "type", "rxe", "netdev", "eth0"
-                ]
+            spec.args,
+            ["link", "add", "rxe-eth0", "type", "rxe", "netdev", "eth0"]
                 .map(String::from)
                 .to_vec()
-            ]
         );
     }
 }

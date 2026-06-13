@@ -43,14 +43,6 @@ impl Export {
         Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name))
             .expect("validated name forms a valid IQN")
     }
-
-    /// The configfs identity to blame reconcile failures on.
-    pub fn qualified_name(&self) -> String {
-        match self.kind {
-            ExportKind::Nvme => self.nqn().to_string(),
-            ExportKind::Iscsi => self.iqn().to_string(),
-        }
-    }
 }
 
 pub struct NewExport {
@@ -100,7 +92,59 @@ CREATE TABLE IF NOT EXISTS snapshot_policies (
     enabled INTEGER NOT NULL DEFAULT 1,
     last_run INTEGER NOT NULL DEFAULT 0
 );
+CREATE TABLE IF NOT EXISTS tasks (
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,
+    title TEXT NOT NULL,
+    command TEXT NOT NULL DEFAULT '',
+    args TEXT NOT NULL DEFAULT '[]',
+    stdin TEXT,
+    stdout TEXT NOT NULL DEFAULT '',
+    stderr TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    exit_code INTEGER,
+    error TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER
+);
 ";
+
+/// How many finished tasks to retain.
+pub const TASK_RETENTION: i64 = 500;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskStatus {
+    Running,
+    Success,
+    Failed,
+}
+
+impl TaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TaskStatus::Running => "running",
+            TaskStatus::Success => "success",
+            TaskStatus::Failed => "failed",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Task {
+    pub id: i64,
+    pub kind: String,
+    pub title: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub stdin: Option<String>,
+    pub stdout: String,
+    pub stderr: String,
+    pub status: TaskStatus,
+    pub exit_code: Option<i64>,
+    pub error: Option<String>,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotPolicy {
@@ -309,6 +353,106 @@ impl Db {
         )?;
         Ok(())
     }
+
+    /// Records a started task; returns its id. Command/args/stdin land via
+    /// [`Db::set_task_command`] once the helper reports them.
+    pub fn insert_task(&self, kind: &str, title: &str, started_at: i64) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO tasks (kind, title, status, started_at) VALUES (?1, ?2, 'running', ?3)",
+            rusqlite::params![kind, title, started_at],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn set_task_command(
+        &self,
+        id: i64,
+        command: &str,
+        args: &[String],
+        stdin: Option<&str>,
+    ) -> Result<()> {
+        let args = serde_json::to_string(args).unwrap_or_else(|_| "[]".into());
+        self.conn.lock().unwrap().execute(
+            "UPDATE tasks SET command = ?1, args = ?2, stdin = ?3 WHERE id = ?4",
+            rusqlite::params![command, args, stdin, id],
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn finish_task(
+        &self,
+        id: i64,
+        status: TaskStatus,
+        exit_code: Option<i64>,
+        error: Option<&str>,
+        stdout: &str,
+        stderr: &str,
+        finished_at: i64,
+    ) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET status = ?1, exit_code = ?2, error = ?3, stdout = ?4, stderr = ?5,
+                              finished_at = ?6 WHERE id = ?7",
+            rusqlite::params![
+                status.as_str(),
+                exit_code,
+                error,
+                stdout,
+                stderr,
+                finished_at,
+                id
+            ],
+        )?;
+        // Bound history to the most recent rows.
+        conn.execute(
+            "DELETE FROM tasks WHERE id NOT IN (SELECT id FROM tasks ORDER BY id DESC LIMIT ?1)",
+            [TASK_RETENTION],
+        )?;
+        Ok(())
+    }
+
+    pub fn list_tasks(&self, limit: i64) -> Result<Vec<Task>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM tasks ORDER BY id DESC LIMIT ?1")?;
+        let tasks = stmt
+            .query_map([limit], row_to_task)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(tasks)
+    }
+
+    pub fn get_task(&self, id: i64) -> Result<Option<Task>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT * FROM tasks WHERE id = ?1")?;
+        let mut rows = stmt.query_map([id], row_to_task)?;
+        Ok(rows.next().transpose()?)
+    }
+}
+
+fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
+    let status = match row.get::<_, String>("status")?.as_str() {
+        "success" => TaskStatus::Success,
+        "failed" => TaskStatus::Failed,
+        _ => TaskStatus::Running,
+    };
+    let args: Vec<String> =
+        serde_json::from_str(&row.get::<_, String>("args")?).unwrap_or_default();
+    Ok(Task {
+        id: row.get("id")?,
+        kind: row.get("kind")?,
+        title: row.get("title")?,
+        command: row.get("command")?,
+        args,
+        stdin: row.get("stdin")?,
+        stdout: row.get("stdout")?,
+        stderr: row.get("stderr")?,
+        status,
+        exit_code: row.get("exit_code")?,
+        error: row.get("error")?,
+        started_at: row.get("started_at")?,
+        finished_at: row.get("finished_at")?,
+    })
 }
 
 #[cfg(test)]
@@ -326,6 +470,63 @@ mod tests {
             allow_any_host: false,
             initiators: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
         }
+    }
+
+    #[test]
+    fn task_lifecycle_and_retention() {
+        let db = Db::in_memory().unwrap();
+        let id = db
+            .insert_task("zvol-create", "create tank/vm1", 100)
+            .unwrap();
+        db.set_task_command(id, "zfs", &["create".into(), "tank/vm1".into()], None)
+            .unwrap();
+
+        let t = db.get_task(id).unwrap().unwrap();
+        assert_eq!(
+            (t.kind.as_str(), t.status),
+            ("zvol-create", TaskStatus::Running)
+        );
+        assert_eq!(t.command, "zfs");
+        assert_eq!(t.args, ["create", "tank/vm1"]);
+        assert_eq!(t.exit_code, None);
+
+        db.finish_task(id, TaskStatus::Success, Some(0), None, "done\n", "", 120)
+            .unwrap();
+        let t = db.get_task(id).unwrap().unwrap();
+        assert_eq!(
+            (t.status, t.exit_code, t.stdout.as_str()),
+            (TaskStatus::Success, Some(0), "done\n")
+        );
+        assert_eq!(t.finished_at, Some(120));
+
+        // A failed task with an error message.
+        let id2 = db.insert_task("install", "install nvmetcli", 130).unwrap();
+        db.finish_task(
+            id2,
+            TaskStatus::Failed,
+            None,
+            Some("not installed"),
+            "",
+            "boom\n",
+            131,
+        )
+        .unwrap();
+        let t2 = db.get_task(id2).unwrap().unwrap();
+        assert_eq!(t2.status, TaskStatus::Failed);
+        assert_eq!(t2.error.as_deref(), Some("not installed"));
+
+        // Newest-first listing.
+        let list = db.list_tasks(10).unwrap();
+        assert_eq!(list.iter().map(|t| t.id).collect::<Vec<_>>(), vec![id2, id]);
+
+        // Retention prunes to the most recent TASK_RETENTION on finish.
+        for i in 0..(TASK_RETENTION + 10) {
+            let tid = db.insert_task("noop", "noop", 200 + i).unwrap();
+            db.finish_task(tid, TaskStatus::Success, Some(0), None, "", "", 200 + i)
+                .unwrap();
+        }
+        assert_eq!(db.list_tasks(10_000).unwrap().len() as i64, TASK_RETENTION);
+        assert!(db.get_task(id).unwrap().is_none(), "oldest task pruned");
     }
 
     #[test]

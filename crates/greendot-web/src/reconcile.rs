@@ -1,439 +1,368 @@
-//! Desired state (SQLite) → actual state (configfs) reconciliation.
-//!
-//! `plan()` is a pure function emitting helper requests; every helper op is
-//! idempotent, so the plan can always be replayed. Subsystems we manage are
-//! recognized by [`OUR_NQN_PREFIX`]; anything else in configfs is left alone.
+//! Desired-state reconciliation. Renders the full NVMe-oF/iSCSI desired state
+//! from the export list, and — only when actual configfs no longer realizes it
+//! — applies it via the helper's `nvmetcli`/`targetctl` restore tasks. Each
+//! apply is therefore a recorded task; steady-state reconciles emit nothing.
 
 use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
+use crate::routes::AppState;
 use crate::state::{Export, ExportKind, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
-use greendot_proto::{BackstoreName, DevicePath, Iqn, KernelModule, Nqn, Request, Transport};
+use crate::task_runner;
+use greendot_proto::{
+    KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
+    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request, Transport,
+};
+use std::collections::BTreeSet;
 use std::net::IpAddr;
-
-/// Fixed nvmet port ids, one per transport.
-pub const PORT_RDMA: u16 = 1;
-pub const PORT_TCP: u16 = 2;
-pub const PORT_LOOP: u16 = 3;
-
-pub struct PortConfig {
-    pub listen_addr: IpAddr,
-    pub trsvcid: u16,
-}
-
-/// (port id, transport, kernel module) for every transport an export can want.
-fn wanted_transports(e: &Export) -> Vec<(u16, Transport, KernelModule)> {
-    [
-        (
-            e.want_rdma,
-            PORT_RDMA,
-            Transport::Rdma,
-            KernelModule::NvmetRdma,
-        ),
-        (e.want_tcp, PORT_TCP, Transport::Tcp, KernelModule::NvmetTcp),
-        (
-            e.want_loop,
-            PORT_LOOP,
-            Transport::Loop,
-            KernelModule::NvmetLoop,
-        ),
-    ]
-    .into_iter()
-    .filter(|(want, ..)| *want)
-    .map(|(_, id, t, m)| (id, t, m))
-    .collect()
-}
-
-pub fn plan(exports: &[Export], actual: &ActualNvmet, cfg: &PortConfig) -> Vec<Request> {
-    let desired: Vec<&Export> = exports
-        .iter()
-        .filter(|e| e.kind == ExportKind::Nvme && e.enabled)
-        .collect();
-    let mut requests = Vec::new();
-
-    // 1. Kernel modules and ports for the union of wanted transports.
-    let mut transports: Vec<(u16, Transport, KernelModule)> = Vec::new();
-    for e in &desired {
-        for t in wanted_transports(e) {
-            if !transports.contains(&t) {
-                transports.push(t);
-            }
-        }
-    }
-    transports.sort_by_key(|(id, ..)| *id);
-    if !transports.is_empty() {
-        requests.push(Request::EnsureModules {
-            modules: transports.iter().map(|(.., m)| *m).collect(),
-        });
-    }
-    for (id, trtype, _) in &transports {
-        let existing = actual.ports.iter().find(|p| p.id == *id);
-        let matches = existing.is_some_and(|p| {
-            p.trtype == trtype.as_str()
-                && (*trtype == Transport::Loop
-                    || (p.traddr == cfg.listen_addr.to_string()
-                        && p.trsvcid == cfg.trsvcid.to_string()))
-        });
-        if matches {
-            continue;
-        }
-        if existing.is_some() {
-            requests.push(Request::NvmetPortDelete { id: *id });
-        }
-        requests.push(Request::NvmetPortCreate {
-            id: *id,
-            trtype: *trtype,
-            traddr: cfg.listen_addr,
-            trsvcid: cfg.trsvcid,
-        });
-    }
-
-    // 2. Per-export subsystem state (idempotent replays) and link/host diffs.
-    for e in &desired {
-        let nqn = e.nqn();
-        let Ok(device_path) = DevicePath::new(&e.device_path) else {
-            tracing::error!(
-                export = e.name,
-                device = e.device_path,
-                "invalid device path in store"
-            );
-            continue;
-        };
-        requests.push(Request::NvmetSubsysCreate {
-            nqn: nqn.clone(),
-            allow_any_host: e.allow_any_host,
-        });
-        requests.push(Request::NvmetNamespaceSet {
-            nqn: nqn.clone(),
-            nsid: 1,
-            device_path,
-            enable: true,
-        });
-
-        let subsys = actual.subsystems.iter().find(|s| s.nqn == nqn.as_str());
-        let current_hosts: &[String] = subsys
-            .map(|s| s.allowed_hosts.as_slice())
-            .unwrap_or_default();
-        if !e.allow_any_host {
-            for host in &e.initiators {
-                if !current_hosts.contains(host)
-                    && let Ok(host_nqn) = Nqn::new(host.clone())
-                {
-                    requests.push(Request::NvmetHostAllow {
-                        nqn: nqn.clone(),
-                        host_nqn,
-                    });
-                }
-            }
-        }
-        for host in current_hosts {
-            if (e.allow_any_host || !e.initiators.contains(host))
-                && let Ok(host_nqn) = Nqn::new(host.clone())
-            {
-                requests.push(Request::NvmetHostRemove {
-                    nqn: nqn.clone(),
-                    host_nqn,
-                });
-            }
-        }
-
-        let wanted_ports: Vec<u16> = wanted_transports(e).iter().map(|(id, ..)| *id).collect();
-        for port in &actual.ports {
-            if port.subsystems.iter().any(|s| s == nqn.as_str()) && !wanted_ports.contains(&port.id)
-            {
-                requests.push(Request::NvmetPortUnlink {
-                    port: port.id,
-                    nqn: nqn.clone(),
-                });
-            }
-        }
-        for id in wanted_ports {
-            let already = actual
-                .ports
-                .iter()
-                .any(|p| p.id == id && p.subsystems.iter().any(|s| s == nqn.as_str()))
-                // a port being (re)created above can't have stale links
-                && !requests.iter().any(|r| matches!(r, Request::NvmetPortCreate { id: pid, .. } if *pid == id));
-            if !already {
-                requests.push(Request::NvmetPortLink {
-                    port: id,
-                    nqn: nqn.clone(),
-                });
-            }
-        }
-    }
-
-    // 3. Tear down subsystems under our prefix that no enabled export wants.
-    for subsys in &actual.subsystems {
-        if !subsys.nqn.starts_with(OUR_NQN_PREFIX)
-            || desired.iter().any(|e| e.nqn().as_str() == subsys.nqn)
-        {
-            continue;
-        }
-        let Ok(nqn) = Nqn::new(subsys.nqn.clone()) else {
-            continue;
-        };
-        for port in &actual.ports {
-            if port.subsystems.iter().any(|s| s == &subsys.nqn) {
-                requests.push(Request::NvmetPortUnlink {
-                    port: port.id,
-                    nqn: nqn.clone(),
-                });
-            }
-        }
-        requests.push(Request::NvmetSubsysDelete { nqn });
-    }
-
-    requests
-}
-
-/// iSCSI desired state → helper requests. Same contract as `plan()`.
-pub fn plan_iscsi(exports: &[Export], actual: &ActualLio, cfg: &PortConfig) -> Vec<Request> {
-    let desired: Vec<&Export> = exports
-        .iter()
-        .filter(|e| e.kind == ExportKind::Iscsi && e.enabled)
-        .collect();
-    let mut requests = Vec::new();
-
-    if !desired.is_empty() {
-        let mut modules = vec![KernelModule::Iscsi];
-        if desired.iter().any(|e| e.want_rdma) {
-            modules.push(KernelModule::Iser);
-        }
-        requests.push(Request::EnsureModules { modules });
-    }
-
-    for e in &desired {
-        let iqn = e.iqn();
-        let (Ok(device_path), Ok(backstore)) =
-            (DevicePath::new(&e.device_path), BackstoreName::new(&e.name))
-        else {
-            tracing::error!(
-                export = e.name,
-                "invalid device path or backstore name in store"
-            );
-            continue;
-        };
-        requests.push(Request::LioBackstoreCreate {
-            name: backstore.clone(),
-            device_path,
-        });
-        requests.push(Request::LioTargetCreate { iqn: iqn.clone() });
-        requests.push(Request::LioLunMap {
-            iqn: iqn.clone(),
-            lun: 0,
-            backstore,
-        });
-
-        // Desired portals: iSER on 3260 when RDMA is wanted; plain TCP on
-        // 3260, or on 3261 when it must coexist with the iSER portal.
-        let mut want: Vec<(u16, bool)> = Vec::new();
-        if e.want_rdma {
-            want.push((3260, true));
-        }
-        if e.want_tcp {
-            want.push((if e.want_rdma { 3261 } else { 3260 }, false));
-        }
-        let target = actual.targets.iter().find(|t| t.iqn == iqn.as_str());
-        let current = target.map(|t| t.portals.as_slice()).unwrap_or_default();
-        let addr = cfg.listen_addr;
-        let dirname = |port: u16| match addr {
-            IpAddr::V4(v4) => format!("{v4}:{port}"),
-            IpAddr::V6(v6) => format!("[{v6}]:{port}"),
-        };
-        for portal in current {
-            let keep = want
-                .iter()
-                .any(|(port, iser)| portal.addr_port == dirname(*port) && portal.iser == *iser);
-            if !keep {
-                // addr may have changed; parse what we can, skip junk
-                if let (addr_str, Some(port)) = (
-                    portal.addr().to_owned(),
-                    portal
-                        .addr_port
-                        .rsplit_once(':')
-                        .and_then(|(_, p)| p.parse::<u16>().ok()),
-                ) && let Ok(addr) = addr_str.parse()
-                {
-                    requests.push(Request::LioPortalDelete {
-                        iqn: iqn.clone(),
-                        addr,
-                        port,
-                    });
-                }
-            }
-        }
-        for (port, iser) in &want {
-            if !current
-                .iter()
-                .any(|p| p.addr_port == dirname(*port) && p.iser == *iser)
-            {
-                requests.push(Request::LioPortalSet {
-                    iqn: iqn.clone(),
-                    addr,
-                    port: *port,
-                    iser: *iser,
-                });
-            }
-        }
-
-        let current_acls: &[String] = target.map(|t| t.acls.as_slice()).unwrap_or_default();
-        if !e.allow_any_host {
-            for initiator in &e.initiators {
-                if !current_acls.contains(initiator)
-                    && let Ok(initiator) = Iqn::new(initiator.clone())
-                {
-                    requests.push(Request::LioAclAdd {
-                        iqn: iqn.clone(),
-                        initiator,
-                    });
-                }
-            }
-        }
-        for acl in current_acls {
-            if (e.allow_any_host || !e.initiators.contains(acl))
-                && let Ok(initiator) = Iqn::new(acl.clone())
-            {
-                requests.push(Request::LioAclRemove {
-                    iqn: iqn.clone(),
-                    initiator,
-                });
-            }
-        }
-
-        requests.push(Request::LioTpgSet {
-            iqn,
-            enabled: true,
-            demo_mode: e.allow_any_host,
-            auth: None,
-        });
-    }
-
-    // Tear down our targets (and their same-named backstores) that no
-    // enabled export wants. A stray backstore without a target lingers
-    // until an export of the same name is recreated — acceptable.
-    for target in &actual.targets {
-        if !target.iqn.starts_with(OUR_IQN_PREFIX)
-            || desired.iter().any(|e| e.iqn().as_str() == target.iqn)
-        {
-            continue;
-        }
-        let Ok(iqn) = Iqn::new(target.iqn.clone()) else {
-            continue;
-        };
-        requests.push(Request::LioTargetDelete { iqn });
-        if let Some(name) = target.iqn.strip_prefix(OUR_IQN_PREFIX)
-            && let Ok(backstore) = BackstoreName::new(name)
-            && actual.backstores.iter().any(|b| b.name == name)
-        {
-            requests.push(Request::LioBackstoreDelete { name: backstore });
-        }
-    }
-
-    requests
-}
-
-/// Which export a failed request should be blamed on (its NQN/IQN); None
-/// means the failure is global (modules, ports).
-fn request_key(req: &Request) -> Option<String> {
-    let nqn = match req {
-        Request::NvmetSubsysCreate { nqn, .. }
-        | Request::NvmetSubsysDelete { nqn }
-        | Request::NvmetNamespaceSet { nqn, .. }
-        | Request::NvmetNamespaceDelete { nqn, .. }
-        | Request::NvmetPortLink { nqn, .. }
-        | Request::NvmetPortUnlink { nqn, .. }
-        | Request::NvmetHostAllow { nqn, .. }
-        | Request::NvmetHostRemove { nqn, .. } => Some(nqn.as_str()),
-        _ => None,
-    };
-    let iqn = match req {
-        Request::LioTargetCreate { iqn }
-        | Request::LioTargetDelete { iqn }
-        | Request::LioLunMap { iqn, .. }
-        | Request::LioPortalSet { iqn, .. }
-        | Request::LioPortalDelete { iqn, .. }
-        | Request::LioAclAdd { iqn, .. }
-        | Request::LioAclRemove { iqn, .. }
-        | Request::LioTpgSet { iqn, .. } => Some(iqn.as_str()),
-        // Backstores are named after the export; blame via the IQN prefix.
-        Request::LioBackstoreCreate { name, .. } | Request::LioBackstoreDelete { name } => {
-            return Some(format!("{OUR_IQN_PREFIX}{name}"));
-        }
-        _ => None,
-    };
-    nqn.or(iqn).map(ToOwned::to_owned)
-}
 
 pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
 
-/// Plans against current state and replays through the helper, recording
-/// per-export errors in the store. Callers serialize via AppState's lock.
-pub async fn run(
-    db: &crate::state::Db,
-    helper: &crate::helper_client::HelperClient,
-    nvmet_root: &std::path::Path,
-    lio_root: &std::path::Path,
-    cfg: &PortConfig,
-) -> anyhow::Result<()> {
-    use std::collections::HashMap;
+const PORT_RDMA: u16 = 1;
+const PORT_TCP: u16 = 2;
+const PORT_LOOP: u16 = 3;
+const TRSVCID: u16 = 4420;
 
-    let exports = db.list_exports()?;
-    let mut requests = plan(&exports, &crate::actual::nvmet::read(nvmet_root), cfg);
-    requests.extend(plan_iscsi(
-        &exports,
-        &crate::actual::lio::read(lio_root),
-        cfg,
-    ));
+fn enabled(exports: &[Export], kind: ExportKind) -> impl Iterator<Item = &Export> {
+    exports.iter().filter(move |e| e.enabled && e.kind == kind)
+}
 
-    let mut errors: HashMap<String, String> = HashMap::new();
-    let mut global_error = None;
-    for req in requests {
-        let blame = request_key(&req);
-        let failure = match helper.call(req).await {
-            Ok(greendot_proto::Response::Err { message, .. }) => Some(message),
-            Err(e) => Some(format!("helper unavailable: {e:#}")),
-            Ok(_) => None,
+/// Predicate over an export (which transport it wants).
+type Wants = fn(&Export) -> bool;
+
+/// Renders the desired nvmet state from the enabled NVMe-oF exports.
+pub fn render_nvmet(exports: &[Export], listen: IpAddr) -> NvmetDesired {
+    let subsystems: Vec<NvmetSubsysSpec> = enabled(exports, ExportKind::Nvme)
+        .filter_map(|e| {
+            Some(NvmetSubsysSpec {
+                nqn: e.nqn(),
+                allow_any_host: e.allow_any_host,
+                allowed_hosts: e
+                    .initiators
+                    .iter()
+                    .filter_map(|i| greendot_proto::Nqn::new(i.clone()).ok())
+                    .collect(),
+                namespaces: vec![NvmetNsSpec {
+                    nsid: 1,
+                    device_path: greendot_proto::DevicePath::new(&e.device_path).ok()?,
+                }],
+            })
+        })
+        .collect();
+
+    let mut ports = Vec::new();
+    let wants: [(u16, Transport, Wants); 3] = [
+        (PORT_RDMA, Transport::Rdma, |e| e.want_rdma),
+        (PORT_TCP, Transport::Tcp, |e| e.want_tcp),
+        (PORT_LOOP, Transport::Loop, |e| e.want_loop),
+    ];
+    for (id, trtype, want) in wants {
+        let subs: Vec<_> = enabled(exports, ExportKind::Nvme)
+            .filter(|e| want(e) && greendot_proto::DevicePath::new(&e.device_path).is_ok())
+            .map(|e| e.nqn())
+            .collect();
+        if !subs.is_empty() {
+            ports.push(NvmetPortSpec {
+                id,
+                trtype,
+                traddr: listen,
+                trsvcid: TRSVCID,
+                subsystems: subs,
+            });
+        }
+    }
+    NvmetDesired { subsystems, ports }
+}
+
+/// Renders the desired LIO state from the enabled iSCSI exports.
+pub fn render_lio(exports: &[Export], listen: IpAddr) -> LioDesired {
+    let mut backstores = Vec::new();
+    let mut targets = Vec::new();
+    for e in enabled(exports, ExportKind::Iscsi) {
+        let (Ok(name), Ok(device_path)) = (
+            greendot_proto::BackstoreName::new(&e.name),
+            greendot_proto::DevicePath::new(&e.device_path),
+        ) else {
+            continue;
         };
-        if let Some(message) = failure {
-            tracing::warn!(error = %message, "reconcile step failed");
-            match blame {
-                Some(nqn) => {
-                    errors.entry(nqn).or_insert(message);
-                }
-                None => {
-                    global_error.get_or_insert(message);
-                }
+        backstores.push(LioBackstoreSpec {
+            name: name.clone(),
+            device_path,
+        });
+        let mut portals = Vec::new();
+        if e.want_rdma {
+            portals.push(LioPortalSpec {
+                addr: listen,
+                port: 3260,
+                iser: true,
+            });
+        }
+        if e.want_tcp {
+            portals.push(LioPortalSpec {
+                addr: listen,
+                port: if e.want_rdma { 3261 } else { 3260 },
+                iser: false,
+            });
+        }
+        targets.push(LioTargetSpec {
+            iqn: e.iqn(),
+            enabled: true,
+            demo_mode: e.allow_any_host,
+            luns: vec![LioLunSpec {
+                lun: 0,
+                backstore: name,
+            }],
+            portals,
+            acls: if e.allow_any_host {
+                Vec::new()
+            } else {
+                e.initiators
+                    .iter()
+                    .filter_map(|i| greendot_proto::Iqn::new(i.clone()).ok())
+                    .collect()
+            },
+        });
+    }
+    LioDesired {
+        backstores,
+        targets,
+    }
+}
+
+fn set<T: Ord, I: IntoIterator<Item = T>>(items: I) -> BTreeSet<T> {
+    items.into_iter().collect()
+}
+
+/// Whether actual nvmet configfs already realizes the desired state (only our
+/// prefix is considered; foreign subsystems are ignored).
+pub fn nvmet_satisfied(d: &NvmetDesired, a: &ActualNvmet) -> bool {
+    let want: BTreeSet<String> = set(d.subsystems.iter().map(|s| s.nqn.to_string()));
+    let have: BTreeSet<String> = set(a
+        .subsystems
+        .iter()
+        .filter(|s| s.nqn.starts_with(OUR_NQN_PREFIX))
+        .map(|s| s.nqn.clone()));
+    if want != have {
+        return false;
+    }
+    for ds in &d.subsystems {
+        let Some(as_) = a.subsystems.iter().find(|s| s.nqn == ds.nqn.as_str()) else {
+            return false;
+        };
+        if as_.allow_any_host != ds.allow_any_host {
+            return false;
+        }
+        if set(ds.allowed_hosts.iter().map(|h| h.to_string()))
+            != set(as_.allowed_hosts.iter().cloned())
+        {
+            return false;
+        }
+        let (Some(an), Some(dn)) = (
+            as_.namespaces.iter().find(|n| n.nsid == 1),
+            ds.namespaces.iter().find(|n| n.nsid == 1),
+        ) else {
+            return false;
+        };
+        if !an.enabled || an.device_path != dn.device_path.as_str() {
+            return false;
+        }
+    }
+    // Ports: managed links per port id must match exactly.
+    let ids: BTreeSet<u16> = d
+        .ports
+        .iter()
+        .map(|p| p.id)
+        .chain(a.ports.iter().map(|p| p.id))
+        .collect();
+    for id in ids {
+        let dp = d.ports.iter().find(|p| p.id == id);
+        let ap = a.ports.iter().find(|p| p.id == id);
+        let want_links: BTreeSet<String> = dp
+            .map(|p| set(p.subsystems.iter().map(|n| n.to_string())))
+            .unwrap_or_default();
+        let have_links: BTreeSet<String> = ap
+            .map(|p| {
+                set(p
+                    .subsystems
+                    .iter()
+                    .filter(|n| n.starts_with(OUR_NQN_PREFIX))
+                    .cloned())
+            })
+            .unwrap_or_default();
+        if want_links != have_links {
+            return false;
+        }
+        if let (Some(dp), Some(ap)) = (dp, ap) {
+            if ap.trtype != dp.trtype.as_str() {
+                return false;
+            }
+            if dp.trtype != Transport::Loop && ap.traddr != dp.traddr.to_string() {
+                return false;
             }
         }
     }
-    for export in &exports {
-        db.set_export_error(
-            export.id,
-            errors.get(&export.qualified_name()).map(String::as_str),
-        )?;
+    true
+}
+
+/// Whether actual LIO configfs already realizes the desired state (managed
+/// targets, by our IQN prefix).
+pub fn lio_satisfied(d: &LioDesired, a: &ActualLio) -> bool {
+    let want: BTreeSet<String> = set(d.targets.iter().map(|t| t.iqn.to_string()));
+    let have: BTreeSet<String> = set(a
+        .targets
+        .iter()
+        .filter(|t| t.iqn.starts_with(OUR_IQN_PREFIX))
+        .map(|t| t.iqn.clone()));
+    if want != have {
+        return false;
     }
-    db.set_setting(RECONCILE_ERROR_KEY, global_error.as_deref().unwrap_or(""))?;
+    for db in &d.backstores {
+        let Some(ab) = a.backstores.iter().find(|b| b.name == db.name.as_str()) else {
+            return false;
+        };
+        if !ab.enabled || ab.udev_path != db.device_path.as_str() {
+            return false;
+        }
+    }
+    for dt in &d.targets {
+        let Some(at) = a.targets.iter().find(|t| t.iqn == dt.iqn.as_str()) else {
+            return false;
+        };
+        if at.enabled != dt.enabled || at.demo_mode != dt.demo_mode {
+            return false;
+        }
+        if set(dt.luns.iter().map(|l| l.backstore.to_string())) != set(at.luns.iter().cloned()) {
+            return false;
+        }
+        let want_portals: BTreeSet<(String, bool)> = set(dt
+            .portals
+            .iter()
+            .map(|p| (fmt_addr(p.addr, p.port), p.iser)));
+        let have_portals: BTreeSet<(String, bool)> =
+            set(at.portals.iter().map(|p| (p.addr_port.clone(), p.iser)));
+        if want_portals != have_portals {
+            return false;
+        }
+        let want_acls: BTreeSet<String> = if dt.demo_mode {
+            BTreeSet::new()
+        } else {
+            set(dt.acls.iter().map(|a| a.to_string()))
+        };
+        if want_acls != set(at.acls.iter().cloned()) {
+            return false;
+        }
+    }
+    true
+}
+
+fn fmt_addr(addr: IpAddr, port: u16) -> String {
+    match addr {
+        IpAddr::V4(v4) => format!("{v4}:{port}"),
+        IpAddr::V6(v6) => format!("[{v6}]:{port}"),
+    }
+}
+
+fn modules_for(exports: &[Export]) -> Vec<KernelModule> {
+    let mut m = Vec::new();
+    let nvme = |f: fn(&Export) -> bool| enabled(exports, ExportKind::Nvme).any(f);
+    if nvme(|e| e.want_rdma) {
+        m.push(KernelModule::NvmetRdma);
+    }
+    if nvme(|e| e.want_tcp) {
+        m.push(KernelModule::NvmetTcp);
+    }
+    if nvme(|e| e.want_loop) {
+        m.push(KernelModule::NvmetLoop);
+    }
+    if enabled(exports, ExportKind::Iscsi).next().is_some() {
+        m.push(KernelModule::Iscsi);
+        if enabled(exports, ExportKind::Iscsi).any(|e| e.want_rdma) {
+            m.push(KernelModule::Iser);
+        }
+    }
+    m
+}
+
+/// Reconciles desired → actual, applying via tasks only on drift. Serialized
+/// by the caller's `reconcile_lock`.
+pub async fn run(state: &AppState) -> anyhow::Result<()> {
+    let listen: IpAddr = state
+        .db
+        .get_setting("listen_addr")?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
+    let exports = state.db.list_exports()?;
+
+    let nvmet_desired = render_nvmet(&exports, listen);
+    let lio_desired = render_lio(&exports, listen);
+    let nvmet_ok = nvmet_satisfied(
+        &nvmet_desired,
+        &crate::actual::nvmet::read(&state.nvmet_root),
+    );
+    let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&state.lio_root));
+    if nvmet_ok && lio_ok {
+        return Ok(()); // already realized — emit no task
+    }
+
+    let modules = modules_for(&exports);
+    if !modules.is_empty() {
+        task_runner::run(
+            state,
+            Request::EnsureModules { modules },
+            "modules",
+            "Load kernel modules",
+        )
+        .await?;
+    }
+
+    let mut nvmet_err = None;
+    if !nvmet_ok {
+        let out = task_runner::run(
+            state,
+            Request::NvmetApply {
+                desired: nvmet_desired,
+            },
+            "nvmet-apply",
+            "Apply NVMe-oF configuration",
+        )
+        .await?;
+        nvmet_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "nvmetcli failed".into()));
+    }
+    let mut lio_err = None;
+    if !lio_ok {
+        let out = task_runner::run(
+            state,
+            Request::LioApply {
+                desired: lio_desired,
+            },
+            "lio-apply",
+            "Apply iSCSI configuration",
+        )
+        .await?;
+        lio_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "targetcli failed".into()));
+    }
+
+    // Surface apply failures on the relevant exports' dots and the banner.
+    for e in exports.iter().filter(|e| e.enabled) {
+        let err = match e.kind {
+            ExportKind::Nvme => nvmet_err.as_deref(),
+            ExportKind::Iscsi => lio_err.as_deref(),
+        };
+        state.db.set_export_error(e.id, err)?;
+    }
+    let banner = nvmet_err.or(lio_err).unwrap_or_default();
+    state.db.set_setting(RECONCILE_ERROR_KEY, &banner)?;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actual::lio::{Backstore, Portal, Target};
     use crate::actual::nvmet::{Namespace, Port, Subsys};
-    use greendot_proto::{DevicePath, ExportName};
 
-    const NQN: &str = "nqn.2026-06.io.greendot:vm1";
     const DEV: &str = "/dev/zvol/tank/vm1";
-    const HOST: &str = "nqn.2014-08.org.nvmexpress:host1";
 
-    fn cfg() -> PortConfig {
-        PortConfig {
-            listen_addr: "10.0.0.5".parse().unwrap(),
-            trsvcid: 4420,
-        }
-    }
-
-    fn export() -> Export {
+    fn nvme_export() -> Export {
         Export {
             id: 1,
             kind: ExportKind::Nvme,
@@ -444,391 +373,139 @@ mod tests {
             want_tcp: true,
             want_loop: false,
             allow_any_host: false,
-            initiators: vec![HOST.into()],
+            initiators: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
             last_error: None,
         }
     }
 
-    fn nqn(s: &str) -> Nqn {
-        Nqn::new(s).unwrap()
+    #[test]
+    fn renders_nvmet_subsystems_and_ports() {
+        let d = render_nvmet(&[nvme_export()], "10.0.0.5".parse().unwrap());
+        assert_eq!(d.subsystems.len(), 1);
+        assert_eq!(d.subsystems[0].nqn.as_str(), "nqn.2026-06.io.greendot:vm1");
+        assert_eq!(d.subsystems[0].allowed_hosts.len(), 1);
+        // rdma (port 1) + tcp (port 2), both linking the subsystem; no loop.
+        let ids: Vec<u16> = d.ports.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![PORT_RDMA, PORT_TCP]);
+        assert!(
+            d.ports
+                .iter()
+                .all(|p| p.subsystems.len() == 1 && p.traddr.to_string() == "10.0.0.5")
+        );
     }
 
-    fn rdma_port(linked: bool) -> Port {
-        Port {
-            id: PORT_RDMA,
-            trtype: "rdma".into(),
-            traddr: "10.0.0.5".into(),
-            trsvcid: "4420".into(),
-            subsystems: if linked { vec![NQN.into()] } else { vec![] },
-        }
-    }
-
-    fn tcp_port(linked: bool) -> Port {
-        Port {
-            id: PORT_TCP,
-            trtype: "tcp".into(),
-            traddr: "10.0.0.5".into(),
-            trsvcid: "4420".into(),
-            subsystems: if linked { vec![NQN.into()] } else { vec![] },
-        }
-    }
-
-    fn actual_subsys() -> Subsys {
-        Subsys {
-            nqn: NQN.into(),
-            allow_any_host: false,
-            allowed_hosts: vec![HOST.into()],
-            namespaces: vec![Namespace {
-                nsid: 1,
-                device_path: DEV.into(),
-                enabled: true,
+    #[test]
+    fn nvmet_satisfied_detects_match_and_drift() {
+        let listen: IpAddr = "10.0.0.5".parse().unwrap();
+        let d = render_nvmet(&[nvme_export()], listen);
+        let actual = ActualNvmet {
+            subsystems: vec![Subsys {
+                nqn: "nqn.2026-06.io.greendot:vm1".into(),
+                allow_any_host: false,
+                allowed_hosts: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
+                namespaces: vec![Namespace {
+                    nsid: 1,
+                    device_path: DEV.into(),
+                    enabled: true,
+                }],
             }],
+            ports: vec![
+                Port {
+                    id: 1,
+                    trtype: "rdma".into(),
+                    traddr: "10.0.0.5".into(),
+                    trsvcid: "4420".into(),
+                    subsystems: vec!["nqn.2026-06.io.greendot:vm1".into()],
+                },
+                Port {
+                    id: 2,
+                    trtype: "tcp".into(),
+                    traddr: "10.0.0.5".into(),
+                    trsvcid: "4420".into(),
+                    subsystems: vec!["nqn.2026-06.io.greendot:vm1".into()],
+                },
+            ],
+        };
+        assert!(
+            nvmet_satisfied(&d, &actual),
+            "exact match should be satisfied"
+        );
+        // Empty actual (post-reboot) is not satisfied.
+        assert!(!nvmet_satisfied(&d, &ActualNvmet::default()));
+        // Wrong device path is drift.
+        let mut drift = actual.clone();
+        drift.subsystems[0].namespaces[0].device_path = "/dev/zvol/tank/other".into();
+        assert!(!nvmet_satisfied(&d, &drift));
+        // A foreign subsystem does not force a re-apply.
+        let mut foreign = actual.clone();
+        foreign.subsystems.push(Subsys {
+            nqn: "nqn.2000-01.com.example:manual".into(),
+            allow_any_host: true,
+            allowed_hosts: vec![],
+            namespaces: vec![],
+        });
+        assert!(nvmet_satisfied(&d, &foreign));
+    }
+
+    fn iscsi_export() -> Export {
+        Export {
+            kind: ExportKind::Iscsi,
+            name: "tape".into(),
+            // iSCSI initiators are IQNs, not NQNs.
+            initiators: vec!["iqn.1993-08.org.debian:01:abc".into()],
+            ..nvme_export()
         }
     }
 
     #[test]
-    fn iscsi_fresh_creation_drift_and_teardown() {
-        use crate::actual::lio::{ActualLio, Backstore, Portal, Target};
-        let iqn_s = "iqn.2026-06.io.greendot:vm1";
-        let iqn = |s: &str| Iqn::new(s).unwrap();
-        let mut e = export();
-        e.kind = ExportKind::Iscsi;
-        e.initiators = vec!["iqn.1993-08.org.debian:01:abc".into()];
-        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+    fn renders_and_satisfies_lio() {
+        let listen: IpAddr = "10.0.0.5".parse().unwrap();
+        let d = render_lio(&[iscsi_export()], listen);
+        assert_eq!(d.targets[0].iqn.as_str(), "iqn.2026-06.io.greendot:tape");
+        // rdma => iser on 3260, tcp => plain on 3261
+        assert_eq!(d.targets[0].portals.len(), 2);
 
-        // Fresh: full creation, iSER on 3260, TCP coexisting on 3261.
-        let requests = plan_iscsi(&[e.clone()], &ActualLio::default(), &cfg());
-        assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::Iscsi, KernelModule::Iser]
-                },
-                Request::LioBackstoreCreate {
-                    name: BackstoreName::new("vm1").unwrap(),
-                    device_path: DevicePath::new(DEV).unwrap(),
-                },
-                Request::LioTargetCreate { iqn: iqn(iqn_s) },
-                Request::LioLunMap {
-                    iqn: iqn(iqn_s),
-                    lun: 0,
-                    backstore: BackstoreName::new("vm1").unwrap()
-                },
-                Request::LioPortalSet {
-                    iqn: iqn(iqn_s),
-                    addr,
-                    port: 3260,
-                    iser: true
-                },
-                Request::LioPortalSet {
-                    iqn: iqn(iqn_s),
-                    addr,
-                    port: 3261,
-                    iser: false
-                },
-                Request::LioAclAdd {
-                    iqn: iqn(iqn_s),
-                    initiator: iqn("iqn.1993-08.org.debian:01:abc")
-                },
-                Request::LioTpgSet {
-                    iqn: iqn(iqn_s),
-                    enabled: true,
-                    demo_mode: false,
-                    auth: None
-                },
-            ]
-        );
-
-        // Converged except a stale portal and a stray target of ours.
         let actual = ActualLio {
             backstores: vec![Backstore {
-                name: "vm1".into(),
+                name: "tape".into(),
                 udev_path: DEV.into(),
                 enabled: true,
             }],
-            targets: vec![
-                Target {
-                    iqn: iqn_s.into(),
-                    enabled: true,
-                    demo_mode: false,
-                    luns: vec!["vm1".into()],
-                    portals: vec![
-                        Portal {
-                            addr_port: "10.0.0.5:3260".into(),
-                            iser: true,
-                        },
-                        Portal {
-                            addr_port: "10.0.0.5:3261".into(),
-                            iser: false,
-                        },
-                        Portal {
-                            addr_port: "192.168.9.9:3260".into(),
-                            iser: false,
-                        }, // stale
-                    ],
-                    acls: vec!["iqn.1993-08.org.debian:01:abc".into()],
-                },
-                Target {
-                    iqn: "iqn.2026-06.io.greendot:gone".into(),
-                    enabled: true,
-                    demo_mode: true,
-                    luns: vec![],
-                    portals: vec![],
-                    acls: vec![],
-                },
-            ],
-        };
-        let requests = plan_iscsi(&[e], &actual, &cfg());
-        assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::Iscsi, KernelModule::Iser]
-                },
-                Request::LioBackstoreCreate {
-                    name: BackstoreName::new("vm1").unwrap(),
-                    device_path: DevicePath::new(DEV).unwrap(),
-                },
-                Request::LioTargetCreate { iqn: iqn(iqn_s) },
-                Request::LioLunMap {
-                    iqn: iqn(iqn_s),
-                    lun: 0,
-                    backstore: BackstoreName::new("vm1").unwrap()
-                },
-                Request::LioPortalDelete {
-                    iqn: iqn(iqn_s),
-                    addr: "192.168.9.9".parse().unwrap(),
-                    port: 3260
-                },
-                Request::LioTpgSet {
-                    iqn: iqn(iqn_s),
-                    enabled: true,
-                    demo_mode: false,
-                    auth: None
-                },
-                Request::LioTargetDelete {
-                    iqn: iqn("iqn.2026-06.io.greendot:gone")
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn fresh_system_gets_full_creation_sequence() {
-        let _ = ExportName::new("vm1").unwrap(); // name validity is what makes the NQN derivable
-        let requests = plan(&[export()], &ActualNvmet::default(), &cfg());
-        let addr: IpAddr = "10.0.0.5".parse().unwrap();
-        assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::NvmetRdma, KernelModule::NvmetTcp]
-                },
-                Request::NvmetPortCreate {
-                    id: PORT_RDMA,
-                    trtype: Transport::Rdma,
-                    traddr: addr,
-                    trsvcid: 4420
-                },
-                Request::NvmetPortCreate {
-                    id: PORT_TCP,
-                    trtype: Transport::Tcp,
-                    traddr: addr,
-                    trsvcid: 4420
-                },
-                Request::NvmetSubsysCreate {
-                    nqn: nqn(NQN),
-                    allow_any_host: false
-                },
-                Request::NvmetNamespaceSet {
-                    nqn: nqn(NQN),
-                    nsid: 1,
-                    device_path: DevicePath::new(DEV).unwrap(),
-                    enable: true,
-                },
-                Request::NvmetHostAllow {
-                    nqn: nqn(NQN),
-                    host_nqn: nqn(HOST)
-                },
-                Request::NvmetPortLink {
-                    port: PORT_RDMA,
-                    nqn: nqn(NQN)
-                },
-                Request::NvmetPortLink {
-                    port: PORT_TCP,
-                    nqn: nqn(NQN)
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn converged_system_only_replays_idempotent_subsys_state() {
-        let actual = ActualNvmet {
-            subsystems: vec![actual_subsys()],
-            ports: vec![rdma_port(true), tcp_port(true)],
-        };
-        let requests = plan(&[export()], &actual, &cfg());
-        assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::NvmetRdma, KernelModule::NvmetTcp]
-                },
-                Request::NvmetSubsysCreate {
-                    nqn: nqn(NQN),
-                    allow_any_host: false
-                },
-                Request::NvmetNamespaceSet {
-                    nqn: nqn(NQN),
-                    nsid: 1,
-                    device_path: DevicePath::new(DEV).unwrap(),
-                    enable: true,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn drift_is_corrected_and_foreign_subsystems_are_untouched() {
-        // Host list drift, an unwanted loop link, and a stray subsystem of
-        // ours; a foreign subsystem must survive.
-        let mut e = export();
-        e.want_tcp = false;
-        let stray = "nqn.2026-06.io.greendot:deleted";
-        let foreign = "nqn.2000-01.com.example:manual";
-        let actual = ActualNvmet {
-            subsystems: vec![
-                Subsys {
-                    allowed_hosts: vec!["nqn.2014-08.org.nvmexpress:oldhost".into()],
-                    ..actual_subsys()
-                },
-                Subsys {
-                    nqn: stray.into(),
-                    allow_any_host: true,
-                    allowed_hosts: vec![],
-                    namespaces: vec![],
-                },
-                Subsys {
-                    nqn: foreign.into(),
-                    allow_any_host: true,
-                    allowed_hosts: vec![],
-                    namespaces: vec![],
-                },
-            ],
-            ports: vec![
-                rdma_port(true),
-                Port {
-                    subsystems: vec![NQN.into(), stray.into(), foreign.into()],
-                    ..tcp_port(false)
-                },
-            ],
-        };
-        let requests = plan(&[e], &actual, &cfg());
-        assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::NvmetRdma]
-                },
-                Request::NvmetSubsysCreate {
-                    nqn: nqn(NQN),
-                    allow_any_host: false
-                },
-                Request::NvmetNamespaceSet {
-                    nqn: nqn(NQN),
-                    nsid: 1,
-                    device_path: DevicePath::new(DEV).unwrap(),
-                    enable: true,
-                },
-                Request::NvmetHostAllow {
-                    nqn: nqn(NQN),
-                    host_nqn: nqn(HOST)
-                },
-                Request::NvmetHostRemove {
-                    nqn: nqn(NQN),
-                    host_nqn: nqn("nqn.2014-08.org.nvmexpress:oldhost"),
-                },
-                Request::NvmetPortUnlink {
-                    port: PORT_TCP,
-                    nqn: nqn(NQN)
-                },
-                Request::NvmetPortUnlink {
-                    port: PORT_TCP,
-                    nqn: nqn(stray)
-                },
-                Request::NvmetSubsysDelete { nqn: nqn(stray) },
-            ]
-        );
-    }
-
-    #[test]
-    fn disabled_exports_and_port_attr_changes_are_torn_down_and_rebuilt() {
-        let mut e = export();
-        e.enabled = false;
-        // Port 1 exists with a stale address; no enabled export wants RDMA
-        // anymore, so only the teardown of the disabled export and no port
-        // recreation for transports nobody wants.
-        let actual = ActualNvmet {
-            subsystems: vec![actual_subsys()],
-            ports: vec![Port {
-                traddr: "192.168.9.9".into(),
-                ..rdma_port(true)
+            targets: vec![Target {
+                iqn: "iqn.2026-06.io.greendot:tape".into(),
+                enabled: true,
+                demo_mode: false,
+                luns: vec!["tape".into()],
+                portals: vec![
+                    Portal {
+                        addr_port: "10.0.0.5:3260".into(),
+                        iser: true,
+                    },
+                    Portal {
+                        addr_port: "10.0.0.5:3261".into(),
+                        iser: false,
+                    },
+                ],
+                acls: vec!["iqn.1993-08.org.debian:01:abc".into()],
             }],
         };
-        let requests = plan(&[e], &actual, &cfg());
-        assert_eq!(
-            requests,
-            vec![
-                Request::NvmetPortUnlink {
-                    port: PORT_RDMA,
-                    nqn: nqn(NQN)
-                },
-                Request::NvmetSubsysDelete { nqn: nqn(NQN) },
-            ]
-        );
+        assert!(lio_satisfied(&d, &actual));
+        assert!(!lio_satisfied(&d, &ActualLio::default()));
+        let mut drift = actual.clone();
+        drift.targets[0].portals.pop();
+        assert!(!lio_satisfied(&d, &drift));
+    }
 
-        // With an enabled export wanting RDMA, the stale port is recreated.
-        let actual = ActualNvmet {
-            subsystems: vec![actual_subsys()],
-            ports: vec![Port {
-                traddr: "192.168.9.9".into(),
-                subsystems: vec![],
-                ..rdma_port(false)
-            }],
-        };
-        let mut e = export();
-        e.want_tcp = false;
-        let requests = plan(&[e], &actual, &cfg());
-        let addr: IpAddr = "10.0.0.5".parse().unwrap();
+    #[test]
+    fn modules_follow_enabled_transports() {
         assert_eq!(
-            requests,
-            vec![
-                Request::EnsureModules {
-                    modules: vec![KernelModule::NvmetRdma]
-                },
-                Request::NvmetPortDelete { id: PORT_RDMA },
-                Request::NvmetPortCreate {
-                    id: PORT_RDMA,
-                    trtype: Transport::Rdma,
-                    traddr: addr,
-                    trsvcid: 4420
-                },
-                Request::NvmetSubsysCreate {
-                    nqn: nqn(NQN),
-                    allow_any_host: false
-                },
-                Request::NvmetNamespaceSet {
-                    nqn: nqn(NQN),
-                    nsid: 1,
-                    device_path: DevicePath::new(DEV).unwrap(),
-                    enable: true,
-                },
-                Request::NvmetPortLink {
-                    port: PORT_RDMA,
-                    nqn: nqn(NQN)
-                },
-            ]
+            modules_for(&[nvme_export()]),
+            vec![KernelModule::NvmetRdma, KernelModule::NvmetTcp]
         );
+        assert_eq!(
+            modules_for(&[iscsi_export()]),
+            vec![KernelModule::Iscsi, KernelModule::Iser]
+        );
+        assert!(modules_for(&[]).is_empty());
     }
 }

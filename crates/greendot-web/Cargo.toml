@@ -23,7 +23,7 @@ for RDMA on plain NICs."""
 # (`$auto`) cannot map nix-store libraries to Debian packages, so we name the
 # Ubuntu packages providing each DT_NEEDED of the (patchelf-retargeted)
 # binaries. All are correct for Ubuntu 26.04 regardless of build host.
-depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod"
+depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod, nvme-cli, nvmetcli, targetcli-fb"
 conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"
 assets = [
@@ -63,6 +63,7 @@ croner = "3"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "signal", "time", "sync"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 toml = "0.9"
 
 [dev-dependencies]

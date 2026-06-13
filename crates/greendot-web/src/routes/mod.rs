@@ -3,6 +3,7 @@ pub mod disks;
 pub mod exports;
 pub mod settings;
 pub mod snapshots;
+pub mod tasks;
 pub mod zfs;
 
 use crate::auth::{self, CurrentUser};
@@ -33,6 +34,8 @@ pub struct AppState {
     pub lio_root: std::path::PathBuf,
     /// Serializes reconcile passes (UI actions vs the periodic task).
     pub reconcile_lock: tokio::sync::Mutex<()>,
+    /// Live state of running tasks (for SSE streaming).
+    pub tasks: crate::task_runner::TaskHub,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -45,6 +48,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(disks::router())
         .merge(snapshots::router())
         .merge(charts::router())
+        .merge(tasks::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -129,20 +133,48 @@ pub(crate) mod testutil {
                 let mut reader = BufReader::new(stream.try_clone().unwrap());
                 let mut writer = stream;
                 while let Ok(Some(req)) = wire::read_msg::<HelperRequest, _>(&mut reader) {
-                    let resp = match req {
-                        HelperRequest::Authenticate { username, password }
-                            if username.as_str() == "alice" && password.0 == "secret" =>
-                        {
-                            HelperResponse::OkAuth {
-                                username: username.to_string(),
-                            }
+                    use greendot_proto::TaskEvent;
+                    let ok = |w: &mut std::os::unix::net::UnixStream| match req {
+                        // One-shot replies.
+                        HelperRequest::Ping => wire::write_msg(w, &HelperResponse::Ok),
+                        HelperRequest::Authenticate {
+                            ref username,
+                            ref password,
+                        } => {
+                            let resp = if username.as_str() == "alice" && password.0 == "secret" {
+                                HelperResponse::OkAuth {
+                                    username: username.to_string(),
+                                }
+                            } else {
+                                HelperResponse::err(
+                                    ErrKind::AuthFailed,
+                                    "invalid username or password",
+                                )
+                            };
+                            wire::write_msg(w, &resp)
                         }
-                        HelperRequest::Authenticate { .. } => {
-                            HelperResponse::err(ErrKind::AuthFailed, "invalid username or password")
-                        }
-                        _ => HelperResponse::Ok,
+                        // Everything else is a task: stream Started + a
+                        // successful Finished.
+                        _ => wire::write_msg(
+                            w,
+                            &TaskEvent::Started {
+                                command: "fake".into(),
+                                args: vec![],
+                                stdin: None,
+                            },
+                        )
+                        .and_then(|()| {
+                            wire::write_msg(
+                                w,
+                                &TaskEvent::Finished {
+                                    exit: 0,
+                                    ok: true,
+                                    error: None,
+                                },
+                            )
+                        }),
                     };
-                    if wire::write_msg(&mut writer, &resp).is_err() {
+                    if ok(&mut writer).is_err() {
                         break;
                     }
                 }
@@ -163,6 +195,7 @@ pub(crate) mod testutil {
             lio_root: nvmet_root.join("lio"),
             nvmet_root,
             reconcile_lock: tokio::sync::Mutex::new(()),
+            tasks: crate::task_runner::TaskHub::default(),
         }))
     }
 

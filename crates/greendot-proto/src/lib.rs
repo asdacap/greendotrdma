@@ -12,7 +12,6 @@ pub mod wire;
 pub use types::*;
 
 use serde::{Deserialize, Serialize};
-use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
@@ -61,93 +60,13 @@ pub enum Request {
         number: u32,
     },
 
-    // NVMe-oF target (nvmet configfs)
-    NvmetSubsysCreate {
-        nqn: Nqn,
-        allow_any_host: bool,
+    // NVMe-oF / iSCSI targets: the helper renders these to nvmetcli /
+    // targetctl JSON and applies them with the tools' restore command.
+    NvmetApply {
+        desired: NvmetDesired,
     },
-    NvmetSubsysDelete {
-        nqn: Nqn,
-    },
-    NvmetNamespaceSet {
-        nqn: Nqn,
-        nsid: u32,
-        device_path: DevicePath,
-        enable: bool,
-    },
-    NvmetNamespaceDelete {
-        nqn: Nqn,
-        nsid: u32,
-    },
-    NvmetPortCreate {
-        id: u16,
-        trtype: Transport,
-        traddr: IpAddr,
-        trsvcid: u16,
-    },
-    NvmetPortDelete {
-        id: u16,
-    },
-    NvmetPortLink {
-        port: u16,
-        nqn: Nqn,
-    },
-    NvmetPortUnlink {
-        port: u16,
-        nqn: Nqn,
-    },
-    NvmetHostAllow {
-        nqn: Nqn,
-        host_nqn: Nqn,
-    },
-    NvmetHostRemove {
-        nqn: Nqn,
-        host_nqn: Nqn,
-    },
-
-    // iSCSI target (LIO configfs)
-    LioBackstoreCreate {
-        name: BackstoreName,
-        device_path: DevicePath,
-    },
-    LioBackstoreDelete {
-        name: BackstoreName,
-    },
-    LioTargetCreate {
-        iqn: Iqn,
-    },
-    LioTargetDelete {
-        iqn: Iqn,
-    },
-    LioLunMap {
-        iqn: Iqn,
-        lun: u32,
-        backstore: BackstoreName,
-    },
-    LioPortalSet {
-        iqn: Iqn,
-        addr: IpAddr,
-        port: u16,
-        iser: bool,
-    },
-    LioPortalDelete {
-        iqn: Iqn,
-        addr: IpAddr,
-        port: u16,
-    },
-    LioAclAdd {
-        iqn: Iqn,
-        initiator: Iqn,
-    },
-    LioAclRemove {
-        iqn: Iqn,
-        initiator: Iqn,
-    },
-    LioTpgSet {
-        iqn: Iqn,
-        enabled: bool,
-        demo_mode: bool,
-        auth: Option<ChapCreds>,
+    LioApply {
+        desired: LioDesired,
     },
 
     // System
@@ -156,6 +75,9 @@ pub enum Request {
     },
     RxeLinkAdd {
         netdev: NetdevName,
+    },
+    InstallPackages {
+        packages: Vec<PackageName>,
     },
 }
 
@@ -210,23 +132,75 @@ mod tests {
         volblocksize: Some(16384),
         sparse: true,
     })]
-    #[case::port(Request::NvmetPortCreate {
-        id: 1,
-        trtype: Transport::Rdma,
-        traddr: "192.168.1.10".parse().unwrap(),
-        trsvcid: 4420,
+    #[case::nvmet(Request::NvmetApply {
+        desired: NvmetDesired {
+            subsystems: vec![NvmetSubsysSpec {
+                nqn: Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap(),
+                allow_any_host: false,
+                allowed_hosts: vec![Nqn::new("nqn.2014-08.org.nvmexpress:host1").unwrap()],
+                namespaces: vec![NvmetNsSpec {
+                    nsid: 1,
+                    device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
+                }],
+            }],
+            ports: vec![NvmetPortSpec {
+                id: 1,
+                trtype: Transport::Rdma,
+                traddr: "192.168.1.10".parse().unwrap(),
+                trsvcid: 4420,
+                subsystems: vec![Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap()],
+            }],
+        },
     })]
-    #[case::portal(Request::LioPortalSet {
-        iqn: Iqn::new("iqn.2026-06.io.greendot:vm1").unwrap(),
-        addr: "::1".parse().unwrap(),
-        port: 3260,
-        iser: true,
+    #[case::lio(Request::LioApply {
+        desired: LioDesired {
+            backstores: vec![LioBackstoreSpec {
+                name: BackstoreName::new("vm1").unwrap(),
+                device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
+            }],
+            targets: vec![LioTargetSpec {
+                iqn: Iqn::new("iqn.2026-06.io.greendot:vm1").unwrap(),
+                enabled: true,
+                demo_mode: false,
+                luns: vec![LioLunSpec { lun: 0, backstore: BackstoreName::new("vm1").unwrap() }],
+                portals: vec![LioPortalSpec { addr: "::1".parse().unwrap(), port: 3260, iser: true }],
+                acls: vec![Iqn::new("iqn.1993-08.org.debian:01:abc").unwrap()],
+            }],
+        },
     })]
     #[case::modules(Request::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
+    #[case::install(Request::InstallPackages {
+        packages: vec![PackageName::new("nvmetcli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
+    })]
     fn request_roundtrips(#[case] req: Request) {
         assert_eq!(roundtrip(&req), req);
+    }
+
+    #[test]
+    fn task_events_roundtrip() {
+        for ev in [
+            TaskEvent::Started {
+                command: "nvmetcli".into(),
+                args: vec!["restore".into(), "/dev/stdin".into()],
+                stdin: Some("{}".into()),
+            },
+            TaskEvent::Stdout {
+                data: "hello\n".into(),
+            },
+            TaskEvent::Stderr {
+                data: "warn\n".into(),
+            },
+            TaskEvent::Finished {
+                exit: 0,
+                ok: true,
+                error: None,
+            },
+        ] {
+            let json = serde_json::to_string(&ev).unwrap();
+            assert_eq!(serde_json::from_str::<TaskEvent>(&json).unwrap(), ev);
+        }
     }
 
     #[test]
@@ -244,8 +218,8 @@ mod tests {
         // Deserialization must enforce validation (the helper's second line of defense).
         for bad in [
             r#"{"op":"zvol_delete","dataset":"../../etc"}"#,
-            r#"{"op":"nvmet_subsys_delete","nqn":"not-an-nqn"}"#,
             r#"{"op":"rxe_link_add","netdev":"eth0/../x"}"#,
+            r#"{"op":"install_packages","packages":["foo;rm -rf"]}"#,
             r#"{"op":"no_such_op"}"#,
         ] {
             assert!(serde_json::from_str::<Request>(bad).is_err(), "{bad}");

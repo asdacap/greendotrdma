@@ -5,6 +5,37 @@
 { pkgs, greendot }:
 
 let
+  # nixpkgs' nvmet-cli 0.7 is too old for the test kernel in two ways, both
+  # test-environment quirks (Ubuntu 26.04 ships a newer, fixed nvmetcli):
+  #   1. missing its `six` runtime dep (nvme.py uses six.iteritems);
+  #   2. Port.delete() does an unguarded os.listdir(".../referrals/"), which
+  #      ENOENTs on kernels without that dir — nvmetcli then misreports it as
+  #      "No saved config file" and aborts clearing, so only the first restore
+  #      ever works.
+  patchedNvmetCli = pkgs.nvmet-cli.overrideAttrs (o: {
+    postInstall = (o.postInstall or "") + ''
+      f=$(find $out -name nvme.py | head -1)
+      # Guard a listdir that ENOENTs on kernels without a port `referrals` dir.
+      substituteInPlace "$f" --replace-fail \
+        'for d in os.listdir("%s/referrals/" % self._path):' \
+        'for d in (os.listdir("%s/referrals/" % self._path) if os.path.isdir("%s/referrals/" % self._path) else []):'
+      # Don't explicitly delete ANA groups during Port.delete — rmdir of the
+      # port removes them, and deleting the default group errors on this kernel.
+      substituteInPlace "$f" --replace-fail \
+        'for a in self.ana_groups:' \
+        'for a in []:'
+    '';
+  });
+  nvmetcli = pkgs.runCommand "nvmetcli-wrapped" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+    mkdir -p $out/bin
+    makeWrapper ${patchedNvmetCli}/bin/nvmetcli $out/bin/nvmetcli \
+      --prefix PYTHONPATH : ${pkgs.python3Packages.six}/${pkgs.python3.sitePackages}
+  '';
+
+  # The CLIs the services shell out to. On Ubuntu these are on the default
+  # systemd PATH (/usr/bin etc.); on NixOS we put them on the service `path`.
+  tools = [ nvmetcli pkgs.zfs pkgs.kmod pkgs.rdma-core pkgs.util-linux pkgs.nvme-cli ];
+
   config_toml = pkgs.writeText "greendot-config.toml" ''
     listen = "127.0.0.1:8080"
     helper_socket = "/run/greendotrdma/helper.sock"
@@ -38,6 +69,7 @@ pkgs.testers.runNixOSTest {
     environment.systemPackages = with pkgs; [
       greendot
       nvme-cli
+      nvmetcli # six-wrapped (see above); the apply task shells out to it
       rdma-core
       util-linux
       curl
@@ -69,6 +101,7 @@ pkgs.testers.runNixOSTest {
     systemd.services.greendot-helper = {
       description = "GreenDotRDMA privileged helper";
       wantedBy = [ "multi-user.target" ];
+      path = tools;
       serviceConfig = {
         ExecStart = "${greendot}/bin/greendot-helper";
         Restart = "on-failure";
@@ -81,6 +114,7 @@ pkgs.testers.runNixOSTest {
       description = "GreenDotRDMA web UI";
       wantedBy = [ "multi-user.target" ];
       after = [ "greendot-helper.service" ];
+      path = tools;
       serviceConfig = {
         User = "greendot";
         Group = "greendot";
@@ -96,13 +130,16 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("greendot-web.service")
     machine.wait_for_open_port(8080)
 
-    # configfs + a Soft-RoCE device so RDMA is real.
+    # configfs + a Soft-RoCE device so RDMA is real. eth1 is the deterministic
+    # NixOS-test LAN (192.168.1.1); wait for its address before using it.
     machine.succeed("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config")
     machine.succeed("modprobe nvmet nvme_loop nvmet_rdma rdma_rxe nvme_rdma nvme_fabrics")
-    netdev = machine.succeed("ip -o -4 route show default | awk '{print $5}' | head -1").strip() or "eth1"
+    netdev = "eth1"
+    machine.wait_until_succeeds(f"ip -o -4 addr show dev {netdev} | grep -q 'inet '")
     machine.succeed(f"rdma link add rxe0 type rxe netdev {netdev}")
     machine.succeed("rdma link show | grep -q rxe0")
     ip = machine.succeed(f"ip -o -4 addr show dev {netdev} | awk '{{print $4}}' | cut -d/ -f1 | head -1").strip()
+    assert ip, "no IPv4 address on the test netdev"
     print(f"netdev={netdev} ip={ip}")
 
     # A file-backed pool and a zvol to export.
@@ -149,8 +186,9 @@ pkgs.testers.runNixOSTest {
         "http://127.0.0.1:8080/exports/create"
     )
 
-    # The subsystem must now exist in configfs, RDMA-linked.
-    machine.wait_until_succeeds("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1")
+    # The apply ran through nvmetcli as a recorded task: the subsystem must now
+    # exist in configfs, RDMA-linked.
+    machine.wait_until_succeeds("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1", timeout=120)
     machine.succeed("test -L /sys/kernel/config/nvmet/ports/1/subsystems/nqn.2026-06.io.greendot:vm1")
     trtype = machine.succeed("cat /sys/kernel/config/nvmet/ports/1/addr_trtype").strip()
     assert trtype == "rdma", f"port 1 should be rdma, got {trtype}"
@@ -170,11 +208,18 @@ pkgs.testers.runNixOSTest {
     print(metrics)
     assert 'greendot_export_status{export="vm1"} 2' in metrics, "export status gauge not green in /metrics"
 
+    # The operation was recorded as a task: the Tasks page lists a succeeded
+    # nvmet-apply running the real nvmetcli command.
+    tasks = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/tasks")
+    assert "nvmet-apply" in tasks, f"apply not recorded as a task:\n{tasks}"
+    assert "nvmetcli" in tasks, "task should show the real nvmetcli command"
+    assert "dot-red" not in tasks, f"a task failed:\n{tasks}"
+
     # Disabling the export tears the subsystem back down (reconcile works).
     machine.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
         "--data 'id=1&enable=false' http://127.0.0.1:8080/exports/toggle"
     )
-    machine.wait_until_fails("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1")
+    machine.wait_until_fails("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1", timeout=60)
   '';
 }

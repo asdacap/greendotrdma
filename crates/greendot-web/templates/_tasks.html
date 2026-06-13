@@ -1,0 +1,21 @@
+<div id="tasks-content">
+  {% if let Some(error) = error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if rows.is_empty() %}
+  <p class="empty">No tasks yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th></th><th>Task</th><th>Command</th><th>Started</th><th>Duration</th></tr></thead>
+    <tbody>
+      {% for t in rows %}
+      <tr>
+        <td><span class="dot {{ t.dot_class }}" title="{{ t.status }}"></span></td>
+        <td><a href="/tasks/{{ t.id }}">{{ t.title }}</a><br><span class="muted small">{{ t.kind }}</span></td>
+        <td><code class="small">{{ t.command_line }}</code></td>
+        <td class="small">{{ t.started }}</td>
+        <td class="small">{{ t.duration }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

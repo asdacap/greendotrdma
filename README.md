@@ -12,6 +12,15 @@ Also on board: ZFS zvol management, GPT partitioning, scheduled snapshots
 with retention, live + historical traffic charts, a Prometheus `/metrics`
 endpoint, and one-click Soft-RoCE so any NIC can do real RDMA.
 
+Every privileged operation runs as a recorded **task** — a real CLI command
+(`zfs`, `sfdisk`, `modprobe`, `rdma`, `nvmetcli`, `targetctl`, `apt-get`) with
+its stdin/stdout/stderr, exit status, and a live output stream — all visible on
+a central **Tasks** page. NVMe-oF/iSCSI state is applied by rendering the
+desired config and running the official `nvmetcli`/`targetctl` restore; if a
+required CLI is missing the task fails with an install hint, and a one-click
+**Install missing** action (itself a task) installs the packages. The typed
+allowlist in the root helper still bounds exactly which commands can run.
+
 ## Architecture
 
 Two systemd services:

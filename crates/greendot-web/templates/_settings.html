@@ -2,6 +2,28 @@
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
 
+  <h2>Dependencies</h2>
+  <p class="muted small">Each operation runs a real CLI. Missing ones can be installed as a task.</p>
+  <table>
+    <thead><tr><th></th><th>Command</th><th>Package</th></tr></thead>
+    <tbody>
+      {% for d in view.deps %}
+      <tr>
+        <td>{% if d.present %}<span class="dot dot-green"></span>{% else %}<span class="dot dot-red"></span>{% endif %}</td>
+        <td><code>{{ d.cli }}</code></td>
+        <td class="small">{{ d.package }}{% if d.present %} <span class="muted">(installed)</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% if !view.missing_packages.is_empty() %}
+  <form class="inline" hx-post="/settings/install" hx-target="#settings-content" hx-swap="outerHTML">
+    <input type="hidden" name="packages" value="{{ view.missing_packages }}">
+    <button>Install missing ({{ view.missing_packages }})</button>
+  </form>
+  <p class="muted small">Watch progress on the <a href="/tasks">Tasks</a> page.</p>
+  {% endif %}
+
   <h2>Target listen address</h2>
   <form class="card" hx-post="/settings/listen" hx-target="#settings-content" hx-swap="outerHTML">
     <label>Listen address (NVMe-oF and iSCSI targets bind here)

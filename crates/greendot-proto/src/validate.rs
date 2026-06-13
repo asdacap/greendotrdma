@@ -77,6 +77,16 @@ pub(crate) fn export_name(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-.".contains(c))
 }
 
+pub(crate) fn package_name(s: &str) -> bool {
+    // Debian package name: lowercase alnum start, then alnum plus `+ - .`.
+    (2..=100).contains(&s.len())
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+-.".contains(c))
+}
+
 pub(crate) fn username(s: &str) -> bool {
     s.len() <= 32
         && s.chars()

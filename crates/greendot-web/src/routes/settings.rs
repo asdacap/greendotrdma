@@ -7,7 +7,7 @@ use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{KernelModule, NetdevName, Request, Response as HelperResponse};
+use greendot_proto::{KernelModule, NetdevName, Request};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -16,6 +16,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/settings", get(settings_page))
         .route("/settings/listen", post(set_listen))
         .route("/settings/rxe", post(enable_rxe))
+        .route("/settings/install", post(install_deps))
 }
 
 pub struct RdmaRow {
@@ -25,12 +26,27 @@ pub struct RdmaRow {
     pub addrs: String,
 }
 
+pub struct DepRow {
+    pub cli: &'static str,
+    pub package: String,
+    pub present: bool,
+}
+
 pub struct SettingsView {
     pub listen_addr: String,
     pub rdma_devs: Vec<RdmaRow>,
     pub plain_netdevs: Vec<String>,
+    pub deps: Vec<DepRow>,
+    pub missing_packages: String,
     pub flash: Option<String>,
     pub form_error: Option<String>,
+}
+
+/// True if `cli` is found on PATH (unprivileged check).
+fn cli_present(cli: &str) -> bool {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).any(|dir| dir.join(cli).is_file()))
+        .unwrap_or(false)
 }
 
 #[derive(Template)]
@@ -56,7 +72,26 @@ fn gather(state: &AppState, flash: Option<String>, form_error: Option<String>) -
         .cloned()
         .collect();
     plain_netdevs.sort();
+    let deps: Vec<DepRow> = greendot_proto::REQUIRED_CLIS
+        .iter()
+        .map(|&cli| DepRow {
+            cli,
+            package: greendot_proto::package_for_cli(cli)
+                .unwrap_or("")
+                .to_string(),
+            present: cli_present(cli),
+        })
+        .collect();
+    let mut missing: Vec<String> = deps
+        .iter()
+        .filter(|d| !d.present && !d.package.is_empty())
+        .map(|d| d.package.clone())
+        .collect();
+    missing.sort();
+    missing.dedup();
     SettingsView {
+        missing_packages: missing.join(" "),
+        deps,
         listen_addr: state
             .db
             .get_setting("listen_addr")
@@ -137,33 +172,33 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
         });
     };
     let steps = [
-        Request::EnsureModules {
-            modules: vec![KernelModule::Rxe],
-        },
-        Request::RxeLinkAdd {
-            netdev: netdev.clone(),
-        },
+        (
+            "modules",
+            "load rxe module",
+            Request::EnsureModules {
+                modules: vec![KernelModule::Rxe],
+            },
+        ),
+        (
+            "rxe-link",
+            &format!("add Soft-RoCE on {netdev}"),
+            Request::RxeLinkAdd {
+                netdev: netdev.clone(),
+            },
+        ),
     ];
-    for req in steps {
-        match state.helper.call(req).await {
-            Ok(HelperResponse::Ok) => {}
-            Ok(HelperResponse::Err { message, .. }) => {
+    for (kind, title, req) in steps {
+        match crate::task_runner::run(&state, req, kind, title).await {
+            Ok(o) if o.ok => {}
+            Ok(o) => {
+                let msg = o.error.unwrap_or_else(|| "task failed".into());
                 return page(SettingsPartial {
-                    view: gather(&state, None, Some(message)),
-                });
-            }
-            Ok(other) => {
-                return page(SettingsPartial {
-                    view: gather(
-                        &state,
-                        None,
-                        Some(format!("unexpected helper response: {other:?}")),
-                    ),
+                    view: gather(&state, None, Some(msg)),
                 });
             }
             Err(e) => {
                 return page(SettingsPartial {
-                    view: gather(&state, None, Some(format!("helper unavailable: {e:#}"))),
+                    view: gather(&state, None, Some(format!("{e:#}"))),
                 });
             }
         }
@@ -171,6 +206,42 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
     let _ = reconcile_state(&state).await;
     page(SettingsPartial {
         view: gather(&state, Some(format!("Soft-RoCE enabled on {netdev}")), None),
+    })
+}
+
+#[derive(Deserialize)]
+struct InstallForm {
+    /// Space-separated package names (from the dependency panel).
+    packages: String,
+}
+
+async fn install_deps(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<InstallForm>,
+) -> Response {
+    let packages: Vec<greendot_proto::PackageName> = form
+        .packages
+        .split_whitespace()
+        .filter_map(|p| greendot_proto::PackageName::new(p).ok())
+        .collect();
+    if packages.is_empty() {
+        return page(SettingsPartial {
+            view: gather(&state, None, Some("no valid packages to install".into())),
+        });
+    }
+    let names = packages
+        .iter()
+        .map(|p| p.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let req = Request::InstallPackages { packages };
+    let (flash, error) =
+        match crate::task_runner::run(&state, req, "install", &format!("install {names}")).await {
+            Ok(o) => o.message(&format!("installed {names}")),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        };
+    page(SettingsPartial {
+        view: gather(&state, flash, error),
     })
 }
 

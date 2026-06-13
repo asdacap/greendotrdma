@@ -3,6 +3,7 @@
 
 mod cmd;
 mod dispatch;
+mod install;
 mod lio;
 mod modules;
 mod nvmet;
@@ -11,7 +12,9 @@ mod partition;
 mod zfs;
 
 use anyhow::{Context, Result, bail};
-use greendot_proto::{ErrKind, Request, Response, wire};
+use cmd::EventSink;
+use dispatch::Dispatch;
+use greendot_proto::{ErrKind, Request, Response, TaskEvent, wire};
 use std::io::BufReader;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
@@ -28,8 +31,6 @@ struct Opts {
     allow_uid: Option<u32>,
     pam_service: String,
     admin_group: String,
-    nvmet_root: PathBuf,
-    lio_root: PathBuf,
 }
 
 impl Opts {
@@ -40,8 +41,6 @@ impl Opts {
             allow_uid: None,
             pam_service: "greendotrdma".into(),
             admin_group: "greendot-admin".into(),
-            nvmet_root: "/sys/kernel/config/nvmet".into(),
-            lio_root: "/sys/kernel/config/target".into(),
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -51,8 +50,6 @@ impl Opts {
                 "--allow-uid" => opts.allow_uid = Some(value()?.parse()?),
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
-                "--nvmet-root" => opts.nvmet_root = value()?.into(),
-                "--lio-root" => opts.lio_root = value()?.into(),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -101,9 +98,6 @@ fn main() -> Result<()> {
             30.0,
             std::time::Instant::now(),
         )),
-        runner: Box::new(cmd::SystemRunner),
-        nvmet_root: opts.nvmet_root,
-        lio_root: opts.lio_root,
         mutate_lock: std::sync::Mutex::new(()),
     });
     let active = Arc::new(AtomicUsize::new(0));
@@ -146,6 +140,15 @@ fn peer_uid(stream: &UnixStream) -> Result<u32> {
     Ok(creds.uid())
 }
 
+/// Writes each task event to the socket as a framed line.
+struct SocketSink<'a>(&'a mut UnixStream);
+
+impl EventSink for SocketSink<'_> {
+    fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()> {
+        wire::write_msg(self.0, &ev)
+    }
+}
+
 fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
     let Ok(read_half) = stream.try_clone() else {
         return;
@@ -154,12 +157,20 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
     let mut writer = stream;
     loop {
         match wire::read_msg::<Request, _>(&mut reader) {
-            Ok(Some(req)) => {
-                let resp = dispatch::dispatch(ctx, req);
-                if wire::write_msg(&mut writer, &resp).is_err() {
-                    return;
+            Ok(Some(req)) => match dispatch::plan(ctx, req) {
+                Dispatch::OneShot(resp) => {
+                    if wire::write_msg(&mut writer, &resp).is_err() {
+                        return;
+                    }
                 }
-            }
+                Dispatch::Task(spec) => {
+                    let _guard = ctx.mutate_lock.lock().unwrap();
+                    let mut sink = SocketSink(&mut writer);
+                    if cmd::run_task(&spec, &mut sink).is_err() {
+                        return; // socket write failed; client gone
+                    }
+                }
+            },
             Ok(None) => return,
             Err(e) => {
                 let resp = Response::err(ErrKind::Validation, format!("bad request: {e}"));

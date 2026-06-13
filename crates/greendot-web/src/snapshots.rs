@@ -1,11 +1,10 @@
 //! Periodic ZFS snapshots with retention. The scheduler runs in this
 //! process; the actual `zfs snapshot`/`destroy` goes through the helper.
 
-use crate::helper_client::HelperClient;
 use crate::routes::AppState;
 use crate::state::SnapshotPolicy;
 use chrono::{DateTime, Utc};
-use greendot_proto::{DatasetName, Request, Response, SnapName};
+use greendot_proto::{DatasetName, Request, SnapName};
 
 /// Whether a policy is due: its cron has an occurrence after `last_run`
 /// that is not in the future. Invalid cron expressions are never due.
@@ -79,19 +78,20 @@ async fn run_policy(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc
     };
     let req = Request::SnapshotCreate {
         dataset: dataset.clone(),
-        snap,
+        snap: snap.clone(),
     };
-    match state.helper.call(req).await {
-        Ok(Response::Ok) => {}
-        other => {
-            tracing::error!(?other, dataset = %dataset, "scheduled snapshot failed");
+    let title = format!("scheduled snapshot {dataset}@{snap}");
+    match crate::task_runner::run(state, req, "snapshot-create", &title).await {
+        Ok(o) if o.ok => {}
+        outcome => {
+            tracing::error!(?outcome, dataset = %dataset, "scheduled snapshot failed");
             return;
         }
     }
-    retention(&state.helper, policy, now).await;
+    retention(state, policy, now).await;
 }
 
-async fn retention(helper: &HelperClient, policy: &SnapshotPolicy, now: DateTime<Utc>) {
+async fn retention(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc>) {
     let all = match crate::actual::zfs::snapshots().await {
         Ok(snaps) => snaps,
         Err(e) => {
@@ -119,9 +119,14 @@ async fn retention(helper: &HelperClient, policy: &SnapshotPolicy, now: DateTime
             continue;
         };
         tracing::info!(snapshot = %full, "retention destroying");
-        if let Err(e) = helper
-            .call(Request::SnapshotDestroy { dataset, snap })
-            .await
+        let req = Request::SnapshotDestroy { dataset, snap };
+        if let Err(e) = crate::task_runner::run(
+            state,
+            req,
+            "snapshot-retention",
+            &format!("retention destroy {full}"),
+        )
+        .await
         {
             tracing::error!(error = %e, snapshot = %full, "retention destroy failed");
         }

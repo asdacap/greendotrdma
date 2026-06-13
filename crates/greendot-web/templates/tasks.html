@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Tasks — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Tasks</h1>
+<p class="muted">Every system operation runs as a recorded command you can inspect and stream.</p>
+<div hx-get="/tasks" hx-select="#tasks-content" hx-trigger="every 2s" hx-swap="outerHTML">
+{% include "_tasks.html" %}
+</div>
+{% endblock %}

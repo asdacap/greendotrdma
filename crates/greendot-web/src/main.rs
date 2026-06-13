@@ -9,6 +9,7 @@ mod reconcile;
 mod routes;
 mod snapshots;
 mod state;
+mod task_runner;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -44,6 +45,7 @@ async fn main() -> Result<()> {
         nvmet_root: config.nvmet_root.clone(),
         lio_root: config.lio_root.clone(),
         reconcile_lock: tokio::sync::Mutex::new(()),
+        tasks: task_runner::TaskHub::default(),
     });
     let app = routes::app(Arc::clone(&state));
 

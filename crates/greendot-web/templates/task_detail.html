@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+
+{% block title %}{{ task.title }} — Tasks{% endblock %}
+
+{% block content %}
+<p><a href="/tasks">← Tasks</a></p>
+<h1><span class="dot {{ task.dot_class }}"></span> {{ task.title }}</h1>
+<p class="muted small">{{ task.kind }} · started {{ task.started }} · {{ task.duration }}</p>
+
+{% if let Some(error) = error %}<p class="error">{{ error }}</p>{% endif %}
+
+<h2>Command</h2>
+<pre class="log">{{ task.command_line }}</pre>
+
+{% if let Some(stdin) = stdin %}
+<details>
+  <summary>stdin ({{ stdin.len() }} bytes)</summary>
+  <pre class="log">{{ stdin }}</pre>
+</details>
+{% endif %}
+
+<h2>Output</h2>
+<pre class="log" id="task-log"></pre>
+
+<script>
+  (function () {
+    const log = document.getElementById("task-log");
+    const es = new EventSource("/tasks/{{ task.id }}/stream");
+    es.addEventListener("output", (e) => {
+      log.textContent += e.data;
+      log.scrollTop = log.scrollHeight;
+    });
+    es.addEventListener("done", () => {
+      es.close();
+      {% if running %}setTimeout(() => location.reload(), 500);{% endif %}
+    });
+  })();
+</script>
+{% endblock %}

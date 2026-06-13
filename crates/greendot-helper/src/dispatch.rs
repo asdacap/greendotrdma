@@ -1,129 +1,81 @@
-//! The privileged-operation allowlist: every reachable operation is a
-//! `Request` variant handled here.
+//! The privileged-operation allowlist. Each task op resolves to exactly one
+//! command (a [`TaskSpec`]); `Ping`/`Authenticate` are one-shot replies and
+//! are never recorded as tasks (auth would store the password).
 
-use crate::cmd::Runner;
-use crate::{lio, modules, nvmet, pam, partition, zfs};
+use crate::cmd::TaskSpec;
+use crate::{install, lio, modules, nvmet, pam, partition, zfs};
 use greendot_proto::{Request, Response};
-use std::path::PathBuf;
 use std::sync::Mutex;
 
 pub struct Ctx {
     pub auth: pam::AuthConfig,
     pub auth_limiter: Mutex<pam::RateLimiter>,
-    pub runner: Box<dyn Runner>,
-    pub nvmet_root: PathBuf,
-    pub lio_root: PathBuf,
-    /// Serializes all mutating operations so configfs changes never interleave.
+    /// Serializes task execution so configfs/zfs changes never interleave.
     pub mutate_lock: Mutex<()>,
 }
 
-pub fn dispatch(ctx: &Ctx, req: Request) -> Response {
+pub enum Dispatch {
+    /// Immediate reply (ping, authentication) — not a task.
+    OneShot(Response),
+    /// One command to run as a streamed task.
+    Task(TaskSpec),
+}
+
+pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
     match req {
-        Request::Ping => Response::Ok,
-        Request::Authenticate { username, password } => {
-            pam::authenticate(&ctx.auth, &ctx.auth_limiter, &username, &password)
+        Request::Ping => Dispatch::OneShot(Response::Ok),
+        Request::Authenticate { username, password } => Dispatch::OneShot(pam::authenticate(
+            &ctx.auth,
+            &ctx.auth_limiter,
+            &username,
+            &password,
+        )),
+
+        Request::ZvolCreate {
+            dataset,
+            size,
+            volblocksize,
+            sparse,
+        } => Dispatch::Task(zfs::zvol_create(&dataset, size, volblocksize, sparse)),
+        Request::ZvolDelete { dataset } => Dispatch::Task(zfs::zvol_delete(&dataset)),
+        Request::ZvolResize { dataset, new_size } => {
+            Dispatch::Task(zfs::zvol_resize(&dataset, new_size))
         }
-        mutation => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            let runner = ctx.runner.as_ref();
-            match mutation {
-                Request::ZvolCreate {
-                    dataset,
-                    size,
-                    volblocksize,
-                    sparse,
-                } => zfs::zvol_create(runner, &dataset, size, volblocksize, sparse),
-                Request::ZvolDelete { dataset } => zfs::zvol_delete(runner, &dataset),
-                Request::ZvolResize { dataset, new_size } => {
-                    zfs::zvol_resize(runner, &dataset, new_size)
-                }
-                Request::SnapshotCreate { dataset, snap } => {
-                    zfs::snapshot_create(runner, &dataset, &snap)
-                }
-                Request::SnapshotDestroy { dataset, snap } => {
-                    zfs::snapshot_destroy(runner, &dataset, &snap)
-                }
-                Request::NvmetSubsysCreate {
-                    nqn,
-                    allow_any_host,
-                } => nvmet::subsys_create(&ctx.nvmet_root, &nqn, allow_any_host),
-                Request::NvmetSubsysDelete { nqn } => nvmet::subsys_delete(&ctx.nvmet_root, &nqn),
-                Request::NvmetNamespaceSet {
-                    nqn,
-                    nsid,
-                    device_path,
-                    enable,
-                } => nvmet::namespace_set(&ctx.nvmet_root, &nqn, nsid, &device_path, enable),
-                Request::NvmetNamespaceDelete { nqn, nsid } => {
-                    nvmet::namespace_delete(&ctx.nvmet_root, &nqn, nsid)
-                }
-                Request::NvmetPortCreate {
-                    id,
-                    trtype,
-                    traddr,
-                    trsvcid,
-                } => nvmet::port_create(&ctx.nvmet_root, id, trtype, traddr, trsvcid),
-                Request::NvmetPortDelete { id } => nvmet::port_delete(&ctx.nvmet_root, id),
-                Request::NvmetPortLink { port, nqn } => {
-                    nvmet::port_link(&ctx.nvmet_root, port, &nqn)
-                }
-                Request::NvmetPortUnlink { port, nqn } => {
-                    nvmet::port_unlink(&ctx.nvmet_root, port, &nqn)
-                }
-                Request::NvmetHostAllow { nqn, host_nqn } => {
-                    nvmet::host_allow(&ctx.nvmet_root, &nqn, &host_nqn)
-                }
-                Request::NvmetHostRemove { nqn, host_nqn } => {
-                    nvmet::host_remove(&ctx.nvmet_root, &nqn, &host_nqn)
-                }
-                Request::LioBackstoreCreate { name, device_path } => {
-                    lio::backstore_create(&ctx.lio_root, &name, &device_path)
-                }
-                Request::LioBackstoreDelete { name } => lio::backstore_delete(&ctx.lio_root, &name),
-                Request::LioTargetCreate { iqn } => lio::target_create(&ctx.lio_root, &iqn),
-                Request::LioTargetDelete { iqn } => lio::target_delete(&ctx.lio_root, &iqn),
-                Request::LioLunMap {
-                    iqn,
-                    lun,
-                    backstore,
-                } => lio::lun_map(&ctx.lio_root, &iqn, lun, &backstore),
-                Request::LioPortalSet {
-                    iqn,
-                    addr,
-                    port,
-                    iser,
-                } => lio::portal_set(&ctx.lio_root, &iqn, addr, port, iser),
-                Request::LioPortalDelete { iqn, addr, port } => {
-                    lio::portal_delete(&ctx.lio_root, &iqn, addr, port)
-                }
-                Request::LioAclAdd { iqn, initiator } => {
-                    lio::acl_add(&ctx.lio_root, &iqn, &initiator)
-                }
-                Request::LioAclRemove { iqn, initiator } => {
-                    lio::acl_remove(&ctx.lio_root, &iqn, &initiator)
-                }
-                Request::LioTpgSet {
-                    iqn,
-                    enabled,
-                    demo_mode,
-                    auth,
-                } => lio::tpg_set(&ctx.lio_root, &iqn, enabled, demo_mode, auth.as_ref()),
-                Request::EnsureModules { modules: list } => modules::ensure(runner, &list),
-                Request::RxeLinkAdd { netdev } => modules::rxe_link_add(runner, &netdev),
-                Request::PartitionTableCreate { disk } => partition::table_create(runner, &disk),
-                Request::PartitionCreate {
-                    disk,
-                    start_sector,
-                    size_sectors,
-                    label,
-                } => partition::partition_create(runner, &disk, start_sector, size_sectors, &label),
-                Request::PartitionDelete { disk, number } => {
-                    partition::partition_delete(runner, &disk, number)
-                }
-                // Every operation is implemented; this match is the complete
-                // allowlist of what the root helper will ever do.
-                Request::Ping | Request::Authenticate { .. } => unreachable!("handled above"),
-            }
+        Request::SnapshotCreate { dataset, snap } => {
+            Dispatch::Task(zfs::snapshot_create(&dataset, &snap))
         }
+        Request::SnapshotDestroy { dataset, snap } => {
+            Dispatch::Task(zfs::snapshot_destroy(&dataset, &snap))
+        }
+
+        Request::NvmetApply { desired } => Dispatch::Task(nvmet::apply_spec(&desired)),
+        Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
+
+        Request::EnsureModules { modules: list } => match modules::ensure(&list) {
+            Some(spec) => Dispatch::Task(spec),
+            None => Dispatch::OneShot(Response::Ok),
+        },
+        Request::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
+
+        Request::PartitionTableCreate { disk } => Dispatch::Task(partition::table_create(&disk)),
+        Request::PartitionCreate {
+            disk,
+            start_sector,
+            size_sectors,
+            label,
+        } => Dispatch::Task(partition::partition_create(
+            &disk,
+            start_sector,
+            size_sectors,
+            &label,
+        )),
+        Request::PartitionDelete { disk, number } => {
+            Dispatch::Task(partition::partition_delete(&disk, number))
+        }
+
+        Request::InstallPackages { packages } => match install::install(&packages) {
+            Some(spec) => Dispatch::Task(spec),
+            None => Dispatch::OneShot(Response::Ok),
+        },
     }
 }

@@ -254,3 +254,20 @@ svg.chart polyline { stroke: var(--accent); stroke-width: 1.5; }
   font-weight: 600;
   cursor: pointer;
 }
+
+code { font-family: ui-monospace, monospace; }
+
+.log {
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px 12px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: ui-monospace, monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+details summary { cursor: pointer; color: var(--muted); }
