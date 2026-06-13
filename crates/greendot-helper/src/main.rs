@@ -1,8 +1,10 @@
 //! Root helper daemon: executes allowlisted privileged operations on behalf
 //! of greendot-web. Only the configured uid may connect (SO_PEERCRED).
 
+mod cmd;
 mod dispatch;
 mod pam;
+mod zfs;
 
 use anyhow::{Context, Result, bail};
 use greendot_proto::{ErrKind, Request, Response, wire};
@@ -82,6 +84,8 @@ fn main() -> Result<()> {
             30.0,
             std::time::Instant::now(),
         )),
+        runner: Box::new(cmd::SystemRunner),
+        mutate_lock: std::sync::Mutex::new(()),
     });
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {

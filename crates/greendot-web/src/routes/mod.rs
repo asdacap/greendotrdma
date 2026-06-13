@@ -1,3 +1,5 @@
+pub mod zfs;
+
 use crate::auth::{self, CurrentUser};
 use crate::helper_client::HelperClient;
 use askama::Template;
@@ -26,6 +28,7 @@ pub fn app(state: Arc<AppState>) -> Router {
     let protected = Router::new()
         .route("/", get(dashboard))
         .route("/logout", post(auth::logout))
+        .merge(zfs::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -77,8 +80,9 @@ async fn dashboard(Extension(user): Extension<CurrentUser>) -> Response {
     page(DashboardTemplate { user })
 }
 
+/// Shared by the route tests of every page module.
 #[cfg(test)]
-mod tests {
+pub(crate) mod testutil {
     use super::*;
     use crate::auth::Sessions;
     use axum::body::Body;
@@ -87,8 +91,9 @@ mod tests {
     use http_body_util::BodyExt;
     use std::io::BufReader;
     use std::time::Duration;
+    use tower::ServiceExt;
 
-    /// A fake helper accepting alice/secret, refusing everything else.
+    /// A fake helper accepting alice/secret, answering Ok to everything else.
     fn fake_helper_socket() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gd-fake{}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -122,7 +127,7 @@ mod tests {
         socket
     }
 
-    fn test_app() -> Router {
+    pub fn test_app() -> Router {
         app(Arc::new(AppState {
             helper: HelperClient::new(fake_helper_socket()),
             sessions: Sessions::new(Duration::from_secs(3600)),
@@ -130,20 +135,47 @@ mod tests {
         }))
     }
 
-    async fn send(app: &Router, req: Request<Body>) -> (StatusCode, axum::http::HeaderMap, String) {
+    pub async fn send(
+        app: &Router,
+        req: Request<Body>,
+    ) -> (StatusCode, axum::http::HeaderMap, String) {
         let resp = app.clone().oneshot(req).await.unwrap();
         let (parts, body) = resp.into_parts();
         let body = String::from_utf8(body.collect().await.unwrap().to_bytes().to_vec()).unwrap();
         (parts.status, parts.headers, body)
     }
 
-    use tower::ServiceExt;
-
-    fn form_post(path: &str, body: &str) -> Request<Body> {
+    pub fn form_post(path: &str, body: &str) -> Request<Body> {
         Request::post(path)
             .header("content-type", "application/x-www-form-urlencoded")
             .body(Body::from(body.to_owned()))
             .unwrap()
+    }
+
+    /// Logs in as alice and returns (cookie, csrf) for authenticated requests.
+    pub async fn login(app: &Router) -> (String, String) {
+        let (status, headers, _) =
+            send(app, form_post("/login", "username=alice&password=secret")).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "test login must succeed");
+        let cookie = headers[header::SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        let req = Request::get("/")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (_, _, body) = send(app, req).await;
+        let csrf = body
+            .split(r#"X-Greendot-Csrf":""#)
+            .nth(1)
+            .and_then(|s| s.split('"').next())
+            .expect("csrf token in page")
+            .to_owned();
+        (cookie, csrf)
     }
 
     #[tokio::test]

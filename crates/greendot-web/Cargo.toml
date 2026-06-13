@@ -14,7 +14,7 @@ askama = "0.14"
 axum = "0.8"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rand = "0.9"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "signal", "time", "sync"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "signal", "time", "sync"] }
 toml = "0.9"
 
 [dev-dependencies]

@@ -1,6 +1,6 @@
 //! End-to-end test against the real helper binary over a unix socket.
 
-use greendot_proto::{DatasetName, ErrKind, Request, Response, wire};
+use greendot_proto::{ErrKind, Nqn, Request, Response, wire};
 use std::io::{BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
@@ -69,8 +69,8 @@ fn ping_unimplemented_op_and_garbage_handling() {
     // Not-yet-implemented operation gets a clean Unsupported error.
     let resp = call(
         &helper,
-        &Request::ZvolDelete {
-            dataset: DatasetName::new("tank/x").unwrap(),
+        &Request::NvmetSubsysDelete {
+            nqn: Nqn::new("nqn.2026-06.io.greendot:x").unwrap(),
         },
     );
     assert!(
