@@ -22,6 +22,7 @@
             rust-analyzer
             pkg-config
             cargo-deb
+            patchelf # retarget release binaries onto Ubuntu's loader for the .deb
           ];
 
           buildInputs = with pkgs; [

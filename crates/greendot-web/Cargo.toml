@@ -19,7 +19,11 @@ web UI whose green dot per export shows whether it is actually served via
 RDMA. Includes ZFS zvol management, GPT partitioning, scheduled snapshots
 with retention, metrics with a Prometheus endpoint, and Soft-RoCE enablement
 for RDMA on plain NICs."""
-depends = "$auto, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod"
+# Shared-lib deps are listed explicitly: when built on NixOS, dpkg-shlibdeps
+# (`$auto`) cannot map nix-store libraries to Debian packages, so we name the
+# Ubuntu packages providing each DT_NEEDED of the (patchelf-retargeted)
+# binaries. All are correct for Ubuntu 26.04 regardless of build host.
+depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod"
 conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"
 assets = [
