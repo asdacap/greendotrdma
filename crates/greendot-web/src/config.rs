@@ -9,6 +9,8 @@ pub struct Config {
     pub listen: SocketAddr,
     pub helper_socket: PathBuf,
     pub db_path: PathBuf,
+    pub tls_cert: Option<PathBuf>,
+    pub tls_key: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -17,6 +19,8 @@ impl Default for Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             helper_socket: "/run/greendotrdma/helper.sock".into(),
             db_path: "/var/lib/greendotrdma/state.db".into(),
+            tls_cert: None,
+            tls_key: None,
         }
     }
 }

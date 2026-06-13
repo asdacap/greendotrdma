@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/htmx.min.js" defer></script>
 </head>
-<body>
+<body hx-headers='{"X-Greendot-Csrf":"{{ user.csrf }}"}'>
   <nav class="sidebar">
     <div class="brand"><span class="dot dot-green"></span> GreenDotRDMA</div>
     <a href="/">Dashboard</a>
@@ -17,6 +17,10 @@
     <a href="/snapshots">Snapshots</a>
     <a href="/charts">Charts</a>
     <a href="/settings">Settings</a>
+    <div class="sidebar-footer">
+      <span class="muted">{{ user.username }}</span>
+      <button class="linklike" hx-post="/logout">Sign out</button>
+    </div>
   </nav>
   <main>
     {% block content %}{% endblock %}
