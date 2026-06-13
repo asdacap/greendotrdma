@@ -1,0 +1,13 @@
+[package]
+name = "greendot-helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+greendot-proto = { workspace = true }
+nix = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

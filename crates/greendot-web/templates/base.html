@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}GreenDotRDMA{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+</head>
+<body>
+  <nav class="sidebar">
+    <div class="brand"><span class="dot dot-green"></span> GreenDotRDMA</div>
+    <a href="/">Dashboard</a>
+    <a href="/disks">Disks</a>
+    <a href="/zfs">ZFS</a>
+    <a href="/exports">Exports</a>
+    <a href="/snapshots">Snapshots</a>
+    <a href="/charts">Charts</a>
+    <a href="/settings">Settings</a>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+</body>
+</html>
