@@ -90,7 +90,30 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS snapshot_policies (
+    id INTEGER PRIMARY KEY,
+    dataset TEXT NOT NULL,
+    cron TEXT NOT NULL,
+    prefix TEXT NOT NULL,
+    keep_last INTEGER,
+    keep_days INTEGER,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_run INTEGER NOT NULL DEFAULT 0
+);
 ";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SnapshotPolicy {
+    pub id: i64,
+    pub dataset: String,
+    pub cron: String,
+    pub prefix: String,
+    pub keep_last: Option<u32>,
+    pub keep_days: Option<u32>,
+    pub enabled: bool,
+    /// Unix timestamp of the last firing (0 = never).
+    pub last_run: i64,
+}
 
 impl Db {
     pub fn open(path: &Path) -> Result<Self> {
@@ -212,6 +235,70 @@ impl Db {
         let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
         let mut rows = stmt.query_map([key], |row| row.get(0))?;
         Ok(rows.next().transpose()?)
+    }
+
+    pub fn insert_policy(&self, p: &SnapshotPolicy) -> Result<i64> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO snapshot_policies (dataset, cron, prefix, keep_last, keep_days, enabled)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                p.dataset,
+                p.cron,
+                p.prefix,
+                p.keep_last,
+                p.keep_days,
+                p.enabled
+            ],
+        )?;
+        Ok(conn.last_insert_rowid())
+    }
+
+    pub fn list_policies(&self) -> Result<Vec<SnapshotPolicy>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, dataset, cron, prefix, keep_last, keep_days, enabled, last_run
+             FROM snapshot_policies ORDER BY dataset",
+        )?;
+        let policies = stmt
+            .query_map([], |row| {
+                Ok(SnapshotPolicy {
+                    id: row.get(0)?,
+                    dataset: row.get(1)?,
+                    cron: row.get(2)?,
+                    prefix: row.get(3)?,
+                    keep_last: row.get(4)?,
+                    keep_days: row.get(5)?,
+                    enabled: row.get(6)?,
+                    last_run: row.get(7)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(policies)
+    }
+
+    pub fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE snapshot_policies SET enabled = ?1 WHERE id = ?2",
+            rusqlite::params![enabled, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_policy_last_run(&self, id: i64, last_run: i64) -> Result<()> {
+        self.conn.lock().unwrap().execute(
+            "UPDATE snapshot_policies SET last_run = ?1 WHERE id = ?2",
+            rusqlite::params![last_run, id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_policy(&self, id: i64) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM snapshot_policies WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {

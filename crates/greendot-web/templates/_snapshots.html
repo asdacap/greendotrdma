@@ -1,0 +1,91 @@
+<div id="snapshots-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  <h2>Snapshot policies</h2>
+  {% if view.policies.is_empty() %}
+  <p class="empty">No policies yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Dataset</th><th>Schedule</th><th>Prefix</th><th>Keep</th><th>Last run</th><th></th></tr></thead>
+    <tbody>
+      {% for p in view.policies %}
+      <tr>
+        <td>{{ p.dataset }}</td>
+        <td><code>{{ p.cron }}</code></td>
+        <td>{{ p.prefix }}</td>
+        <td>{{ p.keep }}</td>
+        <td>{{ p.last_run }}</td>
+        <td>
+          <form class="inline" hx-post="/snapshots/policy/toggle" hx-target="#snapshots-content" hx-swap="outerHTML">
+            <input type="hidden" name="id" value="{{ p.id }}">
+            <input type="hidden" name="enable" value="{{ !p.enabled }}">
+            <button>{% if p.enabled %}Disable{% else %}Enable{% endif %}</button>
+          </form>
+          <form class="inline" hx-post="/snapshots/policy/delete" hx-target="#snapshots-content" hx-swap="outerHTML">
+            <input type="hidden" name="id" value="{{ p.id }}">
+            <button class="danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>New policy</h2>
+  <form class="card" hx-post="/snapshots/policy/create" hx-target="#snapshots-content" hx-swap="outerHTML">
+    <label>Dataset
+      <select name="dataset" required>
+        {% for d in view.datasets %}<option>{{ d }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Schedule (cron)
+      <input name="cron" list="cron-presets" placeholder="0 2 * * *" required>
+      <datalist id="cron-presets">
+        <option value="0 * * * *">hourly</option>
+        <option value="0 2 * * *">daily at 02:00</option>
+        <option value="0 3 * * 0">weekly (Sun 03:00)</option>
+      </datalist>
+    </label>
+    <label>Snapshot prefix <input name="prefix" value="greendot-auto" required></label>
+    <label>Keep last N <input name="keep_last" size="4" placeholder="∞"></label>
+    <label>Keep newer than N days <input name="keep_days" size="4" placeholder="∞"></label>
+    <button type="submit">Create policy</button>
+  </form>
+
+  <h2>Manual snapshot</h2>
+  <form class="inline" hx-post="/snapshots/manual" hx-target="#snapshots-content" hx-swap="outerHTML">
+    <select name="dataset" required>
+      {% for d in view.datasets %}<option>{{ d }}</option>{% endfor %}
+    </select>
+    <input name="name" placeholder="before-upgrade" required>
+    <button>Snapshot now</button>
+  </form>
+
+  <h2>Existing snapshots</h2>
+  {% if view.snapshots.is_empty() %}
+  <p class="empty">No snapshots.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Snapshot</th><th>Used</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      {% for s in view.snapshots %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td>{{ s.used }}</td>
+        <td>{{ s.created }}</td>
+        <td>
+          <form class="inline" hx-post="/snapshots/delete" hx-target="#snapshots-content" hx-swap="outerHTML"
+                hx-confirm="Destroy snapshot {{ s.name }}?">
+            <input type="hidden" name="name" value="{{ s.name }}">
+            <button class="danger">Destroy</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+</div>

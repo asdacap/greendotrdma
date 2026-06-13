@@ -6,6 +6,7 @@ mod fmt;
 mod helper_client;
 mod reconcile;
 mod routes;
+mod snapshots;
 mod state;
 
 use anyhow::{Context, Result};
@@ -46,15 +47,17 @@ async fn main() -> Result<()> {
 
     // Startup reconcile restores configfs after a reboot; the periodic pass
     // self-heals drift and keeps dot reasons fresh.
+    let reconcile_state = Arc::clone(&state);
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
-            if let Err(e) = routes::exports::reconcile_state(&state).await {
+            if let Err(e) = routes::exports::reconcile_state(&reconcile_state).await {
                 tracing::error!(error = %e, "periodic reconcile failed");
             }
         }
     });
+    tokio::spawn(snapshots::scheduler(state));
 
     match tls {
         Some(tls) => {

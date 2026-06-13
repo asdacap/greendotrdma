@@ -1,6 +1,7 @@
 pub mod disks;
 pub mod exports;
 pub mod settings;
+pub mod snapshots;
 pub mod zfs;
 
 use crate::auth::{self, CurrentUser};
@@ -40,6 +41,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(exports::router())
         .merge(settings::router())
         .merge(disks::router())
+        .merge(snapshots::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
