@@ -61,8 +61,26 @@ Everything privileged is testable without hardware: configfs writers run
 against tempdir trees, command execution is recorded and asserted as argv,
 and the web tests talk to a fake helper over a real unix socket.
 
-For end-to-end verification use a disposable Ubuntu VM (no RDMA hardware
-needed — Soft-RoCE provides real RDMA semantics on any NIC):
+### Automated VM test
+
+The flake boots a real NixOS VM and drives the whole stack against a live
+kernel — ZFS, nvmet/LIO configfs, and Soft-RoCE — fully headless:
+
+```sh
+nix build .#checks.x86_64-linux.vmTest -L
+```
+
+It creates a zpool and zvol, logs in through PAM (asserting that a non-admin
+system user and a wrong password are both rejected), creates an NVMe-oF
+export over RDMA via the web API, checks the dashboard shows it **green**,
+then actually runs `nvme connect -t rdma` against the target to prove the dot
+is honest, verifies the Prometheus `greendot_export_status` gauge, and
+confirms disabling the export reconciles the subsystem back out of configfs.
+
+### Manual / Ubuntu acceptance
+
+On a disposable VM (no RDMA hardware needed — Soft-RoCE gives real RDMA on
+any NIC):
 
 ```sh
 sudo scripts/smoke.sh
