@@ -93,6 +93,9 @@ validated_string!(
 validated_string!(
     /// System (PAM) user name.
     Username, validate::username, "username");
+validated_string!(
+    /// Short export name; becomes the NQN/IQN suffix.
+    ExportName, validate::export_name, "export name");
 
 /// A string whose Debug/Display output must never leak (passwords).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -273,6 +276,18 @@ mod tests {
     #[case::too_long(&"a".repeat(37), false)]
     fn part_label(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(PartLabel::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::simple("vm1", true)]
+    #[case::dashed("vm1-data.0", true)]
+    #[case::empty("", false)]
+    #[case::uppercase("VM1", false)]
+    #[case::underscore("vm_1", false)]
+    #[case::slash("vm/1", false)]
+    #[case::leading_dash("-vm", false)]
+    fn export_name(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(ExportName::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

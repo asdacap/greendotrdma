@@ -1,0 +1,58 @@
+<div id="exports-content">
+  {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  <form class="inline" hx-post="/exports/reconcile" hx-target="#exports-content" hx-swap="outerHTML">
+    <button>Reconcile now</button>
+  </form>
+
+  {% if view.rows.is_empty() %}
+  <p class="empty">No exports yet — create one below.</p>
+  {% else %}
+  <table>
+    <thead><tr><th></th><th>Name</th><th>Device</th><th>Transports</th><th>Hosts</th><th></th></tr></thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr>
+        <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
+        <td>{{ r.name }}<br><span class="muted small">{{ r.dot_reason }}</span></td>
+        <td>{{ r.device }}</td>
+        <td>{{ r.transports }}</td>
+        <td>{{ r.hosts }}</td>
+        <td>
+          <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <input type="hidden" name="enable" value="{{ !r.enabled }}">
+            <button>{% if r.enabled %}Disable{% else %}Enable{% endif %}</button>
+          </form>
+          <form class="inline" hx-post="/exports/delete" hx-target="#exports-content" hx-swap="outerHTML"
+                hx-confirm="Delete export {{ r.name }}? Initiators will lose access.">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <button class="danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>New NVMe-oF export</h2>
+  <form class="card" hx-post="/exports/create" hx-target="#exports-content" hx-swap="outerHTML">
+    <label>Name <input name="name" placeholder="vm1" required></label>
+    <label>Block device
+      <input name="device" list="zvols" placeholder="/dev/zvol/tank/vm1" required>
+      <datalist id="zvols">
+        {% for z in view.zvols %}<option>{{ z }}</option>{% endfor %}
+      </datalist>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> RDMA</label>
+    <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>
+    <label class="checkbox"><input type="checkbox" name="want_loop" value="1"> Loop (local testing)</label>
+    <label>Allowed initiator NQNs (one per line, empty = allow any host)
+      <textarea name="initiators" rows="3" placeholder="nqn.2014-08.org.nvmexpress:..."></textarea>
+    </label>
+    <button type="submit">Create export</button>
+  </form>
+</div>

@@ -1,0 +1,15 @@
+{% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+{% if view.rows.is_empty() %}
+<p class="empty">No exports configured yet — head to <a href="/exports">Exports</a>.</p>
+{% else %}
+<div class="cards">
+  {% for r in view.rows %}
+  <a class="exportcard" href="/exports">
+    <span class="dot {{ r.dot_class }}"></span>
+    <strong>{{ r.name }}</strong>
+    <span class="muted">{{ r.transports }}</span>
+    <span class="muted small">{{ r.dot_reason }}</span>
+  </a>
+  {% endfor %}
+</div>
+{% endif %}

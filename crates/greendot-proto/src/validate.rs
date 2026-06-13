@@ -67,6 +67,16 @@ pub(crate) fn part_label(s: &str) -> bool {
     (1..=36).contains(&s.len()) && component(s)
 }
 
+pub(crate) fn export_name(s: &str) -> bool {
+    // Lowercase so the same name is valid in both NQNs and IQNs.
+    s.len() <= 64
+        && s.chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && s.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-.".contains(c))
+}
+
 pub(crate) fn username(s: &str) -> bool {
     s.len() <= 32
         && s.chars()

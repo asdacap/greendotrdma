@@ -3,6 +3,8 @@
 
 mod cmd;
 mod dispatch;
+mod modules;
+mod nvmet;
 mod pam;
 mod zfs;
 
@@ -24,6 +26,7 @@ struct Opts {
     allow_uid: Option<u32>,
     pam_service: String,
     admin_group: String,
+    nvmet_root: PathBuf,
 }
 
 impl Opts {
@@ -34,6 +37,7 @@ impl Opts {
             allow_uid: None,
             pam_service: "greendotrdma".into(),
             admin_group: "greendot-admin".into(),
+            nvmet_root: "/sys/kernel/config/nvmet".into(),
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -43,6 +47,7 @@ impl Opts {
                 "--allow-uid" => opts.allow_uid = Some(value()?.parse()?),
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
+                "--nvmet-root" => opts.nvmet_root = value()?.into(),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -85,6 +90,7 @@ fn main() -> Result<()> {
             std::time::Instant::now(),
         )),
         runner: Box::new(cmd::SystemRunner),
+        nvmet_root: opts.nvmet_root,
         mutate_lock: std::sync::Mutex::new(()),
     });
     let active = Arc::new(AtomicUsize::new(0));

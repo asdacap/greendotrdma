@@ -64,6 +64,36 @@ h1 { font-size: 22px; margin-top: 0; }
 .dot-green { background: var(--green); box-shadow: 0 0 6px var(--green); }
 .dot-yellow { background: var(--yellow); box-shadow: 0 0 6px var(--yellow); }
 .dot-red { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.dot-gray { background: var(--muted); }
+
+.small { font-size: 12px; }
+
+.cards { display: flex; flex-wrap: wrap; gap: 12px; }
+
+.exportcard {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 180px;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  text-decoration: none;
+}
+
+.exportcard:hover { border-color: var(--muted); }
+
+.card textarea {
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+}
 
 .muted { color: var(--muted); }
 .error { color: var(--red); }

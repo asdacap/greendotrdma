@@ -17,9 +17,11 @@ impl Helper {
             PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("h{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("helper.sock");
+        let nvmet_root = dir.join("nvmet");
         let uid = nix::unistd::getuid().to_string();
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_greendot-helper"))
             .args(["--socket", socket.to_str().unwrap(), "--allow-uid", &uid])
+            .args(["--nvmet-root", nvmet_root.to_str().unwrap()])
             .spawn()
             .unwrap();
         for _ in 0..200 {
@@ -66,11 +68,26 @@ fn ping_unimplemented_op_and_garbage_handling() {
         );
     }
 
-    // Not-yet-implemented operation gets a clean Unsupported error.
+    // A real operation flows through dispatch to the (test-rooted) nvmet tree.
+    let nqn = Nqn::new("nqn.2026-06.io.greendot:sockettest").unwrap();
     let resp = call(
         &helper,
-        &Request::NvmetSubsysDelete {
-            nqn: Nqn::new("nqn.2026-06.io.greendot:x").unwrap(),
+        &Request::NvmetSubsysCreate {
+            nqn: nqn.clone(),
+            allow_any_host: true,
+        },
+    );
+    assert_eq!(resp, Response::Ok);
+    assert_eq!(
+        call(&helper, &Request::NvmetSubsysDelete { nqn }),
+        Response::Ok
+    );
+
+    // A not-yet-implemented operation gets a clean Unsupported error.
+    let resp = call(
+        &helper,
+        &Request::LioTargetCreate {
+            iqn: greendot_proto::Iqn::new("iqn.2026-06.io.greendot:x").unwrap(),
         },
     );
     assert!(

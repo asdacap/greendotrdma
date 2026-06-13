@@ -1,3 +1,4 @@
+pub mod exports;
 pub mod zfs;
 
 use crate::auth::{self, CurrentUser};
@@ -22,6 +23,10 @@ pub struct AppState {
     pub helper: HelperClient,
     pub sessions: auth::Sessions,
     pub secure_cookies: bool,
+    pub db: crate::state::Db,
+    pub nvmet_root: std::path::PathBuf,
+    /// Serializes reconcile passes (UI actions vs the periodic task).
+    pub reconcile_lock: tokio::sync::Mutex<()>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -29,6 +34,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/", get(dashboard))
         .route("/logout", post(auth::logout))
         .merge(zfs::router())
+        .merge(exports::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -74,10 +80,17 @@ pub fn page<T: Template>(template: T) -> Response {
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
     user: CurrentUser,
+    view: exports::ExportsView,
 }
 
-async fn dashboard(Extension(user): Extension<CurrentUser>) -> Response {
-    page(DashboardTemplate { user })
+async fn dashboard(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+) -> Response {
+    page(DashboardTemplate {
+        user,
+        view: exports::gather(&state, None, None).await,
+    })
 }
 
 /// Shared by the route tests of every page module.
@@ -128,10 +141,15 @@ pub(crate) mod testutil {
     }
 
     pub fn test_app() -> Router {
+        let nvmet_root =
+            std::env::temp_dir().join(format!("gd-nvmet-app{}", rand::random::<u32>()));
         app(Arc::new(AppState {
             helper: HelperClient::new(fake_helper_socket()),
             sessions: Sessions::new(Duration::from_secs(3600)),
             secure_cookies: false,
+            db: crate::state::Db::in_memory().unwrap(),
+            nvmet_root,
+            reconcile_lock: tokio::sync::Mutex::new(()),
         }))
     }
 

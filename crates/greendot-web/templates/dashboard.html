@@ -2,5 +2,7 @@
 
 {% block content %}
 <h1>Dashboard</h1>
-<p class="empty">No exports configured yet.</p>
+<div hx-get="/partials/exports" hx-trigger="every 5s" hx-swap="innerHTML">
+  {% include "_dots.html" %}
+</div>
 {% endblock %}

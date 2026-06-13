@@ -1,9 +1,12 @@
 mod actual;
 mod auth;
 mod config;
+mod dot;
 mod fmt;
 mod helper_client;
+mod reconcile;
 mod routes;
+mod state;
 
 use anyhow::{Context, Result};
 use std::sync::Arc;
@@ -34,8 +37,23 @@ async fn main() -> Result<()> {
         helper: helper_client::HelperClient::new(config.helper_socket.clone()),
         sessions: auth::Sessions::new(Duration::from_secs(24 * 3600)),
         secure_cookies: tls.is_some(),
+        db: state::Db::open(&config.db_path)?,
+        nvmet_root: config.nvmet_root.clone(),
+        reconcile_lock: tokio::sync::Mutex::new(()),
     });
-    let app = routes::app(state);
+    let app = routes::app(Arc::clone(&state));
+
+    // Startup reconcile restores configfs after a reboot; the periodic pass
+    // self-heals drift and keeps dot reasons fresh.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_secs(60));
+        loop {
+            tick.tick().await;
+            if let Err(e) = routes::exports::reconcile_state(&state).await {
+                tracing::error!(error = %e, "periodic reconcile failed");
+            }
+        }
+    });
 
     match tls {
         Some(tls) => {
