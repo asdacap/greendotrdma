@@ -1,0 +1,139 @@
+# Shared building blocks for the NixOS VM tests (single-node vm-test.nix and
+# two-node vm-test-two-node.nix): the patched CLIs the services shell out to,
+# the test config, and a module that runs the full greendot stack on a node.
+{ pkgs }:
+
+let
+  # nixpkgs' nvmet-cli 0.7 is too old for the test kernel in two ways, both
+  # test-environment quirks (Ubuntu 26.04 ships a newer, fixed nvmetcli):
+  #   1. missing its `six` runtime dep (nvme.py uses six.iteritems);
+  #   2. Port.delete() does an unguarded os.listdir(".../referrals/"), which
+  #      ENOENTs on kernels without that dir — nvmetcli then misreports it as
+  #      "No saved config file" and aborts clearing, so only the first restore
+  #      ever works.
+  patchedNvmetCli = pkgs.nvmet-cli.overrideAttrs (o: {
+    postInstall = (o.postInstall or "") + ''
+      f=$(find $out -name nvme.py | head -1)
+      # Guard a listdir that ENOENTs on kernels without a port `referrals` dir.
+      substituteInPlace "$f" --replace-fail \
+        'for d in os.listdir("%s/referrals/" % self._path):' \
+        'for d in (os.listdir("%s/referrals/" % self._path) if os.path.isdir("%s/referrals/" % self._path) else []):'
+      # Don't explicitly delete ANA groups during Port.delete — rmdir of the
+      # port removes them, and deleting the default group errors on this kernel.
+      substituteInPlace "$f" --replace-fail \
+        'for a in self.ana_groups:' \
+        'for a in []:'
+    '';
+  });
+  nvmetcli = pkgs.runCommand "nvmetcli-wrapped" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
+    mkdir -p $out/bin
+    makeWrapper ${patchedNvmetCli}/bin/nvmetcli $out/bin/nvmetcli \
+      --prefix PYTHONPATH : ${pkgs.python3Packages.six}/${pkgs.python3.sitePackages}
+  '';
+
+  # The iSCSI apply path runs `targetctl restore`. nixpkgs' `targetcli-fb`
+  # ships only `targetcli`, not the `targetctl` helper — but `rtslib-fb` ships
+  # the very same `targetctl` Ubuntu uses (restore clears the existing config
+  # then applies, so disabled exports are torn down). Use it directly.
+  targetctl = pkgs.python3Packages.rtslib-fb;
+
+  # The CLIs the services shell out to. On Ubuntu these are on the default
+  # systemd PATH (/usr/bin etc.); on NixOS we put them on the service `path`.
+  tools = [ nvmetcli targetctl pkgs.zfs pkgs.kmod pkgs.rdma-core pkgs.util-linux pkgs.nvme-cli ];
+
+  configToml = pkgs.writeText "greendot-config.toml" ''
+    listen = "127.0.0.1:8080"
+    helper_socket = "/run/greendotrdma/helper.sock"
+    db_path = "/var/lib/greendotrdma/state.db"
+    metrics_db_path = "/var/lib/greendotrdma/metrics.db"
+    nvmet_root = "/sys/kernel/config/nvmet"
+    lio_root = "/sys/kernel/config/target"
+    # plain HTTP for the test so curl stays simple; production defaults to TLS
+  '';
+
+  # A NixOS module for a node running the full greendot stack (the export
+  # target). `extraKernelModules` lets the two-node target pull in the
+  # iSCSI/iSER target modules on top of the NVMe-oF set.
+  mkGreendotNode = { greendot, extraKernelModules ? [ ] }:
+    { config, pkgs, lib, ... }: {
+      virtualisation.memorySize = 3072;
+      virtualisation.cores = 4;
+
+      # Storage / RDMA stack.
+      boot.supportedFilesystems = [ "zfs" ];
+      networking.hostId = "deadbeef";
+      # Let initiators reach the export ports / RoCE traffic across the test LAN.
+      networking.firewall.enable = false;
+      boot.kernelModules = [
+        "configfs"
+        "nvmet"
+        "nvme_fabrics"
+        "nvme_loop"
+        "nvmet_tcp"
+        "nvmet_rdma"
+        "nvme_rdma"
+        "rdma_rxe"
+      ] ++ extraKernelModules;
+      environment.systemPackages = with pkgs; [
+        greendot
+        nvme-cli
+        nvmetcli # six-wrapped (see above); the apply task shells out to it
+        targetctl # targetcli-fb; the iSCSI apply task shells out to targetctl
+        rdma-core
+        util-linux
+        curl
+        zfs
+      ];
+
+      # Accounts: the service user/group and an admin login.
+      users.groups.greendot = { };
+      users.users.greendot = {
+        isSystemUser = true;
+        group = "greendot";
+        home = "/var/lib/greendotrdma";
+      };
+      users.groups.greendot-admin = { };
+      users.users.gdadmin = {
+        isNormalUser = true;
+        password = "test";
+        extraGroups = [ "greendot-admin" ];
+      };
+      users.users.gduser = {
+        # a valid system user who is NOT in greendot-admin
+        isNormalUser = true;
+        password = "test";
+      };
+
+      # PAM service the helper authenticates against (matches pam_service default).
+      security.pam.services.greendotrdma = { };
+
+      systemd.services.greendot-helper = {
+        description = "GreenDotRDMA privileged helper";
+        wantedBy = [ "multi-user.target" ];
+        path = tools;
+        serviceConfig = {
+          ExecStart = "${greendot}/bin/greendot-helper";
+          Restart = "on-failure";
+          RuntimeDirectory = "greendotrdma";
+          RuntimeDirectoryMode = "0755";
+        };
+      };
+
+      systemd.services.greendot-web = {
+        description = "GreenDotRDMA web UI";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "greendot-helper.service" ];
+        path = tools;
+        serviceConfig = {
+          User = "greendot";
+          Group = "greendot";
+          ExecStart = "${greendot}/bin/greendot-web ${configToml}";
+          Restart = "on-failure";
+          StateDirectory = "greendotrdma";
+        };
+      };
+    };
+in
+{
+  inherit patchedNvmetCli nvmetcli targetctl tools configToml mkGreendotNode;
+}

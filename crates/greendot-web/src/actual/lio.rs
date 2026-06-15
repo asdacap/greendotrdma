@@ -88,9 +88,18 @@ pub fn read(root: &Path) -> ActualLio {
             .filter(|l| l.starts_with("lun_"))
             .flat_map(|l| {
                 let lun_dir = tpg.join("lun").join(&l);
-                dir_names(&lun_dir)
-                    .into_iter()
-                    .filter(move |n| lun_dir.join(n).is_symlink())
+                dir_names(&lun_dir).into_iter().filter_map(move |n| {
+                    // The symlink's own name is a random rtslib alias; the
+                    // backstore it maps to is the target's basename
+                    // (core/iblock_0/<name>), which is what we match on.
+                    let link = lun_dir.join(&n);
+                    if !link.is_symlink() {
+                        return None;
+                    }
+                    std::fs::read_link(&link)
+                        .ok()
+                        .and_then(|t| t.file_name().map(|s| s.to_string_lossy().into_owned()))
+                })
             })
             .collect();
         actual.targets.push(Target {
@@ -139,7 +148,8 @@ mod tests {
         std::fs::write(bs.join("enable"), "1\n").unwrap();
         let tpg = tmp.join("iscsi/iqn.2026-06.io.greendot:vm1/tpgt_1");
         std::fs::create_dir_all(tpg.join("lun/lun_0")).unwrap();
-        std::os::unix::fs::symlink(&bs, tpg.join("lun/lun_0/vm1")).unwrap();
+        // rtslib names the LUN symlink a random alias; we match on its target.
+        std::os::unix::fs::symlink(&bs, tpg.join("lun/lun_0/9f3a2b1c00")).unwrap();
         std::fs::create_dir_all(tpg.join("np/10.0.0.5:3260")).unwrap();
         std::fs::write(tpg.join("np/10.0.0.5:3260/iser"), "1\n").unwrap();
         std::fs::create_dir_all(tpg.join("acls/iqn.1993-08.org.debian:01:abc")).unwrap();

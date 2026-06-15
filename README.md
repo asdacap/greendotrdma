@@ -70,10 +70,12 @@ Everything privileged is testable without hardware: configfs writers run
 against tempdir trees, command execution is recorded and asserted as argv,
 and the web tests talk to a fake helper over a real unix socket.
 
-### Automated VM test
+### Automated VM tests
 
-The flake boots a real NixOS VM and drives the whole stack against a live
-kernel — ZFS, nvmet/LIO configfs, and Soft-RoCE — fully headless:
+The flake boots real NixOS VMs and drives the whole stack against a live
+kernel — ZFS, nvmet/LIO configfs, and Soft-RoCE — fully headless.
+
+**Single-node (loopback):**
 
 ```sh
 nix build .#checks.x86_64-linux.vmTest -L
@@ -82,11 +84,44 @@ nix build .#checks.x86_64-linux.vmTest -L
 It creates a zpool and zvol, logs in through PAM (asserting that a non-admin
 system user and a wrong password are both rejected), creates an NVMe-oF
 export over RDMA via the web API, checks the dashboard shows it **green**,
-then actually runs `nvme connect -t rdma` against the target to prove the dot
-is honest, verifies the Prometheus `greendot_export_status` gauge, and
+then runs `nvme connect -t rdma` against the VM's *own* address to prove the
+dot is honest, verifies the Prometheus `greendot_export_status` gauge, and
 confirms disabling the export reconciles the subsystem back out of configfs.
 
-### Manual / Ubuntu acceptance
+**Two-node (cross-host RDMA):**
+
+```sh
+nix build .#checks.x86_64-linux.vmTestTwoNode -L
+```
+
+This is the honest version: a **target** VM serves an NVMe-oF export *and* an
+iSCSI export over Soft-RoCE, and a **separate initiator** VM reaches both
+across the test LAN — `nvme connect -t rdma` for NVMe/RDMA and
+`iscsiadm ... -I iser` for iSER — proving RDMA between two hosts, not loopback.
+
+### Ubuntu VM test
+
+Since the product ships as a `.deb`, a full real-Ubuntu test builds the
+package, boots a real Ubuntu Server cloud image under qemu, installs it, and
+runs the green-dot flow + a real `nvme connect -t rdma` on the Ubuntu kernel —
+exercising the packaging, the patchelf loader retargeting, the postinst
+(user/group/cert/units), and Ubuntu's module stack:
+
+```sh
+nix run .#ubuntuVmTest
+```
+
+This one is **not** part of `nix flake check`: it downloads an Ubuntu cloud
+image and apt packages (non-hermetic) and wants KVM (falls back to slow TCG).
+
+The `.deb` deliberately does **not** depend on the storage/RDMA CLIs (`zfs`,
+`nvme`, `nvmetcli`, `targetctl`, …) — the app detects whichever are missing and
+offers a one-click install. The test installs the package first (proving that),
+then provisions those CLIs. Note Ubuntu 26.04 dropped the `nvmetcli` package, so
+the test installs it from upstream (Apache-2.0); the in-app "Install missing"
+action, which uses `apt-get`, can't supply `nvmetcli` on 26.04.
+
+### Manual smoke test
 
 On a disposable VM (no RDMA hardware needed — Soft-RoCE gives real RDMA on
 any NIC):
@@ -94,8 +129,3 @@ any NIC):
 ```sh
 sudo scripts/smoke.sh
 ```
-
-For a full two-machine test, run a second VM and connect with
-`nvme connect -t rdma -a <target-ip> -s 4420 -n <nqn>` (package
-`nvme-cli`, modules `nvme_rdma` + `rdma_rxe` with an rxe link on the
-client side too), or `iscsiadm` with `iface.transport_name = iser`.

@@ -19,11 +19,16 @@ web UI whose green dot per export shows whether it is actually served via
 RDMA. Includes ZFS zvol management, GPT partitioning, scheduled snapshots
 with retention, metrics with a Prometheus endpoint, and Soft-RoCE enablement
 for RDMA on plain NICs."""
-# Shared-lib deps are listed explicitly: when built on NixOS, dpkg-shlibdeps
-# (`$auto`) cannot map nix-store libraries to Debian packages, so we name the
-# Ubuntu packages providing each DT_NEEDED of the (patchelf-retargeted)
-# binaries. All are correct for Ubuntu 26.04 regardless of build host.
-depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, zfsutils-linux, util-linux, rdma-core, iproute2, openssl, kmod, nvme-cli, nvmetcli, targetcli-fb"
+# Only true install-time deps are listed: the shared libraries each binary
+# links (named explicitly because, when built on NixOS, dpkg-shlibdeps cannot
+# map nix-store libraries to Debian packages), `openssl` for the postinst's
+# self-signed cert, and `rdma-core` for the RDMA userspace providers. The
+# storage/RDMA *CLIs* (zfs, nvme, nvmetcli, targetctl, sfdisk, modprobe, rdma)
+# are intentionally NOT dependencies: the app detects whichever are missing and
+# offers a one-click "Install missing" task (see REQUIRED_CLIS / install.rs).
+# This also keeps the package installable on releases that don't ship every CLI
+# (e.g. Ubuntu 26.04 dropped the `nvmetcli` package).
+depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, openssl, rdma-core"
 conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"
 assets = [
@@ -32,7 +37,9 @@ assets = [
     ["../../pkg/sysusers.conf", "usr/lib/sysusers.d/greendotrdma.conf", "644"],
     ["../../pkg/tmpfiles.conf", "usr/lib/tmpfiles.d/greendotrdma.conf", "644"],
     ["../../pkg/pam.greendotrdma", "etc/pam.d/greendotrdma", "644"],
-    ["../../pkg/config.toml", "etc/greendotrdma/config.toml", "640"],
+    # 644: greendot-web runs as the unprivileged `greendot` user and must read
+    # this at startup. It holds no secrets (the TLS key is a separate 640 file).
+    ["../../pkg/config.toml", "etc/greendotrdma/config.toml", "644"],
 ]
 
 [[package.metadata.deb.systemd-units]]

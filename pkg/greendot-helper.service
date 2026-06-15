@@ -4,6 +4,10 @@ Documentation=https://github.com/asdacap/greendotrdma
 
 [Service]
 Type=simple
+# Runs as root (uid 0) for configfs/PAM/zfs, but with group greendot so the
+# RuntimeDirectory (/run/greendotrdma) is owned root:greendot — letting the
+# unprivileged greendot-web traverse it to reach the helper socket.
+Group=greendot
 ExecStart=/usr/libexec/greendotrdma/greendot-helper
 Restart=on-failure
 RestartSec=2
