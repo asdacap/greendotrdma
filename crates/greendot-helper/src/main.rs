@@ -170,6 +170,31 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                         return; // socket write failed; client gone
                     }
                 }
+                Dispatch::FailedTask(msg) => {
+                    // Record a refused operation as a failed task so its reason
+                    // streams to the UI like any other task.
+                    let mut sink = SocketSink(&mut writer);
+                    let events = [
+                        TaskEvent::Started {
+                            command: "install".into(),
+                            args: Vec::new(),
+                            stdin: None,
+                        },
+                        TaskEvent::Stderr {
+                            data: format!("{msg}\n"),
+                        },
+                        TaskEvent::Finished {
+                            exit: 1,
+                            ok: false,
+                            error: Some(msg),
+                        },
+                    ];
+                    for ev in events {
+                        if sink.emit(ev).is_err() {
+                            return;
+                        }
+                    }
+                }
             },
             Ok(None) => return,
             Err(e) => {

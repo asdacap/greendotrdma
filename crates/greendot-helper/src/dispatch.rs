@@ -19,6 +19,9 @@ pub enum Dispatch {
     OneShot(Response),
     /// One command to run as a streamed task.
     Task(TaskSpec),
+    /// A refused operation recorded as a failed task carrying this message
+    /// (e.g. install on an unsupported distro), so the reason reaches the UI.
+    FailedTask(String),
 }
 
 pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
@@ -73,9 +76,12 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             Dispatch::Task(partition::partition_delete(&disk, number))
         }
 
-        Request::InstallPackages { packages } => match install::install(&packages) {
-            Some(spec) => Dispatch::Task(spec),
-            None => Dispatch::OneShot(Response::Ok),
-        },
+        Request::InstallPackages { packages } => {
+            match install::install(&packages, &greendot_proto::detect()) {
+                Ok(Some(spec)) => Dispatch::Task(spec),
+                Ok(None) => Dispatch::OneShot(Response::Ok),
+                Err(msg) => Dispatch::FailedTask(msg),
+            }
+        }
     }
 }

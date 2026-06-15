@@ -5,10 +5,12 @@
 //! validation runs on construction *and* on deserialization, so the helper
 //! re-validates everything it receives by merely decoding it.
 
+mod osdetect;
 mod types;
 mod validate;
 pub mod wire;
 
+pub use osdetect::*;
 pub use types::*;
 
 use serde::{Deserialize, Serialize};

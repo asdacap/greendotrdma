@@ -4,6 +4,7 @@
 
   <h2>Dependencies</h2>
   <p class="muted small">Each operation runs a real CLI. Missing ones can be installed as a task.</p>
+  <p class="muted small">Detected OS: {{ view.os_pretty }}</p>
   <table>
     <thead><tr><th></th><th>Command</th><th>Package</th></tr></thead>
     <tbody>
@@ -17,11 +18,15 @@
     </tbody>
   </table>
   {% if !view.missing_packages.is_empty() %}
-  <form class="inline" hx-post="/settings/install" hx-target="#settings-content" hx-swap="outerHTML">
-    <input type="hidden" name="packages" value="{{ view.missing_packages }}">
-    <button>Install missing ({{ view.missing_packages }})</button>
-  </form>
-  <p class="muted small">Watch progress on the <a href="/tasks">Tasks</a> page.</p>
+    {% if view.install_supported %}
+    <form class="inline" hx-post="/settings/install" hx-target="#settings-content" hx-swap="outerHTML">
+      <input type="hidden" name="packages" value="{{ view.missing_packages }}">
+      <button>Install missing ({{ view.missing_packages }})</button>
+    </form>
+    <p class="muted small">Watch progress on the <a href="/tasks">Tasks</a> page.</p>
+    {% else %}
+    <p class="muted small">Automatic install needs Debian/Ubuntu (apt). Install these with your package manager: <code>{{ view.missing_packages }}</code></p>
+    {% endif %}
   {% endif %}
 
   <h2>Target listen address</h2>

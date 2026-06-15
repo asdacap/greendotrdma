@@ -38,6 +38,10 @@ pub struct SettingsView {
     pub plain_netdevs: Vec<String>,
     pub deps: Vec<DepRow>,
     pub missing_packages: String,
+    /// Detected OS label (for display).
+    pub os_pretty: String,
+    /// Whether the one-click installer can drive this OS (Debian/Ubuntu).
+    pub install_supported: bool,
     pub flash: Option<String>,
     pub form_error: Option<String>,
 }
@@ -89,7 +93,10 @@ fn gather(state: &AppState, flash: Option<String>, form_error: Option<String>) -
         .collect();
     missing.sort();
     missing.dedup();
+    let os = greendot_proto::detect();
     SettingsView {
+        install_supported: matches!(os.family, greendot_proto::PkgFamily::Debian),
+        os_pretty: os.pretty,
         missing_packages: missing.join(" "),
         deps,
         listen_addr: state
