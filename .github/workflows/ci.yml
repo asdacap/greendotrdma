@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+# Cancel superseded runs on the same branch/PR.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: fmt · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain comes from the flake dev shell, so CI uses the exact
+      # cargo/rustc/clippy/rustfmt the project pins in flake.lock.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # This flake provides cargo/rustfmt/clippy as separate packages, so the
+      # `cargo fmt` / `cargo clippy` subcommand shims don't resolve inside the
+      # dev shell — invoke cargo-fmt / cargo-clippy directly.
+      - name: rustfmt
+        run: nix develop --command cargo-fmt --all -- --check
+
+      - name: clippy
+        run: nix develop --command cargo-clippy --all-targets -- -D warnings
+
+      - name: test
+        run: nix develop --command cargo test --workspace

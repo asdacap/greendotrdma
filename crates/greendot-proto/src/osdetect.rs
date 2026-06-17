@@ -80,12 +80,36 @@ mod tests {
     use rstest::rstest;
 
     #[rstest]
-    #[case::ubuntu("ID=ubuntu\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n", PkgFamily::Debian, "Ubuntu 26.04 LTS")]
-    #[case::debian("ID=debian\nPRETTY_NAME=\"Debian GNU/Linux 13\"\n", PkgFamily::Debian, "Debian GNU/Linux 13")]
-    #[case::mint("ID=linuxmint\nID_LIKE=\"ubuntu debian\"\nPRETTY_NAME=\"Linux Mint 22\"\n", PkgFamily::Debian, "Linux Mint 22")]
-    #[case::fedora("ID=fedora\nPRETTY_NAME=\"Fedora Linux 41\"\n", PkgFamily::Unsupported, "Fedora Linux 41")]
-    #[case::arch("ID=arch\nPRETTY_NAME=\"Arch Linux\"\n", PkgFamily::Unsupported, "Arch Linux")]
-    #[case::nixos("ID=nixos\nPRETTY_NAME=\"NixOS 25.11\"\n", PkgFamily::Unsupported, "NixOS 25.11")]
+    #[case::ubuntu(
+        "ID=ubuntu\nPRETTY_NAME=\"Ubuntu 26.04 LTS\"\n",
+        PkgFamily::Debian,
+        "Ubuntu 26.04 LTS"
+    )]
+    #[case::debian(
+        "ID=debian\nPRETTY_NAME=\"Debian GNU/Linux 13\"\n",
+        PkgFamily::Debian,
+        "Debian GNU/Linux 13"
+    )]
+    #[case::mint(
+        "ID=linuxmint\nID_LIKE=\"ubuntu debian\"\nPRETTY_NAME=\"Linux Mint 22\"\n",
+        PkgFamily::Debian,
+        "Linux Mint 22"
+    )]
+    #[case::fedora(
+        "ID=fedora\nPRETTY_NAME=\"Fedora Linux 41\"\n",
+        PkgFamily::Unsupported,
+        "Fedora Linux 41"
+    )]
+    #[case::arch(
+        "ID=arch\nPRETTY_NAME=\"Arch Linux\"\n",
+        PkgFamily::Unsupported,
+        "Arch Linux"
+    )]
+    #[case::nixos(
+        "ID=nixos\nPRETTY_NAME=\"NixOS 25.11\"\n",
+        PkgFamily::Unsupported,
+        "NixOS 25.11"
+    )]
     #[case::id_only("ID=fedora\n", PkgFamily::Unsupported, "fedora")]
     #[case::empty("", PkgFamily::Unsupported, "unknown")]
     fn parses_family_and_pretty(
