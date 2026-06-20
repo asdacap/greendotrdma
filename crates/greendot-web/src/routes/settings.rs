@@ -37,7 +37,10 @@ pub struct SettingsView {
     pub rdma_devs: Vec<RdmaRow>,
     pub plain_netdevs: Vec<String>,
     pub deps: Vec<DepRow>,
-    pub missing_packages: String,
+    /// Missing packages apt can install here — the one-click "Install missing".
+    pub installable_packages: String,
+    /// Missing packages with no apt candidate — must be installed manually.
+    pub manual_packages: String,
     /// Detected OS label (for display).
     pub os_pretty: String,
     /// Whether the one-click installer can drive this OS (Debian/Ubuntu).
@@ -53,6 +56,15 @@ fn cli_present(cli: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Split missing packages into those apt can install on this host (first) and
+/// those with no apt candidate, which must be installed manually (second).
+fn partition_missing(
+    missing: Vec<String>,
+    available: &std::collections::HashSet<String>,
+) -> (Vec<String>, Vec<String>) {
+    missing.into_iter().partition(|p| available.contains(p))
+}
+
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
@@ -66,7 +78,11 @@ struct SettingsPartial {
     view: SettingsView,
 }
 
-fn gather(state: &AppState, flash: Option<String>, form_error: Option<String>) -> SettingsView {
+async fn gather(
+    state: &AppState,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> SettingsView {
     let devs = rdma::devices();
     let netdev_addrs = rdma::netdev_addrs();
     let rdma_backed: Vec<&str> = devs.iter().filter_map(|d| d.netdev.as_deref()).collect();
@@ -94,10 +110,21 @@ fn gather(state: &AppState, flash: Option<String>, form_error: Option<String>) -
     missing.sort();
     missing.dedup();
     let os = greendot_proto::detect();
+    let install_supported = matches!(os.family, greendot_proto::PkgFamily::Debian);
+    // Only packages apt can actually install belong in the one-click button; the
+    // rest (e.g. nvmetcli, which Ubuntu 26.04 dropped) get a manual-install hint.
+    // On non-apt distros there is nothing the in-app installer can supply.
+    let available = if install_supported {
+        crate::actual::apt::available(&missing).await
+    } else {
+        std::collections::HashSet::new()
+    };
+    let (installable, manual) = partition_missing(missing, &available);
     SettingsView {
-        install_supported: matches!(os.family, greendot_proto::PkgFamily::Debian),
+        install_supported,
         os_pretty: os.pretty,
-        missing_packages: missing.join(" "),
+        installable_packages: installable.join(" "),
+        manual_packages: manual.join(" "),
         deps,
         listen_addr: state
             .db
@@ -131,7 +158,7 @@ async fn settings_page(
 ) -> Response {
     page(SettingsTemplate {
         user,
-        view: gather(&state, None, None),
+        view: gather(&state, None, None).await,
     })
 }
 
@@ -144,7 +171,7 @@ async fn set_listen(State(state): State<Arc<AppState>>, Form(form): Form<ListenF
     let addr = form.listen_addr.trim();
     if addr.parse::<std::net::IpAddr>().is_err() {
         return page(SettingsPartial {
-            view: gather(&state, None, Some(format!("invalid IP address {addr:?}"))),
+            view: gather(&state, None, Some(format!("invalid IP address {addr:?}"))).await,
         });
     }
     let result = match state.db.set_setting("listen_addr", addr) {
@@ -159,7 +186,7 @@ async fn set_listen(State(state): State<Arc<AppState>>, Form(form): Form<ListenF
         Err(e) => (None, Some(format!("{e:#}"))),
     };
     page(SettingsPartial {
-        view: gather(&state, flash, error),
+        view: gather(&state, flash, error).await,
     })
 }
 
@@ -175,7 +202,8 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
                 &state,
                 None,
                 Some(format!("invalid interface name {:?}", form.netdev)),
-            ),
+            )
+            .await,
         });
     };
     let steps = [
@@ -200,19 +228,19 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
             Ok(o) => {
                 let msg = o.error.unwrap_or_else(|| "task failed".into());
                 return page(SettingsPartial {
-                    view: gather(&state, None, Some(msg)),
+                    view: gather(&state, None, Some(msg)).await,
                 });
             }
             Err(e) => {
                 return page(SettingsPartial {
-                    view: gather(&state, None, Some(format!("{e:#}"))),
+                    view: gather(&state, None, Some(format!("{e:#}"))).await,
                 });
             }
         }
     }
     let _ = reconcile_state(&state).await;
     page(SettingsPartial {
-        view: gather(&state, Some(format!("Soft-RoCE enabled on {netdev}")), None),
+        view: gather(&state, Some(format!("Soft-RoCE enabled on {netdev}")), None).await,
     })
 }
 
@@ -233,7 +261,7 @@ async fn install_deps(
         .collect();
     if packages.is_empty() {
         return page(SettingsPartial {
-            view: gather(&state, None, Some("no valid packages to install".into())),
+            view: gather(&state, None, Some("no valid packages to install".into())).await,
         });
     }
     let names = packages
@@ -248,7 +276,7 @@ async fn install_deps(
             Err(e) => (None, Some(format!("{e:#}"))),
         };
     page(SettingsPartial {
-        view: gather(&state, flash, error),
+        view: gather(&state, flash, error).await,
     })
 }
 
@@ -257,6 +285,19 @@ mod tests {
     use crate::routes::testutil::{form_post, login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
+    use std::collections::HashSet;
+
+    #[test]
+    fn partition_missing_splits_installable_from_manual() {
+        // nvmetcli has no apt candidate (e.g. Ubuntu 26.04); the rest do.
+        let missing = ["nvmetcli", "targetcli-fb", "nvme-cli"]
+            .map(String::from)
+            .to_vec();
+        let available: HashSet<String> = ["targetcli-fb", "nvme-cli"].map(String::from).into();
+        let (installable, manual) = super::partition_missing(missing, &available);
+        assert_eq!(installable, ["targetcli-fb", "nvme-cli"]);
+        assert_eq!(manual, ["nvmetcli"]);
+    }
 
     #[tokio::test]
     async fn settings_page_listen_addr_and_rxe_flow() {
