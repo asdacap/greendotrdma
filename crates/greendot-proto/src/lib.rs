@@ -62,8 +62,8 @@ pub enum Request {
         number: u32,
     },
 
-    // NVMe-oF / iSCSI targets: the helper renders these to nvmetcli /
-    // targetctl JSON and applies them with the tools' restore command.
+    // NVMe-oF / iSCSI targets: the helper applies NvmetDesired directly to
+    // configfs, and renders LioDesired to targetctl JSON (restore command).
     NvmetApply {
         desired: NvmetDesired,
     },
@@ -174,7 +174,7 @@ mod tests {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
     #[case::install(Request::InstallPackages {
-        packages: vec![PackageName::new("nvmetcli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
+        packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
     })]
     fn request_roundtrips(#[case] req: Request) {
         assert_eq!(roundtrip(&req), req);
@@ -184,8 +184,8 @@ mod tests {
     fn task_events_roundtrip() {
         for ev in [
             TaskEvent::Started {
-                command: "nvmetcli".into(),
-                args: vec!["restore".into(), "/dev/stdin".into()],
+                command: "configfs".into(),
+                args: vec!["nvmet".into(), "apply".into()],
                 stdin: Some("{}".into()),
             },
             TaskEvent::Stdout {

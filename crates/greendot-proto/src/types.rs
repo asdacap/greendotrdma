@@ -160,8 +160,14 @@ pub enum DotState {
     Red,
 }
 
-// ---- Desired-state documents (rendered to nvmetcli / targetctl JSON by the
-// helper and applied via their restore commands) ----
+/// Every export we create lives under these prefixes; reconciliation only
+/// touches configfs objects whose NQN/IQN starts with them, leaving any
+/// foreign (manually created) objects untouched.
+pub const OUR_NQN_PREFIX: &str = "nqn.2026-06.io.greendot:";
+pub const OUR_IQN_PREFIX: &str = "iqn.2026-06.io.greendot:";
+
+// ---- Desired-state documents (the helper applies NvmetDesired directly to
+// configfs; LioDesired is rendered to targetctl JSON and applied via restore) ----
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NvmetDesired {
@@ -265,7 +271,6 @@ pub fn package_for_cli(cli: &str) -> Option<&'static str> {
         "modprobe" => "kmod",
         "rdma" => "iproute2",
         "nvme" => "nvme-cli",
-        "nvmetcli" => "nvmetcli",
         "targetcli" | "targetctl" => "targetcli-fb",
         "apt-get" => "apt",
         _ => return None,
@@ -281,7 +286,6 @@ pub const REQUIRED_CLIS: &[&str] = &[
     "modprobe",
     "rdma",
     "nvme",
-    "nvmetcli",
     "targetctl",
 ];
 
@@ -420,7 +424,7 @@ mod tests {
     }
 
     #[rstest]
-    #[case::simple("nvmetcli", true)]
+    #[case::simple("targetctl", true)]
     #[case::fb("targetcli-fb", true)]
     #[case::plus("libstdc++6", true)]
     #[case::empty("", false)]
@@ -433,7 +437,6 @@ mod tests {
 
     #[test]
     fn cli_to_package_map() {
-        assert_eq!(package_for_cli("nvmetcli"), Some("nvmetcli"));
         assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
         assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
         assert_eq!(package_for_cli("nonesuch"), None);

@@ -13,11 +13,12 @@ with retention, live + historical traffic charts, a Prometheus `/metrics`
 endpoint, and one-click Soft-RoCE so any NIC can do real RDMA.
 
 Every privileged operation runs as a recorded **task** — a real CLI command
-(`zfs`, `sfdisk`, `modprobe`, `rdma`, `nvmetcli`, `targetctl`, `apt-get`) with
-its stdin/stdout/stderr, exit status, and a live output stream — all visible on
-a central **Tasks** page. NVMe-oF/iSCSI state is applied by rendering the
-desired config and running the official `nvmetcli`/`targetctl` restore; if a
-required CLI is missing the task fails with an install hint, and a one-click
+(`zfs`, `sfdisk`, `modprobe`, `rdma`, `targetctl`, `apt-get`) or, for NVMe-oF, a
+direct configfs write — with its output, exit status, and a live stream, all
+visible on a central **Tasks** page. NVMe-oF state is written straight to the
+kernel's nvmet configfs tree (no external tool); iSCSI state is applied by
+rendering the desired config and running the official `targetctl` restore. If a
+required CLI is missing its task fails with an install hint, and a one-click
 **Install missing** action (itself a task) installs the packages. The typed
 allowlist in the root helper still bounds exactly which commands can run.
 
@@ -115,11 +116,11 @@ This one is **not** part of `nix flake check`: it downloads an Ubuntu cloud
 image and apt packages (non-hermetic) and wants KVM (falls back to slow TCG).
 
 The `.deb` deliberately does **not** depend on the storage/RDMA CLIs (`zfs`,
-`nvme`, `nvmetcli`, `targetctl`, …) — the app detects whichever are missing and
-offers a one-click install. The test installs the package first (proving that),
-then provisions those CLIs. Note Ubuntu 26.04 dropped the `nvmetcli` package, so
-the test installs it from upstream (Apache-2.0); the in-app "Install missing"
-action, which uses `apt-get`, can't supply `nvmetcli` on 26.04.
+`nvme`, `targetctl`, …) — the app detects whichever are missing and offers a
+one-click install. The test installs the package first (proving that), then
+provisions those CLIs. NVMe-oF needs no CLI at all: the helper writes its nvmet
+configfs tree directly, which is also why no `nvmetcli` package is required
+(handy, since Ubuntu 26.04 dropped it).
 
 ### Manual smoke test
 

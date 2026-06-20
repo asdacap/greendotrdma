@@ -4,33 +4,9 @@
 { pkgs }:
 
 let
-  # nixpkgs' nvmet-cli 0.7 is too old for the test kernel in two ways, both
-  # test-environment quirks (Ubuntu 26.04 ships a newer, fixed nvmetcli):
-  #   1. missing its `six` runtime dep (nvme.py uses six.iteritems);
-  #   2. Port.delete() does an unguarded os.listdir(".../referrals/"), which
-  #      ENOENTs on kernels without that dir — nvmetcli then misreports it as
-  #      "No saved config file" and aborts clearing, so only the first restore
-  #      ever works.
-  patchedNvmetCli = pkgs.nvmet-cli.overrideAttrs (o: {
-    postInstall = (o.postInstall or "") + ''
-      f=$(find $out -name nvme.py | head -1)
-      # Guard a listdir that ENOENTs on kernels without a port `referrals` dir.
-      substituteInPlace "$f" --replace-fail \
-        'for d in os.listdir("%s/referrals/" % self._path):' \
-        'for d in (os.listdir("%s/referrals/" % self._path) if os.path.isdir("%s/referrals/" % self._path) else []):'
-      # Don't explicitly delete ANA groups during Port.delete — rmdir of the
-      # port removes them, and deleting the default group errors on this kernel.
-      substituteInPlace "$f" --replace-fail \
-        'for a in self.ana_groups:' \
-        'for a in []:'
-    '';
-  });
-  nvmetcli = pkgs.runCommand "nvmetcli-wrapped" { nativeBuildInputs = [ pkgs.makeWrapper ]; } ''
-    mkdir -p $out/bin
-    makeWrapper ${patchedNvmetCli}/bin/nvmetcli $out/bin/nvmetcli \
-      --prefix PYTHONPATH : ${pkgs.python3Packages.six}/${pkgs.python3.sitePackages}
-  '';
-
+  # NVMe-oF needs no external tool: the helper writes its nvmet configfs tree
+  # directly. Only the iSCSI apply path still shells out (to `targetctl`).
+  #
   # The iSCSI apply path runs `targetctl restore`. nixpkgs' `targetcli-fb`
   # ships only `targetcli`, not the `targetctl` helper — but `rtslib-fb` ships
   # the very same `targetctl` Ubuntu uses (restore clears the existing config
@@ -39,7 +15,7 @@ let
 
   # The CLIs the services shell out to. On Ubuntu these are on the default
   # systemd PATH (/usr/bin etc.); on NixOS we put them on the service `path`.
-  tools = [ nvmetcli targetctl pkgs.zfs pkgs.kmod pkgs.rdma-core pkgs.util-linux pkgs.nvme-cli ];
+  tools = [ targetctl pkgs.zfs pkgs.kmod pkgs.rdma-core pkgs.util-linux pkgs.nvme-cli ];
 
   configToml = pkgs.writeText "greendot-config.toml" ''
     listen = "127.0.0.1:8080"
@@ -77,7 +53,6 @@ let
       environment.systemPackages = with pkgs; [
         greendot
         nvme-cli
-        nvmetcli # six-wrapped (see above); the apply task shells out to it
         targetctl # targetcli-fb; the iSCSI apply task shells out to targetctl
         rdma-core
         util-linux
@@ -135,5 +110,5 @@ let
     };
 in
 {
-  inherit patchedNvmetCli nvmetcli targetctl tools configToml mkGreendotNode;
+  inherit targetctl tools configToml mkGreendotNode;
 }

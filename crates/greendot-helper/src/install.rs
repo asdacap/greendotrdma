@@ -45,14 +45,14 @@ mod tests {
     #[test]
     fn debian_builds_apt_get_task() {
         let pkgs = [
-            PackageName::new("nvmetcli").unwrap(),
+            PackageName::new("nvme-cli").unwrap(),
             PackageName::new("targetcli-fb").unwrap(),
         ];
         let spec = install(&pkgs, &os(PkgFamily::Debian)).unwrap().unwrap();
         assert_eq!(spec.command, "apt-get");
         assert_eq!(
             spec.args,
-            ["install", "-y", "nvmetcli", "targetcli-fb"]
+            ["install", "-y", "nvme-cli", "targetcli-fb"]
                 .map(String::from)
                 .to_vec()
         );
