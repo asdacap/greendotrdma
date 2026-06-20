@@ -124,6 +124,8 @@ pub async fn gather(
     }
     view.zvols = actual::zfs::datasets()
         .await
+        .ok()
+        .flatten()
         .unwrap_or_default()
         .into_iter()
         .filter(|d| d.kind == actual::zfs::DsKind::Volume)

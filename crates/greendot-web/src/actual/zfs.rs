@@ -122,63 +122,70 @@ pub fn parse_snapshot_list(out: &str) -> Result<Vec<Snapshot>> {
         .collect()
 }
 
-async fn run(argv: &[&str]) -> Result<String> {
-    let output = tokio::process::Command::new(argv[0])
+/// Runs `argv`, returning `None` when the binary isn't installed — a missing
+/// `zpool`/`zfs` means ZFS is absent on this host, which callers surface as a
+/// distinct "not installed" state rather than an error.
+async fn run(argv: &[&str]) -> Result<Option<String>> {
+    let output = match tokio::process::Command::new(argv[0])
         .args(&argv[1..])
         .output()
         .await
-        .with_context(|| format!("running {}", argv.join(" ")))?;
+    {
+        Ok(output) => output,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("running {}", argv.join(" "))),
+    };
     anyhow::ensure!(
         output.status.success(),
         "{} failed: {}",
         argv.join(" "),
         String::from_utf8_lossy(&output.stderr).trim()
     );
-    Ok(String::from_utf8(output.stdout)?)
+    Ok(Some(String::from_utf8(output.stdout)?))
 }
 
-pub async fn pools() -> Result<Vec<Pool>> {
-    parse_zpool_list(
-        &run(&[
-            "zpool",
-            "list",
-            "-Hp",
-            "-o",
-            "name,size,alloc,free,frag,health",
-        ])
-        .await?,
-    )
+pub async fn pools() -> Result<Option<Vec<Pool>>> {
+    run(&[
+        "zpool",
+        "list",
+        "-Hp",
+        "-o",
+        "name,size,alloc,free,frag,health",
+    ])
+    .await?
+    .map(|out| parse_zpool_list(&out))
+    .transpose()
 }
 
-pub async fn datasets() -> Result<Vec<Dataset>> {
-    parse_zfs_list(
-        &run(&[
-            "zfs",
-            "list",
-            "-Hp",
-            "-t",
-            "filesystem,volume",
-            "-o",
-            "name,type,used,avail,volsize",
-        ])
-        .await?,
-    )
+pub async fn datasets() -> Result<Option<Vec<Dataset>>> {
+    run(&[
+        "zfs",
+        "list",
+        "-Hp",
+        "-t",
+        "filesystem,volume",
+        "-o",
+        "name,type,used,avail,volsize",
+    ])
+    .await?
+    .map(|out| parse_zfs_list(&out))
+    .transpose()
 }
 
 #[allow(dead_code)]
-pub async fn snapshots() -> Result<Vec<Snapshot>> {
-    parse_snapshot_list(
-        &run(&[
-            "zfs",
-            "list",
-            "-Hp",
-            "-t",
-            "snapshot",
-            "-o",
-            "name,used,creation",
-        ])
-        .await?,
-    )
+pub async fn snapshots() -> Result<Option<Vec<Snapshot>>> {
+    run(&[
+        "zfs",
+        "list",
+        "-Hp",
+        "-t",
+        "snapshot",
+        "-o",
+        "name,used,creation",
+    ])
+    .await?
+    .map(|out| parse_snapshot_list(&out))
+    .transpose()
 }
 
 #[cfg(test)]
@@ -241,6 +248,19 @@ mod tests {
             parse_zfs_list("tank\tbookmark\t1\t2\t-\n").is_err(),
             "unknown type must error"
         );
+    }
+
+    #[tokio::test]
+    async fn run_returns_none_for_missing_binary_but_errors_on_failure() {
+        // A missing binary (ZFS not installed) yields None, not an error.
+        assert!(
+            run(&["greendot-no-such-binary", "list"])
+                .await
+                .unwrap()
+                .is_none()
+        );
+        // A command that exists but exits non-zero is still surfaced as an error.
+        assert!(run(&["false"]).await.is_err());
     }
 
     #[test]

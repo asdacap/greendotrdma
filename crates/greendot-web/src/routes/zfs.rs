@@ -43,6 +43,8 @@ pub struct ZfsView {
     pub pools: Vec<PoolRow>,
     pub datasets: Vec<DatasetRow>,
     pub parents: Vec<String>,
+    /// True when the `zpool`/`zfs` binaries are absent on this host.
+    pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
     pub form_error: Option<String>,
@@ -68,7 +70,7 @@ async fn gather(flash: Option<String>, form_error: Option<String>) -> ZfsView {
         ..Default::default()
     };
     match tokio::try_join!(zfs::pools(), zfs::datasets()) {
-        Ok((pools, datasets)) => {
+        Ok((Some(pools), Some(datasets))) => {
             view.pools = pools
                 .into_iter()
                 .map(|p| PoolRow {
@@ -102,6 +104,8 @@ async fn gather(flash: Option<String>, form_error: Option<String>) -> ZfsView {
                 })
                 .collect();
         }
+        // Either binary missing → ZFS isn't installed on this host.
+        Ok(_) => view.not_installed = true,
         Err(e) => view.error = Some(format!("could not read ZFS state: {e:#}")),
     }
     view
@@ -270,15 +274,19 @@ mod tests {
             let app = test_app();
             let (cookie, csrf) = login(&app).await;
 
-            // Page renders (ZFS may be unavailable on the test host — that's
-            // surfaced as an in-page error, not a failure).
+            // Page renders. ZFS may be unavailable on the test host, in which
+            // case the create form is replaced by a "not installed" notice —
+            // either is a successful render, not a failure.
             let req = HttpRequest::get("/zfs")
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap();
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
-            assert!(body.contains("Create zvol"), "{body}");
+            assert!(
+                body.contains("Create zvol") || body.contains("ZFS is not installed"),
+                "{body}"
+            );
 
             // Valid create goes to the (fake) helper and reports success.
             let mut req = form_post(

@@ -110,7 +110,7 @@ async fn gather(
         Err(e) => view.error = Some(format!("could not read policies: {e:#}")),
     }
     match actual::zfs::snapshots().await {
-        Ok(snaps) => {
+        Ok(Some(snaps)) => {
             view.snapshots = snaps
                 .into_iter()
                 .map(|s| SnapRow {
@@ -120,6 +120,8 @@ async fn gather(
                 })
                 .collect();
         }
+        // ZFS not installed — leave the snapshot list empty.
+        Ok(None) => {}
         Err(e) => {
             if view.error.is_none() {
                 view.error = Some(format!("could not list snapshots: {e:#}"));
@@ -128,6 +130,8 @@ async fn gather(
     }
     view.datasets = actual::zfs::datasets()
         .await
+        .ok()
+        .flatten()
         .unwrap_or_default()
         .into_iter()
         .map(|d| d.name)

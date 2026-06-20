@@ -3,6 +3,9 @@
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
 
+  {% if view.not_installed %}
+  <p class="empty">ZFS is not installed on this host.</p>
+  {% else %}
   <h2>Pools</h2>
   {% if view.pools.is_empty() %}
   <p class="empty">No pools found.</p>
@@ -95,4 +98,5 @@
     <label class="checkbox"><input type="checkbox" name="sparse" value="1"> Sparse (thin-provisioned)</label>
     <button type="submit">Create</button>
   </form>
+  {% endif %}
 </div>

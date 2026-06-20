@@ -93,7 +93,9 @@ async fn run_policy(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc
 
 async fn retention(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc>) {
     let all = match crate::actual::zfs::snapshots().await {
-        Ok(snaps) => snaps,
+        Ok(Some(snaps)) => snaps,
+        // ZFS not installed — nothing to retain.
+        Ok(None) => return,
         Err(e) => {
             tracing::error!(error = %e, "listing snapshots for retention failed");
             return;

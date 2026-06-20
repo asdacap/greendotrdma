@@ -105,7 +105,7 @@ pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
             value: value as f64,
         });
     }
-    if let Ok(pools) = actual::zfs::pools().await {
+    if let Ok(Some(pools)) = actual::zfs::pools().await {
         for pool in pools {
             for (name, value) in [
                 ("greendot_pool_size_bytes", pool.size as f64),

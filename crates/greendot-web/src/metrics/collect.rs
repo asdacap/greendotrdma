@@ -61,7 +61,7 @@ fn collect_rdma(metrics: &Metrics, root: &Path, ts: i64) {
 }
 
 async fn collect_pools(metrics: &Metrics, ts: i64) {
-    if let Ok(pools) = crate::actual::zfs::pools().await {
+    if let Ok(Some(pools)) = crate::actual::zfs::pools().await {
         for pool in pools {
             let used = pool.alloc as f64 / pool.size.max(1) as f64 * 100.0;
             metrics.push(&format!("pool:{}:used_percent", pool.name), ts, used);
