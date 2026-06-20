@@ -9,6 +9,8 @@
 # older glibc (2.40) than Ubuntu 26.04 ships, and glibc is forward-compatible.
 #
 # Run inside the dev shell:  nix develop --command scripts/build-deb.sh
+# Set DEB_VERSION to override the package version (e.g. from a release tag);
+# otherwise the version comes from greendot-web's Cargo.toml.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,7 +26,11 @@ for bin in greendot-web greendot-helper; do
 done
 
 echo "== packaging (cargo deb --no-build)"
-cargo deb -p greendot-web --no-build
+if [ -n "${DEB_VERSION:-}" ]; then
+    cargo deb -p greendot-web --no-build --deb-version "$DEB_VERSION"
+else
+    cargo deb -p greendot-web --no-build
+fi
 
 echo "== done"
 ls -1 target/debian/*.deb

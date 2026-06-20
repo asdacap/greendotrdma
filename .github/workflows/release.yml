@@ -1,0 +1,46 @@
+name: Release
+
+# Cut a release by pushing a tag, e.g. `git tag 0.1.0 && git push origin 0.1.0`
+# (a leading `v` is stripped for the .deb version).
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+
+permissions:
+  contents: write
+
+jobs:
+  deb:
+    name: Build & publish .deb
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - name: Build the .deb (version from the tag)
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          echo "Building greendotrdma $version"
+          DEB_VERSION="$version" nix develop --command scripts/build-deb.sh
+
+      - name: Checksum
+        working-directory: target/debian
+        run: sha256sum greendotrdma_*.deb | tee SHA256SUMS
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        working-directory: target/debian
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            greendotrdma_*.deb SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
