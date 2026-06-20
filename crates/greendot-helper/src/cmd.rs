@@ -15,8 +15,8 @@ pub struct TaskSpec {
     /// Extra environment, not echoed in the task command line.
     pub env: Vec<(String, String)>,
     /// When true, `stdin` is written to a temp file and that path is appended
-    /// as the final argument (nvmetcli/targetctl read a config file by name,
-    /// not from a pipe).
+    /// as the final argument (targetctl reads a config file by name, not from a
+    /// pipe).
     pub stdin_to_file: bool,
 }
 
@@ -315,15 +315,15 @@ pub mod test {
 
     #[test]
     fn missing_binary_reports_install_hint() {
-        let c = run(&TaskSpec::new("nvmetcli", vec!["restore".into()]));
+        let c = run(&TaskSpec::new("targetctl", vec!["restore".into()]));
         match c.finished() {
             TaskEvent::Finished {
                 ok: false,
                 error: Some(msg),
                 ..
             } => {
-                assert!(msg.contains("nvmetcli is not installed"), "{msg}");
-                assert!(msg.contains("nvmetcli package"), "{msg}");
+                assert!(msg.contains("targetctl is not installed"), "{msg}");
+                assert!(msg.contains("targetcli-fb package"), "{msg}");
             }
             other => panic!("expected install hint, got {other:?}"),
         }

@@ -170,6 +170,14 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                         return; // socket write failed; client gone
                     }
                 }
+                Dispatch::NvmetApply(desired) => {
+                    let _guard = ctx.mutate_lock.lock().unwrap();
+                    let mut sink = SocketSink(&mut writer);
+                    let root = std::path::Path::new(nvmet::NVMET_ROOT);
+                    if nvmet::apply(&desired, root, &mut sink).is_err() {
+                        return; // socket write failed; client gone
+                    }
+                }
                 Dispatch::FailedTask(msg) => {
                     // Record a refused operation as a failed task so its reason
                     // streams to the UI like any other task.

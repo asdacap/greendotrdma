@@ -23,11 +23,11 @@ for RDMA on plain NICs."""
 # links (named explicitly because, when built on NixOS, dpkg-shlibdeps cannot
 # map nix-store libraries to Debian packages), `openssl` for the postinst's
 # self-signed cert, and `rdma-core` for the RDMA userspace providers. The
-# storage/RDMA *CLIs* (zfs, nvme, nvmetcli, targetctl, sfdisk, modprobe, rdma)
-# are intentionally NOT dependencies: the app detects whichever are missing and
+# storage/RDMA *CLIs* (zfs, nvme, targetctl, sfdisk, modprobe, rdma) are
+# intentionally NOT dependencies: the app detects whichever are missing and
 # offers a one-click "Install missing" task (see REQUIRED_CLIS / install.rs).
-# This also keeps the package installable on releases that don't ship every CLI
-# (e.g. Ubuntu 26.04 dropped the `nvmetcli` package).
+# This also keeps the package installable on releases that don't ship every CLI.
+# (NVMe-oF needs no CLI at all — the helper writes its configfs tree directly.)
 depends = "libc6, libgcc-s1, libpam0g, libaudit1, libcap-ng0, openssl, rdma-core"
 conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"

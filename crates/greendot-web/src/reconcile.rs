@@ -1,7 +1,8 @@
 //! Desired-state reconciliation. Renders the full NVMe-oF/iSCSI desired state
 //! from the export list, and — only when actual configfs no longer realizes it
-//! — applies it via the helper's `nvmetcli`/`targetctl` restore tasks. Each
-//! apply is therefore a recorded task; steady-state reconciles emit nothing.
+//! — applies it via the helper: NVMe-oF is written to configfs directly, iSCSI
+//! through a `targetctl` restore task. Each apply is therefore a recorded task;
+//! steady-state reconciles emit nothing.
 
 use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
@@ -325,7 +326,7 @@ pub async fn run(state: &AppState) -> anyhow::Result<()> {
             "Apply NVMe-oF configuration",
         )
         .await?;
-        nvmet_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "nvmetcli failed".into()));
+        nvmet_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "nvmet apply failed".into()));
     }
     let mut lio_err = None;
     if !lio_ok {

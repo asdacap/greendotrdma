@@ -8,9 +8,9 @@ use std::path::Path;
 use std::sync::Mutex;
 
 /// Every export we create lives under these prefixes; reconciliation never
-/// touches configfs objects outside them.
-pub const OUR_NQN_PREFIX: &str = "nqn.2026-06.io.greendot:";
-pub const OUR_IQN_PREFIX: &str = "iqn.2026-06.io.greendot:";
+/// touches configfs objects outside them. Defined in the shared protocol crate
+/// so the helper scopes its configfs writes to the same prefix.
+pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportKind {
@@ -500,7 +500,7 @@ mod tests {
         assert_eq!(t.finished_at, Some(120));
 
         // A failed task with an error message.
-        let id2 = db.insert_task("install", "install nvmetcli", 130).unwrap();
+        let id2 = db.insert_task("install", "install nvme-cli", 130).unwrap();
         db.finish_task(
             id2,
             TaskStatus::Failed,

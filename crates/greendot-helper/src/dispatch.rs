@@ -3,8 +3,8 @@
 //! are never recorded as tasks (auth would store the password).
 
 use crate::cmd::TaskSpec;
-use crate::{install, lio, modules, nvmet, pam, partition, zfs};
-use greendot_proto::{Request, Response};
+use crate::{install, lio, modules, pam, partition, zfs};
+use greendot_proto::{NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
 pub struct Ctx {
@@ -19,6 +19,9 @@ pub enum Dispatch {
     OneShot(Response),
     /// One command to run as a streamed task.
     Task(TaskSpec),
+    /// Apply NVMe-oF state by writing configfs directly (no external CLI),
+    /// streamed as a task like any command.
+    NvmetApply(NvmetDesired),
     /// A refused operation recorded as a failed task carrying this message
     /// (e.g. install on an unsupported distro), so the reason reaches the UI.
     FailedTask(String),
@@ -51,7 +54,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             Dispatch::Task(zfs::snapshot_destroy(&dataset, &snap))
         }
 
-        Request::NvmetApply { desired } => Dispatch::Task(nvmet::apply_spec(&desired)),
+        Request::NvmetApply { desired } => Dispatch::NvmetApply(desired),
         Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
 
         Request::EnsureModules { modules: list } => match modules::ensure(&list) {

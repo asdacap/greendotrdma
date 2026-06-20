@@ -23,24 +23,13 @@ apt-get install -y "/mnt/deb/$DEBNAME"
 
 echo "== provisioning the storage/RDMA CLIs the app needs"
 # These are not .deb dependencies; on a real box the app's "Install missing"
-# task installs them. Most come from the Ubuntu archive; nvmetcli is no longer
-# packaged for Ubuntu 26.04, so fetch it from upstream (Apache-2.0).
-apt-get install -y zfsutils-linux nvme-cli rdma-core targetcli-fb open-iscsi \
-    git python3-pip python3-setuptools python3-six python3-configshell-fb
+# task installs them. NVMe-oF needs no CLI at all — the helper writes its nvmet
+# configfs tree directly — so only the iSCSI/ZFS/RDMA tools are needed here.
+apt-get install -y zfsutils-linux nvme-cli rdma-core targetcli-fb open-iscsi
 # RDMA/nvmet modules: usually in linux-modules-extra, but some cloud kernels
 # ship them in the base linux-modules — best-effort so either layout works.
 apt-get install -y "linux-modules-extra-$(uname -r)" 2>/dev/null \
     || echo "linux-modules-extra unavailable; expecting modules in base linux-modules"
-git clone git://git.infradead.org/users/hch/nvmetcli.git /opt/nvmetcli
-pip install --break-system-packages /opt/nvmetcli
-command -v nvmetcli >/dev/null || fail "nvmetcli not on PATH after install"
-# nvmetcli v0.8 imports the old `configshell_fb` name, which on current Ubuntu
-# is only a flat compat shim (no `.node` submodule); point it at the real
-# `configshell` package so `nvmetcli restore` works.
-sed -i 's/^import configshell_fb as configshell$/import configshell/' "$(command -v nvmetcli)"
-echo '{"hosts":[],"ports":[],"subsystems":[]}' > /tmp/nvmet-probe.json
-modprobe nvmet 2>/dev/null || true
-nvmetcli restore /tmp/nvmet-probe.json || fail "nvmetcli restore smoke failed"
 
 # The admin login must be a member of greendot-admin (created by the postinst).
 usermod -aG greendot-admin gdadmin

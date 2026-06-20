@@ -76,8 +76,8 @@ pkgs.testers.runNixOSTest {
         "http://127.0.0.1:8080/exports/create"
     )
 
-    # The apply ran through nvmetcli as a recorded task: the subsystem must now
-    # exist in configfs, RDMA-linked.
+    # The apply wrote configfs directly as a recorded task: the subsystem must
+    # now exist in configfs, RDMA-linked.
     machine.wait_until_succeeds("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1", timeout=120)
     machine.succeed("test -L /sys/kernel/config/nvmet/ports/1/subsystems/nqn.2026-06.io.greendot:vm1")
     trtype = machine.succeed("cat /sys/kernel/config/nvmet/ports/1/addr_trtype").strip()
@@ -99,10 +99,10 @@ pkgs.testers.runNixOSTest {
     assert 'greendot_export_status{export="vm1"} 2' in metrics, "export status gauge not green in /metrics"
 
     # The operation was recorded as a task: the Tasks page lists a succeeded
-    # nvmet-apply running the real nvmetcli command.
+    # nvmet-apply that wrote configfs directly (no external CLI).
     tasks = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/tasks")
     assert "nvmet-apply" in tasks, f"apply not recorded as a task:\n{tasks}"
-    assert "nvmetcli" in tasks, "task should show the real nvmetcli command"
+    assert "configfs" in tasks, "apply should run as a direct configfs write"
     assert "dot-red" not in tasks, f"a task failed:\n{tasks}"
 
     # Disabling the export tears the subsystem back down (reconcile works).
