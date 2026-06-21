@@ -22,7 +22,7 @@
         <td>{{ r.transports }}</td>
         <td>{{ r.hosts }}</td>
         <td>
-          {% if r.diagnose %}<a class="btnlink" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
+          {% if r.diagnose %}<a role="button" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
           <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
             <input type="hidden" name="id" value="{{ r.id }}">
             <input type="hidden" name="enable" value="{{ !r.enabled }}">
