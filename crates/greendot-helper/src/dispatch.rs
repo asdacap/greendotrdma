@@ -3,7 +3,7 @@
 //! are never recorded as tasks (auth would store the password).
 
 use crate::cmd::TaskSpec;
-use crate::{fs, install, lio, modules, pam, partition, zfs};
+use crate::{fs, install, lio, lvm, modules, pam, partition, zfs};
 use greendot_proto::{NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
@@ -107,6 +107,32 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::PoolDeviceAdd { pool, device } => {
             Dispatch::Task(zfs::pool_device_add(&pool, &device))
         }
+
+        Request::LvmReport { what } => Dispatch::Task(lvm::report(what)),
+        Request::VgCreate { name, devices } => Dispatch::Task(lvm::vg_create(&name, &devices)),
+        Request::VgExtend { vg, device } => Dispatch::Task(lvm::vg_extend(&vg, &device)),
+        Request::VgReduce { vg, device } => Dispatch::Task(lvm::vg_reduce(&vg, &device)),
+        Request::VgRemove { vg } => Dispatch::Task(lvm::vg_remove(&vg)),
+        Request::LvCreate { vg, name, size } => Dispatch::Task(lvm::lv_create(&vg, &name, size)),
+        Request::ThinPoolCreate { vg, name, size } => {
+            Dispatch::Task(lvm::thin_pool_create(&vg, &name, size))
+        }
+        Request::ThinLvCreate {
+            vg,
+            pool,
+            name,
+            virtual_size,
+        } => Dispatch::Task(lvm::thin_lv_create(&vg, &pool, &name, virtual_size)),
+        Request::LvResize { vg, name, new_size } => {
+            Dispatch::Task(lvm::lv_resize(&vg, &name, new_size))
+        }
+        Request::LvShrink { vg, name, new_size } => {
+            Dispatch::Task(lvm::lv_shrink(&vg, &name, new_size))
+        }
+        Request::LvRename { vg, name, new_name } => {
+            Dispatch::Task(lvm::lv_rename(&vg, &name, &new_name))
+        }
+        Request::LvDelete { vg, name } => Dispatch::Task(lvm::lv_delete(&vg, &name)),
 
         Request::InstallPackages { packages } => {
             match install::install(&packages, &greendot_proto::detect()) {

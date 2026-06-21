@@ -102,6 +102,64 @@ pub enum Request {
         device: DevicePath,
     },
 
+    // LVM. Reads need root, so they go through the helper too (LvmReport),
+    // unlike ZFS reads which the web service runs unprivileged.
+    LvmReport {
+        what: LvmReport,
+    },
+    VgCreate {
+        name: VgName,
+        devices: Vec<DevicePath>,
+    },
+    VgExtend {
+        vg: VgName,
+        device: DevicePath,
+    },
+    VgReduce {
+        vg: VgName,
+        device: DevicePath,
+    },
+    VgRemove {
+        vg: VgName,
+    },
+    LvCreate {
+        vg: VgName,
+        name: LvName,
+        size: u64,
+    },
+    ThinPoolCreate {
+        vg: VgName,
+        name: LvName,
+        size: u64,
+    },
+    ThinLvCreate {
+        vg: VgName,
+        pool: LvName,
+        name: LvName,
+        virtual_size: u64,
+    },
+    /// Grow a logical volume (`lvextend`).
+    LvResize {
+        vg: VgName,
+        name: LvName,
+        new_size: u64,
+    },
+    /// Shrink a logical volume (`lvreduce -f`; destructive).
+    LvShrink {
+        vg: VgName,
+        name: LvName,
+        new_size: u64,
+    },
+    LvRename {
+        vg: VgName,
+        name: LvName,
+        new_name: LvName,
+    },
+    LvDelete {
+        vg: VgName,
+        name: LvName,
+    },
+
     // NVMe-oF / iSCSI targets: the helper applies NvmetDesired directly to
     // configfs, and renders LioDesired to targetctl JSON (restore command).
     NvmetApply {
@@ -236,6 +294,25 @@ mod tests {
         pool: PoolName::new("tank").unwrap(),
         device: DevicePath::new("/dev/sdd").unwrap(),
     })]
+    #[case::lvm_report(Request::LvmReport { what: LvmReport::Lvs })]
+    #[case::vg_create(Request::VgCreate {
+        name: VgName::new("vg0").unwrap(),
+        devices: vec![
+            DevicePath::new("/dev/sdb").unwrap(),
+            DevicePath::new("/dev/sdc").unwrap(),
+        ],
+    })]
+    #[case::thin_lv(Request::ThinLvCreate {
+        vg: VgName::new("vg0").unwrap(),
+        pool: LvName::new("pool0").unwrap(),
+        name: LvName::new("vm1").unwrap(),
+        virtual_size: 20 << 30,
+    })]
+    #[case::lv_rename(Request::LvRename {
+        vg: VgName::new("vg0").unwrap(),
+        name: LvName::new("old").unwrap(),
+        new_name: LvName::new("new").unwrap(),
+    })]
     #[case::modules(Request::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
@@ -289,6 +366,8 @@ mod tests {
             r#"{"op":"rxe_link_add","netdev":"eth0/../x"}"#,
             r#"{"op":"install_packages","packages":["foo;rm -rf"]}"#,
             r#"{"op":"pool_create","name":"mirror","vdev":"stripe","devices":["/dev/sdb"],"ashift":null}"#,
+            r#"{"op":"lv_delete","vg":"vg0","name":"../x"}"#,
+            r#"{"op":"vg_create","name":"-bad","devices":["/dev/sdb"]}"#,
             r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
             r#"{"op":"no_such_op"}"#,
         ] {
