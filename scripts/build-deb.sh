@@ -20,7 +20,7 @@ echo "== building release workspace"
 cargo build --release --workspace
 
 echo "== retargeting binaries onto Ubuntu's loader ($LOADER)"
-for bin in greendot-web greendot-helper; do
+for bin in greendot-web greendot-helper greendot-cli; do
     patchelf --set-interpreter "$LOADER" --remove-rpath "target/release/$bin"
     echo "   $bin -> $(patchelf --print-interpreter "target/release/$bin"), needs: $(patchelf --print-needed "target/release/$bin" | tr '\n' ' ')"
 done
