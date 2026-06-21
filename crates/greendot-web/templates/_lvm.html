@@ -13,7 +13,7 @@
   <p class="empty">No volume groups found.</p>
   {% else %}
   <table>
-    <thead><tr><th>VG</th><th>Size</th><th>Used</th><th>Free</th><th>PVs</th><th>LVs</th><th></th></tr></thead>
+    <thead><tr><th>VG</th><th>Size</th><th>Used</th><th>Free</th><th>PVs</th><th>LVs</th></tr></thead>
     <tbody>
       {% for v in view.vgs %}
       <tr>
@@ -26,10 +26,12 @@
         <td>{{ v.free }}</td>
         <td>{{ v.pv_count }}</td>
         <td>{{ v.lv_count }}</td>
-        <td>
+      </tr>
+      <tr class="edit">
+        <td colspan="6">
           <details>
             <summary>Edit</summary>
-            <div class="card">
+            <div class="card editbox">
               {% if view.extend_devices.is_empty() %}
               <p class="muted small">No free devices to extend this group.</p>
               {% else %}
@@ -89,7 +91,7 @@
   <p class="empty">No logical volumes.</p>
   {% else %}
   <table>
-    <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Pool</th><th>Data</th><th></th></tr></thead>
+    <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Pool</th><th>Data</th></tr></thead>
     <tbody>
       {% for l in view.lvs %}
       <tr>
@@ -98,10 +100,12 @@
         <td>{{ l.size }}</td>
         <td>{{ l.pool }}</td>
         <td>{{ l.data_percent }}</td>
-        <td>
+      </tr>
+      <tr class="edit">
+        <td colspan="5">
           <details>
             <summary>Edit</summary>
-            <div class="card">
+            <div class="card editbox">
               <form class="inline" hx-post="/lvm/lv/resize" hx-target="#lvm-content" hx-swap="outerHTML">
                 <input type="hidden" name="vg" value="{{ l.vg }}">
                 <input type="hidden" name="name" value="{{ l.name }}">
