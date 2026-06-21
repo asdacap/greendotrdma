@@ -54,8 +54,6 @@
           "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
 }
 
-* { box-sizing: border-box; }
-
 body {
   margin: 0;
   display: flex;
@@ -65,8 +63,6 @@ body {
   font: 14.5px/1.55 var(--ui);
   -webkit-font-smoothing: antialiased;
 }
-
-a { color: var(--green); }
 
 /* Form controls take Pico's focus ring (--pico-form-element-focus-color); the
    outline is for the things Pico leaves bare — links, buttons, disclosures. */
@@ -341,8 +337,6 @@ code, .mono { font-family: var(--mono); }
 /* ---- Tables ------------------------------------------------------------- */
 
 table {
-  width: 100%;
-  border-collapse: collapse;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 9px;
@@ -351,7 +345,6 @@ table {
 
 th, td {
   padding: 9px 13px;
-  text-align: left;
   border-bottom: 1px solid var(--border);
   font-size: 13.5px;
   font-variant-numeric: tabular-nums;
@@ -419,19 +412,15 @@ input, select, textarea, button { font: inherit; }
 
 /* Inline action forms stay compact and horizontal (Pico stretches to 100%). */
 .inline input, .inline select { margin: 0; width: auto; }
-/* Pico pins a fixed height on text inputs (taller than selects and buttons); size
-   them by their padding instead so inputs, selects and buttons line up in a row. */
-.card input, .inline input { height: auto; }
 
 /* Pico paints buttons (padding, radius, border, transitions); the brand only
    swaps the colour tokens. The quiet panel button is the default — green primary
    is reserved for a card's submit. <a role="button"> (e.g. Diagnose) rides the
-   same tokens; the spacing reset undoes Pico's extra-wide link-button padding. */
+   same tokens. */
 button, [role=button] {
   --pico-background-color: var(--panel-2);
   --pico-border-color: var(--border-strong);
   --pico-color: var(--text);
-  --pico-form-element-spacing-horizontal: .6rem;
 }
 button:is(:hover, :focus, :active),
 [role=button]:is(:hover, :focus, :active) {
@@ -453,7 +442,6 @@ button:is(:hover, :focus, :active),
 .login-card button[type="submit"]:is(:hover, :focus, :active) {
   --pico-background-color: var(--green-bright);
   --pico-border-color: var(--green-bright);
-  --pico-color: var(--green-ink);
 }
 
 button.danger { --pico-color: var(--red); }
@@ -540,7 +528,7 @@ svg.chart polyline {
 
 details { margin: 10px 0; }
 /* Plain disclosure toggles — Pico would right-align the label and float a chevron. */
-details summary { cursor: pointer; color: var(--muted); text-align: left; list-style: revert; }
+details summary { color: var(--muted); text-align: left; list-style: revert; }
 details summary::after { content: none; }
 details summary:hover { color: var(--text); }
 
