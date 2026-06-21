@@ -483,27 +483,6 @@ form.inline {
   flex-wrap: wrap;
 }
 
-/* Disk-page create/wipe actions: a labelled column set off below the table. */
-.disk-actions {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 8px;
-  margin-top: 16px;
-}
-
-.disk-actions > form.inline { margin: 0; }   /* the column gap owns the spacing */
-
-.action-label {
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
-
-.danger-label { color: var(--red); }
-
 /* ---- Charts ------------------------------------------------------------- */
 
 .chartgrid {
@@ -565,12 +544,14 @@ details summary { cursor: pointer; color: var(--muted); text-align: left; list-s
 details summary::after { content: none; }
 details summary:hover { color: var(--text); }
 
-/* "Edit" toggle lives in its own column; opening it reveals the full-width form row below. */
-.editbtn { margin: 0; }
-tr.edit { display: none; }
-tr:has(.editbtn[open]) + tr.edit { display: table-row; }
-tr.edit td { padding: 4px 13px 8px; }
-tr.edit .editbox { max-width: none; }
+/* Per-row actions: a strip of disclosure toggles, one per operation. Closed,
+   they sit on one compact line; the open one takes the full width so its form
+   has room to breathe instead of crowding its neighbours. */
+.rowactions { display: flex; flex-wrap: wrap; gap: 2px 14px; }
+.rowactions > details { margin: 0; }
+.rowactions > details[open] { width: 100%; }
+.rowactions > details > form,
+.rowactions > details > p { margin: 6px 0 2px; }
 
 /* ---- Login -------------------------------------------------------------- */
 

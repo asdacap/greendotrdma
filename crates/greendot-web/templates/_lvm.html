@@ -26,27 +26,30 @@
         <td>{{ v.free }}</td>
         <td>{{ v.pv_count }}</td>
         <td>{{ v.lv_count }}</td>
-        <td><details class="editbtn"><summary>Edit</summary></details></td>
-      </tr>
-      <tr class="edit">
-        <td colspan="7">
-          <div class="card editbox">
-            {% if view.extend_devices.is_empty() %}
-            <p class="muted small">No free devices to extend this group.</p>
-            {% else %}
-            <form class="inline" hx-post="/lvm/vg/extend" hx-target="#lvm-content" hx-swap="outerHTML">
-              <input type="hidden" name="vg" value="{{ v.name }}">
-              <select name="device">
-                {% for d in view.extend_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
-              </select>
-              <button>Extend</button>
-            </form>
-            {% endif %}
-            <form class="inline" hx-post="/lvm/vg/delete" hx-target="#lvm-content" hx-swap="outerHTML"
-                  hx-confirm="Remove volume group {{ v.name }}? Only an empty group can be removed.">
-              <input type="hidden" name="vg" value="{{ v.name }}">
-              <button class="danger">Remove VG</button>
-            </form>
+        <td>
+          <div class="rowactions">
+            <details>
+              <summary>Extend</summary>
+              {% if view.extend_devices.is_empty() %}
+              <p class="muted small">No free devices to extend this group.</p>
+              {% else %}
+              <form class="inline" hx-post="/lvm/vg/extend" hx-target="#lvm-content" hx-swap="outerHTML">
+                <input type="hidden" name="vg" value="{{ v.name }}">
+                <select name="device">
+                  {% for d in view.extend_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+                </select>
+                <button>Extend</button>
+              </form>
+              {% endif %}
+            </details>
+            <details>
+              <summary>Remove VG</summary>
+              <form class="inline" hx-post="/lvm/vg/delete" hx-target="#lvm-content" hx-swap="outerHTML"
+                    hx-confirm="Remove volume group {{ v.name }}? Only an empty group can be removed.">
+                <input type="hidden" name="vg" value="{{ v.name }}">
+                <button class="danger">Remove VG</button>
+              </form>
+            </details>
           </div>
         </td>
       </tr>
