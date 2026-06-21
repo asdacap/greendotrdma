@@ -658,10 +658,10 @@ mod tests {
             .unwrap();
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(
-            body.contains("Logical volumes") || body.contains("LVM is not installed"),
-            "{body}"
-        );
+        // The fake helper reports vg0 with a linear and a thin-pool LV, so the
+        // page builds real rows rather than the not-installed placeholder.
+        assert!(body.contains("Logical volumes"), "{body}");
+        assert!(body.contains("vg0") && body.contains("data"), "{body}");
 
         // Valid linear LV create reaches the (fake) helper and reports success.
         let req = auth(
