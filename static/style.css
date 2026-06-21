@@ -423,6 +423,9 @@ input, select, textarea, button { font: inherit; }
 .card input, .card select, .card textarea { margin-bottom: 0; }
 .card fieldset { margin: 12px 0 0; }   /* same rhythm as a label row */
 .inline input, .inline select { margin: 0; width: auto; }
+/* Pico pins a fixed height on text inputs (taller than selects and buttons); size
+   them by their padding instead so inputs, selects and buttons line up in a row. */
+.card input, .inline input { height: auto; }
 
 .card textarea {
   width: 100%;
