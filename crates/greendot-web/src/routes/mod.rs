@@ -1,6 +1,7 @@
 pub mod charts;
 pub mod connections;
 pub mod disks;
+pub mod docs;
 pub mod exports;
 pub mod lvm;
 pub mod settings;
@@ -60,6 +61,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(charts::router())
         .merge(connections::router())
         .merge(tasks::router())
+        .merge(docs::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,

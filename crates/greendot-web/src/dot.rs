@@ -1,7 +1,7 @@
 //! The green dot: per-export health derived purely from desired state,
 //! actual configfs state, and the RDMA device list.
 
-use crate::actual::lio::{ActualLio, Portal};
+use crate::actual::lio::{ActualLio, Portal, Target};
 use crate::actual::nvmet::{ActualNvmet, Port};
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
 use crate::state::Export;
@@ -142,6 +142,70 @@ pub fn iscsi_dot(export: &Export, actual: &ActualLio, rdma: &[RdmaDev]) -> Dot {
         }
     } else {
         red(format!("no usable portal — {rdma_problem}"))
+    }
+}
+
+/// RDMA status for an *external* NVMe-oF subsystem — one greendot neither created
+/// nor reconciles (e.g. provisioned by democratic-csi). There is no desired state
+/// to compare against, so this reports only what the kernel is actually doing:
+/// Green when a linked RDMA port is backed by an RDMA device, Yellow when it
+/// serves over another transport (or an unbacked RDMA port) only, Red when
+/// nothing serves it. Shares `addr_served_by_rdma` with [`nvme_dot`].
+pub fn external_nvme_dot(nqn: &str, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Dot {
+    let linked: Vec<&Port> = actual
+        .ports
+        .iter()
+        .filter(|p| p.subsystems.iter().any(|s| s == nqn))
+        .collect();
+    if let Some(port) = linked
+        .iter()
+        .filter(|p| p.trtype == "rdma")
+        .find(|p| addr_served_by_rdma(&p.traddr, rdma))
+    {
+        return Dot {
+            state: DotState::Green,
+            reason: format!("serving via RDMA on {}:{}", port.traddr, port.trsvcid),
+        };
+    }
+    if linked.is_empty() {
+        return red("present but no port serves this subsystem");
+    }
+    let reason = match linked.iter().find(|p| p.trtype == "rdma") {
+        Some(p) => format!("no RDMA device backs RDMA port {}", p.traddr),
+        None => {
+            let transports: Vec<_> = linked.iter().map(|p| p.trtype.as_str()).collect();
+            format!("serving via {} only — no RDMA port", transports.join("/"))
+        }
+    };
+    Dot {
+        state: DotState::Yellow,
+        reason,
+    }
+}
+
+/// RDMA (iSER) status for an *external* iSCSI target greendot doesn't manage.
+/// The same honest, desired-state-free reading as [`external_nvme_dot`].
+pub fn external_iscsi_dot(target: &Target, rdma: &[RdmaDev]) -> Dot {
+    if let Some(portal) = target
+        .portals
+        .iter()
+        .find(|p| p.iser && addr_served_by_rdma(p.addr(), rdma))
+    {
+        return Dot {
+            state: DotState::Green,
+            reason: format!("serving via iSER (RDMA) on {}", portal.addr_port),
+        };
+    }
+    if target.portals.is_empty() {
+        return red("present but no portal serves this target");
+    }
+    let reason = match target.portals.iter().find(|p| p.iser) {
+        Some(p) => format!("no RDMA device backs iSER portal {}", p.addr_port),
+        None => "serving via plain iSCSI/TCP only — no iSER portal".to_owned(),
+    };
+    Dot {
+        state: DotState::Yellow,
+        reason,
     }
 }
 
@@ -661,6 +725,74 @@ mod tests {
     ) {
         export.kind = crate::state::ExportKind::Iscsi;
         let dot = iscsi_dot(&export, &actual, &rdma);
+        assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
+        assert!(
+            dot.reason
+                .to_lowercase()
+                .contains(&reason_contains.to_lowercase()),
+            "reason {:?} should mention {:?}",
+            dot.reason,
+            reason_contains
+        );
+    }
+
+    // External dots report only the observed transport — no desired state, so the
+    // nqn/target need not be greendot's; the helpers match purely on identity.
+    #[rstest]
+    #[case::green_rdma(
+        vec![port(1, "rdma", "10.0.0.5", true), port(2, "tcp", "10.0.0.5", true)],
+        vec![rdma_dev("10.0.0.5")], DotState::Green, "rdma"
+    )]
+    #[case::yellow_tcp_only(vec![port(2, "tcp", "10.0.0.5", true)], vec![], DotState::Yellow, "tcp only")]
+    #[case::yellow_rdma_unbacked(
+        vec![port(1, "rdma", "10.0.0.5", true)], vec![], DotState::Yellow, "no RDMA device"
+    )]
+    #[case::red_no_ports(vec![], vec![], DotState::Red, "no port")]
+    fn external_nvme_dot_truth_table(
+        #[case] ports: Vec<Port>,
+        #[case] rdma: Vec<RdmaDev>,
+        #[case] want_state: DotState,
+        #[case] reason_contains: &str,
+    ) {
+        let actual = ActualNvmet {
+            subsystems: vec![],
+            ports,
+        };
+        let dot = external_nvme_dot(NQN, &actual, &rdma);
+        assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
+        assert!(
+            dot.reason
+                .to_lowercase()
+                .contains(&reason_contains.to_lowercase()),
+            "reason {:?} should mention {:?}",
+            dot.reason,
+            reason_contains
+        );
+    }
+
+    fn ext_target(portals: Vec<Portal>) -> Target {
+        Target {
+            iqn: "iqn.2000-01.com.foreign:lun1".into(),
+            enabled: true,
+            demo_mode: false,
+            luns: vec![],
+            portals,
+            acls: vec![],
+        }
+    }
+
+    #[rstest]
+    #[case::green_iser(vec![portal("10.0.0.5:3260", true)], vec![rdma_dev("10.0.0.5")], DotState::Green, "iser")]
+    #[case::yellow_plain_tcp(vec![portal("10.0.0.5:3260", false)], vec![], DotState::Yellow, "plain")]
+    #[case::yellow_iser_unbacked(vec![portal("10.0.0.5:3260", true)], vec![], DotState::Yellow, "no RDMA device")]
+    #[case::red_no_portals(vec![], vec![], DotState::Red, "portal")]
+    fn external_iscsi_dot_truth_table(
+        #[case] portals: Vec<Portal>,
+        #[case] rdma: Vec<RdmaDev>,
+        #[case] want_state: DotState,
+        #[case] reason_contains: &str,
+    ) {
+        let dot = external_iscsi_dot(&ext_target(portals), &rdma);
         assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
         assert!(
             dot.reason

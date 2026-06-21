@@ -1,0 +1,87 @@
+{% extends "base.html" %}
+
+{% block title %}Configuring democratic-csi — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Configuring democratic-csi</h1>
+<p class="muted">
+  <a href="https://github.com/democratic-csi/democratic-csi">democratic-csi</a> is a
+  Kubernetes CSI driver that turns a ZFS box into dynamically-provisioned
+  PersistentVolumes. Its <code>zfs-generic-nvmeof</code> driver provisions a zvol per
+  PVC and exports it over NVMe-oF — which is exactly what this appliance serves. Point
+  it at this host and greendot stays the dashboard: every CSI-created subsystem shows up
+  on <a href="/exports">Exports</a> badged <span class="badge">External</span> with a
+  live RDMA dot, so you can see at a glance whether a volume is honestly on RDMA or has
+  fallen back to TCP.
+</p>
+
+<h2>1. Worker-node prerequisites</h2>
+<p>Each Kubernetes worker that mounts a volume needs the NVMe fabric modules loaded, plus
+an RDMA-capable NIC (or Soft-RoCE) if you want the green dot:</p>
+<pre class="log">modprobe nvme nvme-tcp nvme-rdma nvme-fc
+# persist across reboots:
+printf 'nvme\nnvme-tcp\nnvme-rdma\nnvme-fc\n' &gt; /etc/modules-load.d/nvme.conf</pre>
+<p class="muted small">The node plugin runs <code>nvme connect -t rdma …</code>; without
+<code>nvme-rdma</code> and a working RDMA interface it silently falls back to TCP — which
+is precisely the case the green dot exists to catch.</p>
+
+<h2>2. SSH access — read this first</h2>
+<p>democratic-csi's <code>zfs-generic-*</code> drivers do <strong>not</strong> use a CSI
+API on the box. They open an SSH session and run <code>zfs</code> and
+<code>nvmetcli</code> directly, as <strong>root</strong> (or a sudo-capable user). That is
+a root-equivalent credential held by the cluster, and it <strong>bypasses greendot's
+helper and its typed allowlist entirely</strong>. Treat the key accordingly. If your
+threat model can't accept that, don't run democratic-csi here — drive provisioning through
+greendot's helper instead.</p>
+
+<h2>3. Driver config</h2>
+<p>A <code>zfs-generic-nvmeof</code> config, adapted from the
+<a href="https://github.com/democratic-csi/democratic-csi/blob/master/examples/zfs-generic-nvmeof.yaml">upstream example</a>
+(the authoritative list of options lives there):</p>
+<pre class="log">driver: zfs-generic-nvmeof
+sshConnection:
+  host: STORAGE_HOST            # this greendot box
+  port: 22
+  username: root               # or a sudo-capable user
+  privateKey: |                # a key the cluster holds (or use `password:`)
+    -----BEGIN OPENSSH PRIVATE KEY-----
+    ...
+zfs:
+  datasetParentName: tank/k8s/vols          # one zvol per PVC, created here
+  detachedSnapshotsDatasetParentName: tank/k8s/snaps
+nvmeof:
+  shareStrategy: nvmetCli
+  transports:
+    - "rdma://STORAGE_HOST:4420"   # rdma:// is the whole RDMA switch; use tcp:// for TCP
+  nvmetCli:
+    basename: "nqn.2003-01.org.linux-nvme"
+  subsystem:
+    attributes:
+      allow_any_host: 1           # SEE FENCING NOTE BELOW</pre>
+<p class="muted small"><strong>Fencing.</strong> <code>allow_any_host: 1</code> is the
+example default and means any initiator can attach — the opposite of what RWO single-writer
+safety needs. For a real SAN, lock each subsystem to the consuming node's NQN
+(<code>allowed_hosts</code>) so a rescheduled pod can't leave two nodes writing the same
+block device.</p>
+
+<h2>4. Snapshots</h2>
+<p>greendot's own scheduled snapshots and democratic-csi's CSI snapshots are the same kind
+of object — native ZFS copy-on-write — so they coexist cleanly. The behaviour is a
+per-<code>VolumeSnapshotClass</code> toggle:</p>
+<pre class="log"># VolumeSnapshotClass parameters
+detachedSnapshots: "false"          # false (default) = native `zfs snapshot`  (instant, COW, ~0 space)
+                                    # true            = `zfs send | recv`      (independent, full copy)
+detachedVolumesFromSnapshots: "false"   # false = `zfs clone`; true = full send/recv copy</pre>
+<p class="muted small">Keep snapshot naming distinct from greendot's scheduled snapshots so
+neither's retention prunes the other's.</p>
+
+<h2>5. Coexistence with greendot</h2>
+<ul>
+  <li><strong>NVMe-oF is safe.</strong> greendot only reconciles subsystems under its own
+  NQN prefix and leaves foreign ones untouched, so CSI-created subsystems are never reaped —
+  they just appear on Exports as <span class="badge">External</span>.</li>
+  <li><strong>Do not run democratic-csi's iSCSI driver on this box.</strong> greendot applies
+  iSCSI by rendering the whole config and running <code>targetctl restore</code>, which would
+  clobber <code>targetcli</code>-created targets on the next reconcile. Use NVMe-oF here.</li>
+</ul>
+{% endblock %}
