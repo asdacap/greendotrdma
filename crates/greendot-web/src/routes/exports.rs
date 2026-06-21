@@ -24,11 +24,56 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/partials/exports", get(dots_partial))
 }
 
-/// Serialized full reconcile against current desired state. Emits helper tasks
-/// only when actual configfs has drifted from desired.
+/// Serialized full reconcile against current desired state. A cheap in-process
+/// drift pre-check keeps the steady state (and the 60 s timer) silent; on drift
+/// it runs `greendot-cli reconcile` as a recorded, streamable task and surfaces
+/// the outcome on the export dots and the settings banner. The web stays the
+/// sole writer of the config — the CLI only reads it.
 pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
     let _guard = state.reconcile_lock.lock().await;
-    reconcile::run(state).await
+    let exports = state.db.list_exports()?;
+    let listen: std::net::IpAddr = state
+        .db
+        .get_setting("listen_addr")?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
+
+    let nvmet_ok = reconcile::nvmet_satisfied(
+        &reconcile::render_nvmet(&exports, listen),
+        &actual::nvmet::read(&state.nvmet_root),
+    );
+    let lio_ok = reconcile::lio_satisfied(
+        &reconcile::render_lio(&exports, listen),
+        &actual::lio::read(&state.lio_root),
+    );
+    if nvmet_ok && lio_ok {
+        return Ok(()); // already realized — emit no task
+    }
+
+    let outcome = crate::task_runner::run_local(
+        state,
+        &state.reconcile_cmd,
+        "reconcile",
+        "Reconcile exports",
+    )
+    .await?;
+    let err = (!outcome.ok).then(|| outcome.error.unwrap_or_else(|| "reconcile failed".into()));
+
+    // Surface the result on the dots of the protocols that drifted (the task's
+    // output carries the detail) and on the settings banner.
+    for e in exports.iter().filter(|e| e.enabled) {
+        let drifted = match e.kind {
+            ExportKind::Nvme => !nvmet_ok,
+            ExportKind::Iscsi => !lio_ok,
+        };
+        state
+            .db
+            .set_export_error(e.id, drifted.then_some(err.as_deref()).flatten())?;
+    }
+    state
+        .db
+        .set_setting(RECONCILE_ERROR_KEY, err.as_deref().unwrap_or_default())?;
+    Ok(())
 }
 
 pub struct ExportRow {
@@ -494,5 +539,53 @@ mod tests {
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Export not found"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn reconcile_state_drift_gates_records_one_task_and_surfaces_errors() {
+        use crate::routes::testutil::{test_state, test_state_with};
+        use crate::state::{ExportKind, NewExport};
+
+        let nvme = |name: &str| NewExport {
+            kind: ExportKind::Nvme,
+            name: name.into(),
+            device_path: "/dev/zvol/tank/vm1".into(),
+            want_rdma: true,
+            want_tcp: false,
+            want_loop: false,
+            allow_any_host: false,
+            initiators: vec![],
+        };
+
+        // No exports → already satisfied → no task is recorded.
+        let state = test_state();
+        super::reconcile_state(&state).await.unwrap();
+        assert!(
+            state.db.list_tasks(10).unwrap().is_empty(),
+            "steady state must emit no task"
+        );
+
+        // An enabled export over an empty configfs tree is drift → exactly one
+        // recorded "reconcile" task, and success clears the stale export error.
+        let id = state.db.insert_export(&nvme("vm1")).unwrap();
+        state.db.set_export_error(id, Some("stale")).unwrap();
+        super::reconcile_state(&state).await.unwrap();
+        let tasks = state.db.list_tasks(10).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].kind, "reconcile");
+        assert_eq!(state.db.list_exports().unwrap()[0].last_error, None);
+
+        // A failing reconcile command sets the banner and the export error.
+        let state = test_state_with(vec!["false".into()]);
+        state.db.insert_export(&nvme("vm1")).unwrap();
+        super::reconcile_state(&state).await.unwrap();
+        assert!(
+            state
+                .db
+                .get_setting(crate::reconcile::RECONCILE_ERROR_KEY)
+                .unwrap()
+                .is_some_and(|s| !s.is_empty())
+        );
+        assert!(state.db.list_exports().unwrap()[0].last_error.is_some());
     }
 }
