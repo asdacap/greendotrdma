@@ -100,7 +100,8 @@ pub struct ExportRow {
 pub struct ClientCmd {
     /// Which transport this connects over, e.g. "RDMA", "TCP", "iSER (RDMA)".
     pub label: String,
-    /// The command(s) to run; may be multi-line (`iscsiadm` discovery + login).
+    /// The multi-line command block to run: load the fabrics module, connect
+    /// (discovery + login for iSCSI), and a `# disconnect:` hint.
     pub cmd: String,
 }
 
@@ -122,14 +123,23 @@ fn client_instructions(e: &Export, listen: std::net::IpAddr) -> Vec<ClientCmd> {
     match e.kind {
         ExportKind::Nvme => {
             let nqn = e.nqn();
-            [(e.want_rdma, "rdma", "RDMA"), (e.want_tcp, "tcp", "TCP")]
-                .into_iter()
-                .filter(|(want, _, _)| *want)
-                .map(|(_, trtype, label)| ClientCmd {
-                    label: label.to_owned(),
-                    cmd: format!("nvme connect -t {trtype} -a {addr} -s 4420 -n {nqn}"),
-                })
-                .collect()
+            // Each transport needs its own fabrics module loaded first, or the
+            // connect fails with "/dev/nvme-fabrics: No such file or directory".
+            [
+                (e.want_rdma, "rdma", "RDMA", "nvme-rdma"),
+                (e.want_tcp, "tcp", "TCP", "nvme-tcp"),
+            ]
+            .into_iter()
+            .filter(|(want, ..)| *want)
+            .map(|(_, trtype, label, module)| ClientCmd {
+                label: label.to_owned(),
+                cmd: format!(
+                    "modprobe {module}\n\
+                     nvme connect -t {trtype} -a {addr} -s 4420 -n {nqn}\n\
+                     # disconnect: nvme disconnect -n {nqn}"
+                ),
+            })
+            .collect()
         }
         ExportKind::Iscsi => {
             let iqn = e.iqn();
@@ -138,8 +148,10 @@ fn client_instructions(e: &Export, listen: std::net::IpAddr) -> Vec<ClientCmd> {
                 cmds.push(ClientCmd {
                     label: "iSER (RDMA)".to_owned(),
                     cmd: format!(
-                        "iscsiadm -m discovery -t st -p {addr}:3260 -I iser\n\
-                         iscsiadm -m node -T {iqn} -p {addr}:3260 -I iser --login"
+                        "modprobe ib_iser\n\
+                         iscsiadm -m discovery -t st -p {addr}:3260 -I iser\n\
+                         iscsiadm -m node -T {iqn} -p {addr}:3260 -I iser --login\n\
+                         # disconnect: iscsiadm -m node -T {iqn} -p {addr}:3260 -I iser --logout"
                     ),
                 });
             }
@@ -149,7 +161,8 @@ fn client_instructions(e: &Export, listen: std::net::IpAddr) -> Vec<ClientCmd> {
                     label: "TCP".to_owned(),
                     cmd: format!(
                         "iscsiadm -m discovery -t st -p {addr}:{port}\n\
-                         iscsiadm -m node -T {iqn} -p {addr}:{port} --login"
+                         iscsiadm -m node -T {iqn} -p {addr}:{port} --login\n\
+                         # disconnect: iscsiadm -m node -T {iqn} -p {addr}:{port} --logout"
                     ),
                 });
             }
@@ -527,18 +540,27 @@ mod tests {
         };
         let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 5).into();
 
-        // NVMe-oF: one `nvme connect` per network transport (loop omitted),
-        // carrying the derived NQN, port 4420 and the concrete listen address.
+        // NVMe-oF: one block per network transport (loop omitted), each with its
+        // fabrics module prerequisite, the connect (derived NQN, port 4420, the
+        // concrete listen address), and a disconnect hint.
         let nvme = super::client_instructions(&export(ExportKind::Nvme, true, true), addr);
         assert_eq!(nvme.len(), 2);
-        assert_eq!(
-            nvme[0].cmd,
-            "nvme connect -t rdma -a 10.0.0.5 -s 4420 -n nqn.2026-06.io.greendot:vm1"
-        );
-        assert_eq!(
-            nvme[1].cmd,
-            "nvme connect -t tcp -a 10.0.0.5 -s 4420 -n nqn.2026-06.io.greendot:vm1"
-        );
+        for (cmd, module, trtype) in [
+            (&nvme[0].cmd, "nvme-rdma", "rdma"),
+            (&nvme[1].cmd, "nvme-tcp", "tcp"),
+        ] {
+            assert!(cmd.contains(&format!("modprobe {module}")), "{cmd}");
+            assert!(
+                cmd.contains(&format!(
+                    "nvme connect -t {trtype} -a 10.0.0.5 -s 4420 -n nqn.2026-06.io.greendot:vm1"
+                )),
+                "{cmd}"
+            );
+            assert!(
+                cmd.contains("# disconnect: nvme disconnect -n nqn.2026-06.io.greendot:vm1"),
+                "{cmd}"
+            );
+        }
 
         // iSCSI: iSER on 3260, plain TCP bumped to 3261 because iSER is also on;
         // each is a discovery + login pair against the derived IQN.
@@ -551,6 +573,16 @@ mod tests {
         );
         assert!(
             iscsi[0].cmd.contains("-p 10.0.0.5:3260 -I iser --login"),
+            "{}",
+            iscsi[0].cmd
+        );
+        assert!(
+            iscsi[0].cmd.contains("modprobe ib_iser"),
+            "{}",
+            iscsi[0].cmd
+        );
+        assert!(
+            iscsi[0].cmd.contains("-p 10.0.0.5:3260 -I iser --logout"),
             "{}",
             iscsi[0].cmd
         );
