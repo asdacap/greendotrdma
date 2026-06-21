@@ -6,3 +6,9 @@ listen = "0.0.0.0:8443"
 # recommended: logins use system passwords).
 tls_cert = "/etc/greendotrdma/cert.pem"
 tls_key = "/etc/greendotrdma/key.pem"
+
+# Storage paths (defaults shown). `state_path` is the hand-editable
+# desired-state config (exports, settings, snapshot policies); `db_path` is the
+# SQLite task run-history.
+# state_path = "/var/lib/greendotrdma/state.toml"
+# db_path = "/var/lib/greendotrdma/state.db"

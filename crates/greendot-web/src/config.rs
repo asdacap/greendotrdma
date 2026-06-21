@@ -8,7 +8,10 @@ use std::path::PathBuf;
 pub struct Config {
     pub listen: SocketAddr,
     pub helper_socket: PathBuf,
+    /// Task run-history (SQLite). The desired-state config lives in `state_path`.
     pub db_path: PathBuf,
+    /// Desired-state config (exports, settings, snapshot policies) as TOML.
+    pub state_path: PathBuf,
     pub metrics_db_path: PathBuf,
     pub nvmet_root: PathBuf,
     pub lio_root: PathBuf,
@@ -22,6 +25,7 @@ impl Default for Config {
             listen: "127.0.0.1:8080".parse().unwrap(),
             helper_socket: "/run/greendotrdma/helper.sock".into(),
             db_path: "/var/lib/greendotrdma/state.db".into(),
+            state_path: "/var/lib/greendotrdma/state.toml".into(),
             metrics_db_path: "/var/lib/greendotrdma/metrics.db".into(),
             nvmet_root: "/sys/kernel/config/nvmet".into(),
             lio_root: "/sys/kernel/config/target".into(),

@@ -1,10 +1,14 @@
-//! Desired-state store. SQLite is the source of truth; configfs is treated
-//! as a disposable cache that the reconciler keeps in sync.
+//! Desired-state store. The export/settings/policy config is the source of
+//! truth and lives in a hand-editable TOML file; task run-history stays in
+//! SQLite. configfs is treated as a disposable cache the reconciler keeps in
+//! sync.
 
 use anyhow::{Context, Result};
 use greendot_proto::{Iqn, Nqn};
 use rusqlite::Connection;
-use std::path::Path;
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Every export we create lives under these prefixes; reconciliation never
@@ -12,24 +16,30 @@ use std::sync::Mutex;
 /// so the helper scopes its configfs writes to the same prefix.
 pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ExportKind {
     Nvme,
     Iscsi,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Export {
     pub id: i64,
     pub kind: ExportKind,
     pub name: String,
     pub device_path: String,
+    #[serde(default = "default_true")]
     pub enabled: bool,
     pub want_rdma: bool,
     pub want_tcp: bool,
+    #[serde(default)]
     pub want_loop: bool,
+    #[serde(default = "default_true")]
     pub allow_any_host: bool,
+    #[serde(default)]
     pub initiators: Vec<String>,
+    #[serde(default)]
     pub last_error: Option<String>,
 }
 
@@ -57,41 +67,32 @@ pub struct NewExport {
 }
 
 pub struct Db {
+    /// Task run-history — the one table that stays in SQLite.
     conn: Mutex<Connection>,
+    /// Desired-state config (exports, settings, snapshot policies).
+    config: Mutex<ConfigDoc>,
+    /// Where `config` is persisted as TOML. `None` in tests => never writes.
+    path: Option<PathBuf>,
+}
+
+/// The TOML document backing the desired-state config; the domain structs
+/// (`Export`, `SnapshotPolicy`) serialize directly into it.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[serde(default)]
+struct ConfigDoc {
+    /// Monotonic id counters, never reused, so URLs stay stable across deletes.
+    next_export_id: i64,
+    next_policy_id: i64,
+    settings: BTreeMap<String, String>,
+    export: Vec<Export>,
+    policy: Vec<SnapshotPolicy>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS exports (
-    id INTEGER PRIMARY KEY,
-    kind TEXT NOT NULL CHECK(kind IN ('nvme','iscsi')),
-    name TEXT NOT NULL UNIQUE,
-    device_path TEXT NOT NULL,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    want_rdma INTEGER NOT NULL,
-    want_tcp INTEGER NOT NULL,
-    want_loop INTEGER NOT NULL DEFAULT 0,
-    allow_any_host INTEGER NOT NULL DEFAULT 1,
-    last_error TEXT
-);
-CREATE TABLE IF NOT EXISTS export_initiators (
-    export_id INTEGER NOT NULL REFERENCES exports(id) ON DELETE CASCADE,
-    initiator TEXT NOT NULL,
-    UNIQUE(export_id, initiator)
-);
-CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS snapshot_policies (
-    id INTEGER PRIMARY KEY,
-    dataset TEXT NOT NULL,
-    cron TEXT NOT NULL,
-    prefix TEXT NOT NULL,
-    keep_last INTEGER,
-    keep_days INTEGER,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    last_run INTEGER NOT NULL DEFAULT 0
-);
 CREATE TABLE IF NOT EXISTS tasks (
     id INTEGER PRIMARY KEY,
     kind TEXT NOT NULL,
@@ -146,212 +147,170 @@ pub struct Task {
     pub finished_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotPolicy {
     pub id: i64,
     pub dataset: String,
     pub cron: String,
     pub prefix: String,
+    #[serde(default)]
     pub keep_last: Option<u32>,
+    #[serde(default)]
     pub keep_days: Option<u32>,
+    #[serde(default = "default_true")]
     pub enabled: bool,
     /// Unix timestamp of the last firing (0 = never).
+    #[serde(default)]
     pub last_run: i64,
 }
 
 impl Db {
-    pub fn open(path: &Path) -> Result<Self> {
-        let conn = Connection::open(path).with_context(|| format!("opening {}", path.display()))?;
+    /// Opens the task-history SQLite at `tasks_db` and loads the desired-state
+    /// config from `state_path`, writing a default file if it does not exist.
+    pub fn open(tasks_db: &Path, state_path: &Path) -> Result<Self> {
+        let conn = Connection::open(tasks_db)
+            .with_context(|| format!("opening {}", tasks_db.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
-        Self::init(conn)
+        conn.execute_batch(SCHEMA)?;
+        let db = Db {
+            conn: Mutex::new(conn),
+            config: Mutex::new(load_config(state_path)?),
+            path: Some(state_path.to_owned()),
+        };
+        // First boot: materialize the default config on disk so it is present
+        // and discoverable for hand-editing.
+        db.persist(&db.config.lock().unwrap())?;
+        Ok(db)
     }
 
     #[cfg(test)]
     pub fn in_memory() -> Result<Self> {
-        Self::init(Connection::open_in_memory()?)
-    }
-
-    fn init(conn: Connection) -> Result<Self> {
-        conn.pragma_update(None, "foreign_keys", "ON")?;
+        let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
         Ok(Db {
             conn: Mutex::new(conn),
+            config: Mutex::new(ConfigDoc::default()),
+            path: None,
         })
     }
 
+    /// Atomically rewrites the config TOML (temp file + rename). A no-op when
+    /// `path` is `None`, as in tests.
+    fn persist(&self, doc: &ConfigDoc) -> Result<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        let text = toml::to_string_pretty(doc).context("serializing state config")?;
+        let tmp = path.with_extension("toml.tmp");
+        std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, path).with_context(|| format!("renaming into {}", path.display()))?;
+        Ok(())
+    }
+
     pub fn insert_export(&self, new: &NewExport) -> Result<i64> {
-        let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction()?;
-        tx.execute(
-            "INSERT INTO exports (kind, name, device_path, want_rdma, want_tcp, want_loop, allow_any_host)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            rusqlite::params![
-                match new.kind {
-                    ExportKind::Nvme => "nvme",
-                    ExportKind::Iscsi => "iscsi",
-                },
-                new.name,
-                new.device_path,
-                new.want_rdma,
-                new.want_tcp,
-                new.want_loop,
-                new.allow_any_host,
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
-        for initiator in &new.initiators {
-            tx.execute(
-                "INSERT OR IGNORE INTO export_initiators (export_id, initiator) VALUES (?1, ?2)",
-                rusqlite::params![id, initiator],
-            )?;
+        let mut doc = self.config.lock().unwrap();
+        if doc.export.iter().any(|e| e.name == new.name) {
+            anyhow::bail!("an export named {:?} already exists", new.name);
         }
-        tx.commit()?;
+        doc.next_export_id += 1;
+        let id = doc.next_export_id;
+        doc.export.push(Export {
+            id,
+            kind: new.kind,
+            name: new.name.clone(),
+            device_path: new.device_path.clone(),
+            enabled: true,
+            want_rdma: new.want_rdma,
+            want_tcp: new.want_tcp,
+            want_loop: new.want_loop,
+            allow_any_host: new.allow_any_host,
+            initiators: dedup_preserve(&new.initiators),
+            last_error: None,
+        });
+        self.persist(&doc)?;
         Ok(id)
     }
 
     pub fn list_exports(&self) -> Result<Vec<Export>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, kind, name, device_path, enabled, want_rdma, want_tcp, want_loop,
-                    allow_any_host, last_error
-             FROM exports ORDER BY name",
-        )?;
-        let mut exports: Vec<Export> = stmt
-            .query_map([], |row| {
-                Ok(Export {
-                    id: row.get(0)?,
-                    kind: if row.get::<_, String>(1)? == "nvme" {
-                        ExportKind::Nvme
-                    } else {
-                        ExportKind::Iscsi
-                    },
-                    name: row.get(2)?,
-                    device_path: row.get(3)?,
-                    enabled: row.get(4)?,
-                    want_rdma: row.get(5)?,
-                    want_tcp: row.get(6)?,
-                    want_loop: row.get(7)?,
-                    allow_any_host: row.get(8)?,
-                    initiators: Vec::new(),
-                    last_error: row.get(9)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        let mut stmt =
-            conn.prepare("SELECT export_id, initiator FROM export_initiators ORDER BY initiator")?;
-        for row in stmt.query_map([], |row| {
-            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
-        })? {
-            let (id, initiator) = row?;
-            if let Some(export) = exports.iter_mut().find(|e| e.id == id) {
-                export.initiators.push(initiator);
-            }
+        let mut exports = self.config.lock().unwrap().export.clone();
+        exports.sort_by(|a, b| a.name.cmp(&b.name));
+        for e in &mut exports {
+            e.initiators.sort();
         }
         Ok(exports)
     }
 
     pub fn set_export_enabled(&self, id: i64, enabled: bool) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE exports SET enabled = ?1 WHERE id = ?2",
-            rusqlite::params![enabled, id],
-        )?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.export.iter_mut().find(|e| e.id == id) {
+            e.enabled = enabled;
+        }
+        self.persist(&doc)
     }
 
     pub fn set_export_error(&self, id: i64, error: Option<&str>) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE exports SET last_error = ?1 WHERE id = ?2",
-            rusqlite::params![error, id],
-        )?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.export.iter_mut().find(|e| e.id == id) {
+            e.last_error = error.map(str::to_owned);
+        }
+        self.persist(&doc)
     }
 
     pub fn delete_export(&self, id: i64) -> Result<()> {
-        self.conn
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM exports WHERE id = ?1", [id])?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        doc.export.retain(|e| e.id != id);
+        self.persist(&doc)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
-        let mut rows = stmt.query_map([key], |row| row.get(0))?;
-        Ok(rows.next().transpose()?)
+        Ok(self.config.lock().unwrap().settings.get(key).cloned())
     }
 
     pub fn insert_policy(&self, p: &SnapshotPolicy) -> Result<i64> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO snapshot_policies (dataset, cron, prefix, keep_last, keep_days, enabled)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                p.dataset,
-                p.cron,
-                p.prefix,
-                p.keep_last,
-                p.keep_days,
-                p.enabled
-            ],
-        )?;
-        Ok(conn.last_insert_rowid())
+        let mut doc = self.config.lock().unwrap();
+        doc.next_policy_id += 1;
+        let id = doc.next_policy_id;
+        doc.policy.push(SnapshotPolicy {
+            id,
+            last_run: 0,
+            ..p.clone()
+        });
+        self.persist(&doc)?;
+        Ok(id)
     }
 
     pub fn list_policies(&self) -> Result<Vec<SnapshotPolicy>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
-            "SELECT id, dataset, cron, prefix, keep_last, keep_days, enabled, last_run
-             FROM snapshot_policies ORDER BY dataset",
-        )?;
-        let policies = stmt
-            .query_map([], |row| {
-                Ok(SnapshotPolicy {
-                    id: row.get(0)?,
-                    dataset: row.get(1)?,
-                    cron: row.get(2)?,
-                    prefix: row.get(3)?,
-                    keep_last: row.get(4)?,
-                    keep_days: row.get(5)?,
-                    enabled: row.get(6)?,
-                    last_run: row.get(7)?,
-                })
-            })?
-            .collect::<rusqlite::Result<_>>()?;
+        let mut policies = self.config.lock().unwrap().policy.clone();
+        policies.sort_by(|a, b| a.dataset.cmp(&b.dataset));
         Ok(policies)
     }
 
     pub fn set_policy_enabled(&self, id: i64, enabled: bool) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE snapshot_policies SET enabled = ?1 WHERE id = ?2",
-            rusqlite::params![enabled, id],
-        )?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        if let Some(p) = doc.policy.iter_mut().find(|p| p.id == id) {
+            p.enabled = enabled;
+        }
+        self.persist(&doc)
     }
 
     pub fn set_policy_last_run(&self, id: i64, last_run: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "UPDATE snapshot_policies SET last_run = ?1 WHERE id = ?2",
-            rusqlite::params![last_run, id],
-        )?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        if let Some(p) = doc.policy.iter_mut().find(|p| p.id == id) {
+            p.last_run = last_run;
+        }
+        self.persist(&doc)
     }
 
     pub fn delete_policy(&self, id: i64) -> Result<()> {
-        self.conn
-            .lock()
-            .unwrap()
-            .execute("DELETE FROM snapshot_policies WHERE id = ?1", [id])?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        doc.policy.retain(|p| p.id != id);
+        self.persist(&doc)
     }
 
     pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "INSERT INTO settings (key, value) VALUES (?1, ?2)
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            rusqlite::params![key, value],
-        )?;
-        Ok(())
+        let mut doc = self.config.lock().unwrap();
+        doc.settings.insert(key.to_owned(), value.to_owned());
+        self.persist(&doc)
     }
 
     /// Records a started task; returns its id. Command/args/stdin land via
@@ -453,6 +412,27 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         started_at: row.get("started_at")?,
         finished_at: row.get("finished_at")?,
     })
+}
+
+/// Reads the desired-state config from `path`, or the default document if the
+/// file does not exist yet (first boot / hand-deleted).
+fn load_config(path: &Path) -> Result<ConfigDoc> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text).with_context(|| format!("parsing {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ConfigDoc::default()),
+        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    }
+}
+
+/// Deduplicates initiators while preserving order (replaces the old
+/// `INSERT OR IGNORE` on the unique `(export_id, initiator)` index).
+fn dedup_preserve(items: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .iter()
+        .filter(|s| seen.insert(s.as_str()))
+        .cloned()
+        .collect()
 }
 
 #[cfg(test)]
@@ -573,5 +553,47 @@ mod tests {
             db.get_setting("listen_addr").unwrap().as_deref(),
             Some("10.0.0.6")
         );
+    }
+
+    #[test]
+    fn toml_config_persists_across_reopen_with_stable_ids() {
+        let dir = std::env::temp_dir();
+        let tag = rand::random::<u32>();
+        let tasks_db = dir.join(format!("gd-tasks{tag}.db"));
+        let state = dir.join(format!("gd-state{tag}.toml"));
+
+        let (a, b);
+        {
+            let db = Db::open(&tasks_db, &state).unwrap();
+            a = db.insert_export(&new("alpha")).unwrap();
+            b = db.insert_export(&new("beta")).unwrap();
+            assert!(
+                db.insert_export(&new("alpha")).is_err(),
+                "duplicate name must fail"
+            );
+            db.delete_export(a).unwrap();
+            db.set_setting("listen_addr", "10.0.0.5").unwrap();
+        }
+        // Reopen from disk: config survived, ids are not reused after delete.
+        {
+            let db = Db::open(&tasks_db, &state).unwrap();
+            let names: Vec<_> = db
+                .list_exports()
+                .unwrap()
+                .into_iter()
+                .map(|e| e.name)
+                .collect();
+            assert_eq!(names, ["beta"], "alpha deleted, beta persisted");
+            assert_eq!(
+                db.get_setting("listen_addr").unwrap().as_deref(),
+                Some("10.0.0.5")
+            );
+            let c = db.insert_export(&new("gamma")).unwrap();
+            assert_eq!((a, b, c), (1, 2, 3), "ids never reused across restart");
+        }
+        for ext in ["db", "db-wal", "db-shm"] {
+            std::fs::remove_file(dir.join(format!("gd-tasks{tag}.{ext}"))).ok();
+        }
+        std::fs::remove_file(&state).ok();
     }
 }

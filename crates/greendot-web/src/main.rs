@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
         helper: helper_client::HelperClient::new(config.helper_socket.clone()),
         sessions: auth::Sessions::new(Duration::from_secs(24 * 3600)),
         secure_cookies: tls.is_some(),
-        db: state::Db::open(&config.db_path)?,
+        db: state::Db::open(&config.db_path, &config.state_path)?,
         metrics: metrics::Metrics::open(&config.metrics_db_path)?,
         nvmet_root: config.nvmet_root.clone(),
         lio_root: config.lio_root.clone(),
