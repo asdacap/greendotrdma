@@ -536,6 +536,11 @@ details { margin: 10px 0; }
 details summary { cursor: pointer; color: var(--muted); }
 details summary:hover { color: var(--text); }
 
+/* "Edit" drawer: a full-width row beneath the item it edits. */
+tr.edit td { padding: 4px 13px 8px; }
+tr.edit details { margin: 0; }
+tr.edit .editbox { max-width: none; margin-top: 8px; }
+
 /* ---- Login -------------------------------------------------------------- */
 
 .login-body {

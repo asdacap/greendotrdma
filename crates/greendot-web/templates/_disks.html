@@ -16,7 +16,7 @@
   <p class="empty">No partitions.</p>
   {% else %}
   <table>
-    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th></tr></thead>
     <tbody>
       {% for p in d.partitions %}
       <tr>
@@ -25,11 +25,13 @@
         <td>{{ p.fstype }}</td>
         <td>{{ p.label }}</td>
         <td>{{ p.mountpoint }}</td>
-        <td>
-          {% if let Some(number) = p.number %}
+      </tr>
+      {% if let Some(number) = p.number %}
+      <tr class="edit">
+        <td colspan="5">
           <details>
             <summary>Edit</summary>
-            <div class="card">
+            <div class="card editbox">
               <p class="muted small">Filesystem: {{ p.fstype }}{% if p.mounted %} · mounted at {{ p.mountpoint }}{% endif %}</p>
               {% if p.shrinkable %}
               <form class="inline" hx-post="/disks/part/shrink" hx-target="#disks-content" hx-swap="outerHTML"
@@ -62,9 +64,9 @@
               </form>
             </div>
           </details>
-          {% endif %}
         </td>
       </tr>
+      {% endif %}
       {% endfor %}
     </tbody>
   </table>
