@@ -41,6 +41,9 @@ pub struct AppState {
     pub reconcile_lock: tokio::sync::Mutex<()>,
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
+    /// The command run (as a recorded task) to reconcile on drift — normally
+    /// the sibling `greendot-cli reconcile <config>`.
+    pub reconcile_cmd: Vec<String>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -256,10 +259,13 @@ pub(crate) mod testutil {
         socket
     }
 
-    pub fn test_app() -> Router {
+    /// A test `AppState` whose reconcile "command" is `reconcile_cmd` — `true`
+    /// stands in for a successful reconcile, `false` for a failed one, so the
+    /// drift gate + record/stream path is exercised without execing the real CLI.
+    pub fn test_state_with(reconcile_cmd: Vec<String>) -> Arc<AppState> {
         let nvmet_root =
             std::env::temp_dir().join(format!("gd-nvmet-app{}", rand::random::<u32>()));
-        app(Arc::new(AppState {
+        Arc::new(AppState {
             helper: HelperClient::new(fake_helper_socket()),
             sessions: Sessions::new(Duration::from_secs(3600)),
             secure_cookies: false,
@@ -269,7 +275,16 @@ pub(crate) mod testutil {
             nvmet_root,
             reconcile_lock: tokio::sync::Mutex::new(()),
             tasks: crate::task_runner::TaskHub::default(),
-        }))
+            reconcile_cmd,
+        })
+    }
+
+    pub fn test_state() -> Arc<AppState> {
+        test_state_with(vec!["true".into()])
+    }
+
+    pub fn test_app() -> Router {
+        app(test_state())
     }
 
     pub async fn send(

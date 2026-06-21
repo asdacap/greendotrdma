@@ -1,14 +1,19 @@
 //! Desired-state reconciliation. Renders the full NVMe-oF/iSCSI desired state
 //! from the export list, and — only when actual configfs no longer realizes it
 //! — applies it via the helper: NVMe-oF is written to configfs directly, iSCSI
-//! through a `targetctl` restore task. Each apply is therefore a recorded task;
-//! steady-state reconciles emit nothing.
+//! through a `targetctl` restore task.
+//!
+//! The apply itself runs out-of-process: `greendot-cli reconcile` calls
+//! [`cli_run`], which streams its progress to stdout/stderr. The web service
+//! wraps that command in a recorded task (see `routes::exports::reconcile_state`),
+//! so the render/satisfied predicates here are shared by the web's drift
+//! pre-check and the CLI.
 
 use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
-use crate::routes::AppState;
+use crate::config::Config;
+use crate::helper_client::HelperClient;
 use crate::state::{Export, ExportKind, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
-use crate::task_runner;
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
     NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request, Transport,
@@ -283,76 +288,65 @@ fn modules_for(exports: &[Export]) -> Vec<KernelModule> {
     m
 }
 
-/// Reconciles desired → actual, applying via tasks only on drift. Serialized
-/// by the caller's `reconcile_lock`.
-pub async fn run(state: &AppState) -> anyhow::Result<()> {
-    let listen: IpAddr = state
-        .db
-        .get_setting("listen_addr")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
-    let exports = state.db.list_exports()?;
+/// Reconciles desired → actual for `greendot-cli reconcile`: renders the
+/// desired state, and on drift applies it via the helper, streaming each step's
+/// output to stdout/stderr. Read-only on the config TOML — the web service
+/// records the run as a task and writes back the outcome. Returns `true` when
+/// everything reconciled (including the no-op steady state), `false` if any
+/// apply failed.
+pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
+    let desired = crate::state::read_desired(&cfg.state_path)?;
+    let exports = desired.exports;
+    let helper = HelperClient::new(cfg.helper_socket.clone());
 
-    let nvmet_desired = render_nvmet(&exports, listen);
-    let lio_desired = render_lio(&exports, listen);
-    let nvmet_ok = nvmet_satisfied(
-        &nvmet_desired,
-        &crate::actual::nvmet::read(&state.nvmet_root),
-    );
-    let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&state.lio_root));
+    let nvmet_desired = render_nvmet(&exports, desired.listen);
+    let lio_desired = render_lio(&exports, desired.listen);
+    let nvmet_ok = nvmet_satisfied(&nvmet_desired, &crate::actual::nvmet::read(&cfg.nvmet_root));
+    let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
     if nvmet_ok && lio_ok {
-        return Ok(()); // already realized — emit no task
+        println!("already reconciled; nothing to do");
+        return Ok(true);
     }
 
+    let mut ok = true;
     let modules = modules_for(&exports);
     if !modules.is_empty() {
-        task_runner::run(
-            state,
+        ok &= run_step(
+            &helper,
             Request::EnsureModules { modules },
-            "modules",
             "Load kernel modules",
         )
-        .await?;
+        .await;
     }
-
-    let mut nvmet_err = None;
     if !nvmet_ok {
-        let out = task_runner::run(
-            state,
-            Request::NvmetApply {
-                desired: nvmet_desired,
-            },
-            "nvmet-apply",
-            "Apply NVMe-oF configuration",
-        )
-        .await?;
-        nvmet_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "nvmet apply failed".into()));
-    }
-    let mut lio_err = None;
-    if !lio_ok {
-        let out = task_runner::run(
-            state,
-            Request::LioApply {
-                desired: lio_desired,
-            },
-            "lio-apply",
-            "Apply iSCSI configuration",
-        )
-        .await?;
-        lio_err = (!out.ok).then(|| out.error.unwrap_or_else(|| "targetcli failed".into()));
-    }
-
-    // Surface apply failures on the relevant exports' dots and the banner.
-    for e in exports.iter().filter(|e| e.enabled) {
-        let err = match e.kind {
-            ExportKind::Nvme => nvmet_err.as_deref(),
-            ExportKind::Iscsi => lio_err.as_deref(),
+        let req = Request::NvmetApply {
+            desired: nvmet_desired,
         };
-        state.db.set_export_error(e.id, err)?;
+        ok &= run_step(&helper, req, "Apply NVMe-oF configuration").await;
     }
-    let banner = nvmet_err.or(lio_err).unwrap_or_default();
-    state.db.set_setting(RECONCILE_ERROR_KEY, &banner)?;
-    Ok(())
+    if !lio_ok {
+        let req = Request::LioApply {
+            desired: lio_desired,
+        };
+        ok &= run_step(&helper, req, "Apply iSCSI configuration").await;
+    }
+    Ok(ok)
+}
+
+/// Runs one apply request through the helper, echoing its streamed output to
+/// the CLI's own stdout/stderr (which the web records as the task's output).
+async fn run_step(helper: &HelperClient, req: Request, label: &str) -> bool {
+    println!("== {label} ==");
+    let out = helper.collect(req).await;
+    print!("{}", out.stdout);
+    eprint!("{}", out.stderr);
+    if !out.ok {
+        eprintln!(
+            "{label} failed: {}",
+            out.error.as_deref().unwrap_or("unknown error")
+        );
+    }
+    out.ok
 }
 
 #[cfg(test)]

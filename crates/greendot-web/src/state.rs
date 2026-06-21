@@ -8,6 +8,7 @@ use greendot_proto::{Iqn, Nqn};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -412,6 +413,31 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
         started_at: row.get("started_at")?,
         finished_at: row.get("finished_at")?,
     })
+}
+
+/// The desired state needed to reconcile, read straight from the config TOML.
+pub struct Desired {
+    pub exports: Vec<Export>,
+    pub listen: IpAddr,
+}
+
+/// Reads the desired state from `state_path` with no side effects (no SQLite,
+/// no first-boot write), so `greendot-cli reconcile` only ever *reads* config —
+/// the web service stays the sole writer. Exports are normalized exactly as
+/// [`Db::list_exports`] returns them.
+pub fn read_desired(state_path: &Path) -> Result<Desired> {
+    let doc = load_config(state_path)?;
+    let mut exports = doc.export;
+    exports.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &mut exports {
+        e.initiators.sort();
+    }
+    let listen = doc
+        .settings
+        .get("listen_addr")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
+    Ok(Desired { exports, listen })
 }
 
 /// Reads the desired-state config from `path`, or the default document if the

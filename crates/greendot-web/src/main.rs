@@ -1,24 +1,27 @@
-mod actual;
-mod auth;
-mod config;
-mod dot;
-mod fmt;
-mod helper_client;
-mod metrics;
-mod reconcile;
-mod routes;
-mod snapshots;
-mod state;
-mod task_runner;
-
 use anyhow::{Context, Result};
+use greendot_web::{auth, config, helper_client, metrics, routes, snapshots, state, task_runner};
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The argv the web service runs to reconcile: the sibling `greendot-cli`
+/// (installed next to this binary) with the same config file, so it reads the
+/// same desired state and helper socket.
+fn reconcile_cmd(config_arg: Option<String>) -> Vec<String> {
+    let cli = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|dir| dir.join("greendot-cli")))
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "greendot-cli".into());
+    let mut cmd = vec![cli, "reconcile".into()];
+    cmd.extend(config_arg);
+    cmd
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
-    let config = config::Config::load(std::env::args().nth(1))?;
+    let config_arg = std::env::args().nth(1);
+    let config = config::Config::load(config_arg.clone())?;
 
     let tls = match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => Some(
@@ -46,6 +49,7 @@ async fn main() -> Result<()> {
         lio_root: config.lio_root.clone(),
         reconcile_lock: tokio::sync::Mutex::new(()),
         tasks: task_runner::TaskHub::default(),
+        reconcile_cmd: reconcile_cmd(config_arg),
     });
     let app = routes::app(Arc::clone(&state));
 

@@ -33,6 +33,7 @@ conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"
 assets = [
     ["target/release/greendot-web", "usr/libexec/greendotrdma/", "755"],
+    ["target/release/greendot-cli", "usr/libexec/greendotrdma/", "755"],
     ["target/release/greendot-helper", "usr/libexec/greendotrdma/", "755"],
     ["../../pkg/sysusers.conf", "usr/lib/sysusers.d/greendotrdma.conf", "644"],
     ["../../pkg/tmpfiles.conf", "usr/lib/tmpfiles.d/greendotrdma.conf", "644"],
