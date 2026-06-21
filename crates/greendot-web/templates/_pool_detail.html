@@ -69,7 +69,8 @@
   </table>
   {% endif %}
 
-  <h2>Create zvol</h2>
+  <details>
+  <summary>Create zvol</summary>
   <form class="card" hx-post="/zfs/zvol" hx-target="#pool-detail-content" hx-swap="outerHTML">
     <label>Parent dataset
       <select name="parent" required>
@@ -97,5 +98,6 @@
     <label class="checkbox"><input type="checkbox" name="sparse" value="1"> Sparse (thin-provisioned)</label>
     <button type="submit">Create</button>
   </form>
+  </details>
   {% endif %}
 </div>

@@ -142,7 +142,8 @@
   </table>
   {% endif %}
 
-  <h2>Create logical volume</h2>
+  <details>
+  <summary>Create logical volume</summary>
   <form class="card" hx-post="/lvm/lv" hx-target="#lvm-content" hx-swap="outerHTML">
     <label>Volume group
       <select name="vg">{% for g in view.vg_names %}<option>{{ g }}</option>{% endfor %}</select>
@@ -158,8 +159,10 @@
     </label>
     <button type="submit">Create</button>
   </form>
+  </details>
 
-  <h2>Create thin pool</h2>
+  <details>
+  <summary>Create thin pool</summary>
   <form class="card" hx-post="/lvm/thinpool" hx-target="#lvm-content" hx-swap="outerHTML">
     <label>Volume group
       <select name="vg">{% for g in view.vg_names %}<option>{{ g }}</option>{% endfor %}</select>
@@ -171,5 +174,6 @@
     </label>
     <button type="submit">Create pool</button>
   </form>
+  </details>
   {% endif %}
 </div>
