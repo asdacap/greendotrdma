@@ -7,7 +7,7 @@ use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{BlockDev, DevicePath, MountPath, PartLabel, PoolName, Request};
+use greendot_proto::{BlockDev, DevicePath, MountPath, PartLabel, Request};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -18,7 +18,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/disks/part/create", post(part_create))
         .route("/disks/part/delete", post(part_delete))
         .route("/disks/part/shrink", post(part_shrink))
-        .route("/disks/part/add-to-pool", post(part_add_to_pool))
 }
 
 pub struct PartRow {
@@ -28,7 +27,6 @@ pub struct PartRow {
     pub label: String,
     pub mountpoint: String,
     pub fstype: String,
-    pub mounted: bool,
     pub shrinkable: bool,
     /// Why shrink is unavailable (empty when `shrinkable`).
     pub shrink_reason: String,
@@ -47,8 +45,6 @@ pub struct DiskRow {
 
 pub struct DisksView {
     pub disks: Vec<DiskRow>,
-    pub pools: Vec<String>,
-    pub zfs_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
     pub form_error: Option<String>,
@@ -100,22 +96,10 @@ struct DisksPartial {
 async fn gather(flash: Option<String>, form_error: Option<String>) -> DisksView {
     let mut view = DisksView {
         disks: vec![],
-        pools: vec![],
-        zfs_installed: false,
         error: None,
         flash,
         form_error,
     };
-    // Pool names for the "add to pool" dropdown. Absent zpool ⇒ ZFS not
-    // installed; an error means it is installed but unreadable (empty list).
-    match crate::actual::zfs::pools().await {
-        Ok(Some(pools)) => {
-            view.zfs_installed = true;
-            view.pools = pools.into_iter().map(|p| p.name).collect();
-        }
-        Ok(None) => view.zfs_installed = false,
-        Err(_) => view.zfs_installed = true,
-    }
     match block::disks().await {
         Ok(disks) => {
             view.disks = disks
@@ -153,7 +137,6 @@ fn part_row(p: block::Partition) -> PartRow {
         size: human_bytes(p.size),
         label: p.label.unwrap_or_default(),
         mountpoint,
-        mounted,
         fstype,
         shrinkable,
         shrink_reason,
@@ -476,36 +459,6 @@ async fn part_shrink(
     }
 }
 
-#[derive(Deserialize)]
-struct AddPoolForm {
-    device: String,
-    pool: String,
-}
-
-async fn part_add_to_pool(
-    State(state): State<Arc<AppState>>,
-    Form(form): Form<AddPoolForm>,
-) -> Response {
-    let Ok(pool) = PoolName::new(form.pool.trim()) else {
-        return form_failed(format!("invalid pool name {:?}", form.pool)).await;
-    };
-    let Ok(device) = DevicePath::new(form.device.trim()) else {
-        return form_failed(format!("invalid device {:?}", form.device)).await;
-    };
-    let req = Request::PoolDeviceAdd {
-        pool: pool.clone(),
-        device: device.clone(),
-    };
-    run(
-        &state,
-        req,
-        "pool-add",
-        &format!("add {device} to {pool}"),
-        format!("added {device} to pool {pool}"),
-    )
-    .await
-}
-
 #[cfg(test)]
 mod tests {
     use super::{Shrink, fs_display, shrinkability};
@@ -568,21 +521,6 @@ mod tests {
         let req = auth(form_post("/disks/part/delete", "disk=sdb&number=2"));
         let (_, _, body) = send(&app, req).await;
         assert!(body.contains("deleted partition 2 on sdb"), "{body}");
-
-        // Add-to-pool: a valid request streams through the fake helper; a
-        // reserved vdev keyword as the pool name is rejected up front.
-        let req = auth(form_post(
-            "/disks/part/add-to-pool",
-            "device=%2Fdev%2Fsdb&pool=tank",
-        ));
-        let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("added /dev/sdb to pool tank"), "{body}");
-        let req = auth(form_post(
-            "/disks/part/add-to-pool",
-            "device=%2Fdev%2Fsdb&pool=mirror",
-        ));
-        let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("invalid pool name"), "{body}");
 
         // Shrink: form validation rejects bad input before touching the helper.
         let req = auth(form_post(

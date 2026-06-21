@@ -29,6 +29,21 @@
   </table>
   {% endif %}
 
+  <details>
+    <summary>Add device</summary>
+    {% if view.add_devices.is_empty() %}
+    <p class="muted small">No free devices to add — free up an unmounted, empty partition or disk first.</p>
+    {% else %}
+    <form class="inline" hx-post="/zfs/pool/{{ view.name }}/add-device" hx-target="#pool-detail-content" hx-swap="outerHTML"
+          hx-confirm="Add a device to {{ view.name }}? A single-disk vdev is refused if it would reduce the pool's redundancy.">
+      <select name="device">
+        {% for d in view.add_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+      </select>
+      <button>Add device</button>
+    </form>
+    {% endif %}
+  </details>
+
   <h2>Zvols</h2>
   {% if view.zvols.is_empty() %}
   <p class="empty">This pool has no zvols yet.</p>
@@ -41,24 +56,25 @@
         <td>{{ z.name }}</td>
         <td>{{ z.used }}</td>
         <td>{{ z.volsize }}</td>
-        <td><details class="editbtn"><summary>Edit</summary></details></td>
-      </tr>
-      <tr class="edit">
-        <td colspan="4">
-          <div class="card editbox">
-            <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
-              <input type="hidden" name="dataset" value="{{ z.name }}">
-              <input name="size" size="5" placeholder="new" required>
-              <select name="unit">
-                <option>GiB</option><option>MiB</option><option>TiB</option>
-              </select>
-              <button>Resize</button>
-            </form>
-            <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
-                  hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
-              <input type="hidden" name="dataset" value="{{ z.name }}">
-              <button class="danger">Delete</button>
-            </form>
+        <td>
+          <div class="rowactions">
+            <details>
+              <summary>Resize</summary>
+              <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                <input type="hidden" name="dataset" value="{{ z.name }}">
+                <input name="size" size="5" placeholder="new" required>
+                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+                <button>Resize</button>
+              </form>
+            </details>
+            <details>
+              <summary>Delete</summary>
+              <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                    hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
+                <input type="hidden" name="dataset" value="{{ z.name }}">
+                <button class="danger">Delete</button>
+              </form>
+            </details>
           </div>
         </td>
       </tr>

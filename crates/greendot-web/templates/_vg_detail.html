@@ -40,38 +40,47 @@
         <td>{{ l.size }}</td>
         <td>{{ l.pool }}</td>
         <td>{{ l.data_percent }}</td>
-        <td><details class="editbtn"><summary>Edit</summary></details></td>
-      </tr>
-      <tr class="edit">
-        <td colspan="6">
-          <div class="card editbox">
-            <form class="inline" hx-post="/lvm/lv/resize" hx-target="#vg-detail-content" hx-swap="outerHTML">
-              <input type="hidden" name="vg" value="{{ l.vg }}">
-              <input type="hidden" name="name" value="{{ l.name }}">
-              <input name="size" size="5" placeholder="grow to" required>
-              <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-              <button>Grow</button>
-            </form>
-            <form class="inline" hx-post="/lvm/lv/shrink" hx-target="#vg-detail-content" hx-swap="outerHTML"
-                  hx-confirm="Shrink {{ l.full_name }}? Data beyond the new size is lost — back up first.">
-              <input type="hidden" name="vg" value="{{ l.vg }}">
-              <input type="hidden" name="name" value="{{ l.name }}">
-              <input name="size" size="5" placeholder="shrink to" required>
-              <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-              <button class="danger">Shrink</button>
-            </form>
-            <form class="inline" hx-post="/lvm/lv/rename" hx-target="#vg-detail-content" hx-swap="outerHTML">
-              <input type="hidden" name="vg" value="{{ l.vg }}">
-              <input type="hidden" name="name" value="{{ l.name }}">
-              <input name="new_name" size="8" placeholder="new name" required>
-              <button>Rename</button>
-            </form>
-            <form class="inline" hx-post="/lvm/lv/delete" hx-target="#vg-detail-content" hx-swap="outerHTML"
-                  hx-confirm="Delete {{ l.full_name }}? This destroys the volume's data.">
-              <input type="hidden" name="vg" value="{{ l.vg }}">
-              <input type="hidden" name="name" value="{{ l.name }}">
-              <button class="danger">Delete</button>
-            </form>
+        <td>
+          <div class="rowactions">
+            <details>
+              <summary>Grow</summary>
+              <form class="inline" hx-post="/lvm/lv/resize" hx-target="#vg-detail-content" hx-swap="outerHTML">
+                <input type="hidden" name="vg" value="{{ l.vg }}">
+                <input type="hidden" name="name" value="{{ l.name }}">
+                <input name="size" size="5" placeholder="grow to" required>
+                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+                <button>Grow</button>
+              </form>
+            </details>
+            <details>
+              <summary>Shrink</summary>
+              <form class="inline" hx-post="/lvm/lv/shrink" hx-target="#vg-detail-content" hx-swap="outerHTML"
+                    hx-confirm="Shrink {{ l.full_name }}? Data beyond the new size is lost — back up first.">
+                <input type="hidden" name="vg" value="{{ l.vg }}">
+                <input type="hidden" name="name" value="{{ l.name }}">
+                <input name="size" size="5" placeholder="shrink to" required>
+                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+                <button class="danger">Shrink</button>
+              </form>
+            </details>
+            <details>
+              <summary>Rename</summary>
+              <form class="inline" hx-post="/lvm/lv/rename" hx-target="#vg-detail-content" hx-swap="outerHTML">
+                <input type="hidden" name="vg" value="{{ l.vg }}">
+                <input type="hidden" name="name" value="{{ l.name }}">
+                <input name="new_name" size="8" placeholder="new name" required>
+                <button>Rename</button>
+              </form>
+            </details>
+            <details>
+              <summary>Delete</summary>
+              <form class="inline" hx-post="/lvm/lv/delete" hx-target="#vg-detail-content" hx-swap="outerHTML"
+                    hx-confirm="Delete {{ l.full_name }}? This destroys the volume's data.">
+                <input type="hidden" name="vg" value="{{ l.vg }}">
+                <input type="hidden" name="name" value="{{ l.name }}">
+                <button class="danger">Delete</button>
+              </form>
+            </details>
           </div>
         </td>
       </tr>

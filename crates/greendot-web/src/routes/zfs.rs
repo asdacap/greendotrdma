@@ -19,6 +19,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/pool/create", axum::routing::get(pool_create_page))
         .route("/zfs/pool", post(pool_create))
         .route("/zfs/pool/{name}", axum::routing::get(pool_detail_page))
+        .route("/zfs/pool/{name}/add-device", post(pool_add_device))
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
         .route("/zfs/zvol/delete", post(zvol_delete))
@@ -101,6 +102,8 @@ pub struct PoolDetailView {
     pub zvols: Vec<ZvolRow>,
     /// Filesystems in this pool, offered as zvol parents.
     pub parents: Vec<String>,
+    /// Empty raw devices offered to expand this pool (the "Add device" form).
+    pub add_devices: Vec<PoolDeviceOption>,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -121,6 +124,7 @@ struct PoolDetailPartial {
 }
 
 async fn gather_pool_detail(
+    state: &AppState,
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
@@ -134,6 +138,13 @@ async fn gather_pool_detail(
     match tokio::try_join!(zfs::pools(), zfs::datasets()) {
         Ok((Some(pools), Some(datasets))) => {
             view.pool = pools.into_iter().find(|p| p.name == name).map(PoolRow::new);
+            // A vdev added to the pool must be an empty raw device, so offer the
+            // same candidates as pool creation (no zvols, LVs, or formatted parts).
+            if view.pool.is_some() {
+                view.add_devices = gather_pool_create(state, &HashSet::new(), None)
+                    .await
+                    .devices;
+            }
             let prefix = format!("{name}/");
             view.parents = datasets
                 .iter()
@@ -160,13 +171,13 @@ async fn gather_pool_detail(
 }
 
 async fn pool_detail_page(
-    State(_): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
     Path(name): Path<String>,
 ) -> Response {
     page(PoolDetailTemplate {
         user,
-        view: gather_pool_detail(&name, None, None).await,
+        view: gather_pool_detail(&state, &name, None, None).await,
     })
 }
 
@@ -187,9 +198,9 @@ fn pool_of(dataset: &str) -> &str {
     dataset.split('/').next().unwrap_or(dataset)
 }
 
-/// Runs a zvol request as a recorded task and re-renders the owning pool's
+/// Runs a pool/zvol request as a recorded task and re-renders the owning pool's
 /// detail partial with the outcome.
-async fn run_zvol(
+async fn run_pool_op(
     state: &AppState,
     req: Request,
     kind: &str,
@@ -200,16 +211,16 @@ async fn run_zvol(
     let view = match crate::task_runner::run(state, req, kind, title).await {
         Ok(outcome) => {
             let (flash, error) = outcome.message(&success);
-            gather_pool_detail(pool, flash, error).await
+            gather_pool_detail(state, pool, flash, error).await
         }
-        Err(e) => gather_pool_detail(pool, None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_pool_detail(state, pool, None, Some(format!("{e:#}"))).await,
     };
     page(PoolDetailPartial { view })
 }
 
-async fn zvol_failed(pool: &str, message: impl Into<String>) -> Response {
+async fn pool_op_failed(state: &AppState, pool: &str, message: impl Into<String>) -> Response {
     page(PoolDetailPartial {
-        view: gather_pool_detail(pool, None, Some(message.into())).await,
+        view: gather_pool_detail(state, pool, None, Some(message.into())).await,
     })
 }
 
@@ -228,16 +239,16 @@ struct CreateForm {
 async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
     let pool = pool_of(&form.parent).to_owned();
     let Ok(dataset) = DatasetName::new(format!("{}/{}", form.parent, form.name.trim())) else {
-        return zvol_failed(&pool, format!("invalid zvol name {:?}", form.name)).await;
+        return pool_op_failed(&state, &pool, format!("invalid zvol name {:?}", form.name)).await;
     };
     let Some(size) = parse_size(&form.size, &form.unit) else {
-        return zvol_failed(&pool, "invalid size").await;
+        return pool_op_failed(&state, &pool, "invalid size").await;
     };
     let volblocksize = match form.volblocksize.as_str() {
         "" => None,
         v => match v.parse() {
             Ok(v) => Some(v),
-            Err(_) => return zvol_failed(&pool, "invalid volblocksize").await,
+            Err(_) => return pool_op_failed(&state, &pool, "invalid volblocksize").await,
         },
     };
     let req = Request::ZvolCreate {
@@ -246,7 +257,7 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
         volblocksize,
         sparse: form.sparse.is_some(),
     };
-    run_zvol(
+    run_pool_op(
         &state,
         req,
         "zvol-create",
@@ -267,16 +278,16 @@ struct ResizeForm {
 async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<ResizeForm>) -> Response {
     let pool = pool_of(&form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return zvol_failed(&pool, "invalid dataset name").await;
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
     };
     let Some(new_size) = parse_size(&form.size, &form.unit) else {
-        return zvol_failed(&pool, "invalid size").await;
+        return pool_op_failed(&state, &pool, "invalid size").await;
     };
     let req = Request::ZvolResize {
         dataset: dataset.clone(),
         new_size,
     };
-    run_zvol(
+    run_pool_op(
         &state,
         req,
         "zvol-resize",
@@ -295,18 +306,51 @@ struct DeleteForm {
 async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<DeleteForm>) -> Response {
     let pool = pool_of(&form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return zvol_failed(&pool, "invalid dataset name").await;
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
     };
     let req = Request::ZvolDelete {
         dataset: dataset.clone(),
     };
-    run_zvol(
+    run_pool_op(
         &state,
         req,
         "zvol-delete",
         &format!("delete {dataset}"),
         format!("deleted {dataset}"),
         &pool,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct AddDeviceForm {
+    device: String,
+}
+
+/// Adds a device to an existing pool (`zpool add`). The pool comes from the URL;
+/// the helper refuses a single-disk vdev that would reduce the pool's redundancy.
+async fn pool_add_device(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(form): Form<AddDeviceForm>,
+) -> Response {
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
+    };
+    let Ok(device) = DevicePath::new(form.device.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
+    };
+    let req = Request::PoolDeviceAdd {
+        pool: pool.clone(),
+        device: device.clone(),
+    };
+    run_pool_op(
+        &state,
+        req,
+        "pool-add",
+        &format!("add {device} to {pool}"),
+        format!("added {device} to pool {pool}"),
+        &name,
     )
     .await
 }
@@ -612,6 +656,21 @@ mod tests {
             let (status, headers, _) = send(&app, req).await;
             assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
             assert_eq!(headers[header::LOCATION], "/zfs");
+
+            // Add-device: the pool name comes from the URL. A valid request
+            // streams through the fake helper; a reserved vdev keyword is rejected.
+            let req = auth(form_post(
+                "/zfs/pool/tank/add-device",
+                "device=%2Fdev%2Fsdb",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("added /dev/sdb to pool tank"), "{body}");
+            let req = auth(form_post(
+                "/zfs/pool/mirror/add-device",
+                "device=%2Fdev%2Fsdb",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid pool name"), "{body}");
         }
     }
 }
