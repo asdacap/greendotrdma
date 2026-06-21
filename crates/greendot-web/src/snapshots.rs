@@ -182,6 +182,8 @@ mod tests {
     // Invalid expressions are never due.
     #[case::invalid_cron("not a cron", 0, T0, false)]
     #[case::empty_cron("", 0, T0, false)]
+    // An out-of-range last_run can't be a timestamp, so it's never due.
+    #[case::last_run_out_of_range("0 * * * *", i64::MAX, T0, false)]
     fn due_table(
         #[case] cron: &str,
         #[case] last_run: i64,
@@ -216,5 +218,11 @@ mod tests {
         let now = T0 + 4 * DAY;
         let result = to_destroy(&snaps, "auto", keep_last, keep_days, now);
         assert_eq!(result, destroyed, "survivors should be {survivors:?}");
+    }
+
+    #[test]
+    fn snapshot_name_formats_prefix_and_utc_timestamp() {
+        let now = DateTime::<Utc>::from_timestamp(T0, 0).unwrap();
+        assert_eq!(snapshot_name("auto", now), "auto-20260613-000000");
     }
 }

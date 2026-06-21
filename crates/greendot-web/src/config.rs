@@ -44,3 +44,36 @@ impl Config {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_toml(body: &str) -> String {
+        let path = std::env::temp_dir().join(format!("gd-cfg{}.toml", rand::random::<u32>()));
+        std::fs::write(&path, body).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn defaults_partial_override_and_errors() {
+        // No path → built-in defaults.
+        let d = Config::load(None).unwrap();
+        assert_eq!(d.listen, "127.0.0.1:8080".parse().unwrap());
+        assert_eq!(d.tls_cert, None);
+
+        // A partial file overrides only its keys; the rest keep their defaults.
+        let path = temp_toml("listen = \"0.0.0.0:9000\"\ndb_path = \"/tmp/state.db\"\n");
+        let c = Config::load(Some(path.clone())).unwrap();
+        assert_eq!(c.listen, "0.0.0.0:9000".parse().unwrap());
+        assert_eq!(c.db_path, PathBuf::from("/tmp/state.db"));
+        assert_eq!(c.helper_socket, Config::default().helper_socket);
+        std::fs::remove_file(&path).ok();
+
+        // A missing file and a value that fails to deserialize both error.
+        assert!(Config::load(Some("/nonexistent/gd.toml".into())).is_err());
+        let bad = temp_toml("listen = \"not-a-socket-addr\"\n");
+        assert!(Config::load(Some(bad.clone())).is_err());
+        std::fs::remove_file(&bad).ok();
+    }
+}

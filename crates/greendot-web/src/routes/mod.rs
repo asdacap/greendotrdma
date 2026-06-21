@@ -155,6 +155,43 @@ pub(crate) mod testutil {
                             };
                             wire::write_msg(w, &resp)
                         }
+                        // LVM reporting reads go through the helper; answer with
+                        // a small fixed inventory so the page builds real rows.
+                        HelperRequest::LvmReport { what } => {
+                            use greendot_proto::LvmReport;
+                            let json = match what {
+                                LvmReport::Vgs => {
+                                    r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
+                                }
+                                LvmReport::Lvs => {
+                                    r#"{"report":[{"lv":[{"vg_name":"vg0","lv_name":"data","lv_size":"10737418240","lv_attr":"-wi-a-----","pool_lv":"","data_percent":""},{"vg_name":"vg0","lv_name":"pool0","lv_size":"53687091200","lv_attr":"twi-aotz--","pool_lv":"","data_percent":"5.00"}]}]}"#
+                                }
+                                LvmReport::Pvs => {
+                                    r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
+                                }
+                            };
+                            wire::write_msg(
+                                w,
+                                &TaskEvent::Started {
+                                    command: "fake".into(),
+                                    args: vec![],
+                                    stdin: None,
+                                },
+                            )
+                            .and_then(|()| {
+                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
+                            })
+                            .and_then(|()| {
+                                wire::write_msg(
+                                    w,
+                                    &TaskEvent::Finished {
+                                        exit: 0,
+                                        ok: true,
+                                        error: None,
+                                    },
+                                )
+                            })
+                        }
                         // Everything else is a task: stream Started + a
                         // successful Finished.
                         _ => wire::write_msg(
