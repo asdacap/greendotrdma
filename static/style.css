@@ -467,6 +467,30 @@ button:hover { border-color: var(--muted); background: #1d2823; }
 button.danger { color: var(--red); border-color: var(--border-strong); }
 button.danger:hover { border-color: var(--red); background: rgba(240, 86, 74, .08); }
 
+/* A link that sits in a row of action buttons (e.g. Diagnose). */
+a.btnlink {
+  display: inline-block;
+  padding: 6px 13px;
+  background: var(--panel-2);
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text);
+  text-decoration: none;
+}
+a.btnlink:hover { border-color: var(--muted); background: #1d2823; }
+
+/* Diagnose page: the RDMA-readiness checklist. */
+.criteria { list-style: none; padding: 0; margin: 18px 0; max-width: 720px; }
+.criteria li {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border);
+}
+.criteria .crit-label { font-weight: 600; }
+.criteria .crit-detail { margin-left: auto; text-align: right; }
+
 form.inline {
   display: inline-flex;
   align-items: center;

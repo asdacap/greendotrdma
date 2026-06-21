@@ -1,11 +1,11 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
-use crate::dot::{iscsi_dot, nvme_dot};
+use crate::dot::{Criterion, iscsi_diagnostics, iscsi_dot, nvme_diagnostics, nvme_dot};
 use crate::reconcile::RECONCILE_ERROR_KEY;
 use crate::state::{ExportKind, NewExport};
 use crate::{actual, reconcile};
 use askama::Template;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -21,6 +21,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/exports/toggle", post(toggle))
         .route("/exports/delete", post(delete))
         .route("/exports/reconcile", post(reconcile_now))
+        .route("/exports/{id}/diagnose", get(diagnose_page))
         .route("/partials/exports", get(dots_partial))
 }
 
@@ -41,6 +42,9 @@ pub struct ExportRow {
     pub transports: String,
     pub hosts: String,
     pub enabled: bool,
+    /// RDMA was requested but the export isn't fully serving over RDMA — offer
+    /// the per-criterion Diagnose page.
+    pub diagnose: bool,
 }
 
 pub struct ExportsView {
@@ -73,8 +77,8 @@ pub async fn gather(
             view.rows = exports
                 .iter()
                 .map(|e| {
-                    let (dot_class, dot_reason) = if !e.enabled {
-                        ("dot-gray", "disabled".to_owned())
+                    let (dot_class, dot_reason, diagnose) = if !e.enabled {
+                        ("dot-gray", "disabled".to_owned(), false)
                     } else {
                         let dot = match e.kind {
                             ExportKind::Nvme => nvme_dot(e, &actual_nvmet, &rdma),
@@ -85,7 +89,11 @@ pub async fn gather(
                             DotState::Yellow => "dot-yellow",
                             DotState::Red => "dot-red",
                         };
-                        (class, dot.reason)
+                        (
+                            class,
+                            dot.reason,
+                            e.want_rdma && dot.state != DotState::Green,
+                        )
                     };
                     let mut transports = Vec::new();
                     for (want, label) in [
@@ -114,6 +122,7 @@ pub async fn gather(
                             format!("{} allowed", e.initiators.len())
                         },
                         enabled: e.enabled,
+                        diagnose,
                     }
                 })
                 .collect();
@@ -146,6 +155,82 @@ struct ExportsPartial {
 #[template(path = "_dots.html")]
 struct DotsPartial {
     view: ExportsView,
+}
+
+pub struct DiagnoseView {
+    pub name: String,
+    pub protocol: &'static str,
+    pub dot_class: &'static str,
+    pub dot_reason: String,
+    pub criteria: Vec<Criterion>,
+    pub not_found: bool,
+}
+
+#[derive(Template)]
+#[template(path = "diagnose.html")]
+struct DiagnoseTemplate {
+    user: CurrentUser,
+    view: DiagnoseView,
+}
+
+async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
+    let export = state
+        .db
+        .list_exports()
+        .ok()
+        .and_then(|exports| exports.into_iter().find(|e| e.id == id));
+    let Some(export) = export else {
+        return DiagnoseView {
+            name: String::new(),
+            protocol: "",
+            dot_class: "dot-gray",
+            dot_reason: String::new(),
+            criteria: vec![],
+            not_found: true,
+        };
+    };
+    let rdma = actual::rdma::devices();
+    let (criteria, dot, protocol) = match export.kind {
+        ExportKind::Nvme => {
+            let nvmet = actual::nvmet::read(&state.nvmet_root);
+            (
+                nvme_diagnostics(&export, &nvmet, &rdma),
+                nvme_dot(&export, &nvmet, &rdma),
+                "NVMe-oF",
+            )
+        }
+        ExportKind::Iscsi => {
+            let lio = actual::lio::read(&state.lio_root);
+            (
+                iscsi_diagnostics(&export, &lio, &rdma),
+                iscsi_dot(&export, &lio, &rdma),
+                "iSCSI",
+            )
+        }
+    };
+    DiagnoseView {
+        name: export.name,
+        protocol,
+        dot_class: match dot.state {
+            DotState::Green => "dot-green",
+            DotState::Yellow => "dot-yellow",
+            DotState::Red => "dot-red",
+        },
+        dot_reason: dot.reason,
+        criteria,
+        not_found: false,
+    }
+}
+
+async fn diagnose_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    page(DiagnoseTemplate {
+        user,
+        view: gather_diagnose(&state, id).await,
+    })
 }
 
 async fn exports_page(
@@ -313,6 +398,8 @@ mod tests {
             "nothing actually configured yet: {body}"
         );
         assert!(body.contains("RDMA + TCP"), "{body}");
+        // RDMA requested but not yet served → a Diagnose link is offered.
+        assert!(body.contains("/exports/1/diagnose"), "{body}");
 
         // iSCSI export with an IQN initiator works and shows its protocol.
         let req = auth(form_post(
@@ -362,5 +449,49 @@ mod tests {
         );
         let (_, _, body) = send(&app, auth(form_post("/exports/delete", "id=2"))).await;
         assert!(body.contains("No exports yet"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn diagnose_page_lists_rdma_criteria() {
+        let app = test_app();
+        let (cookie, csrf) = login(&app).await;
+        let auth = |mut req: HttpRequest<Body>| {
+            req.headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            req.headers_mut()
+                .insert("x-greendot-csrf", csrf.parse().unwrap());
+            req
+        };
+        send(
+            &app,
+            auth(form_post(
+                "/exports/create",
+                "name=vm1&device=%2Fdev%2Fzvol%2Ftank%2Fvm1&want_rdma=1&want_tcp=1",
+            )),
+        )
+        .await;
+
+        // The checklist renders, with the config rows failing because the
+        // (empty tempdir) nvmet tree configures nothing.
+        let req = auth(
+            HttpRequest::get("/exports/1/diagnose")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("RDMA requested"), "{body}");
+        assert!(body.contains("Subsystem configured"), "{body}");
+        assert!(body.contains("Listen address served"), "{body}");
+
+        // An unknown id is a graceful not-found, not a 500.
+        let req = auth(
+            HttpRequest::get("/exports/999/diagnose")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Export not found"), "{body}");
     }
 }
