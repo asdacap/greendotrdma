@@ -2,7 +2,7 @@ use super::{AppState, page};
 use crate::auth::CurrentUser;
 use crate::dot::{Criterion, iscsi_diagnostics, iscsi_dot, nvme_diagnostics, nvme_dot};
 use crate::reconcile::RECONCILE_ERROR_KEY;
-use crate::state::{ExportKind, NewExport};
+use crate::state::{Export, ExportKind, NewExport};
 use crate::{actual, reconcile};
 use askama::Template;
 use axum::extract::{Form, Path, State};
@@ -92,6 +92,70 @@ pub struct ExportRow {
     /// RDMA was requested but the export isn't fully serving over RDMA — offer
     /// the per-criterion Diagnose page.
     pub diagnose: bool,
+    /// Copy-paste commands a client runs to connect, one per network transport.
+    pub client: Vec<ClientCmd>,
+}
+
+/// A labelled client-side connect command shown under each export.
+pub struct ClientCmd {
+    /// Which transport this connects over, e.g. "RDMA", "TCP", "iSER (RDMA)".
+    pub label: String,
+    /// The command(s) to run; may be multi-line (`iscsiadm` discovery + login).
+    pub cmd: String,
+}
+
+/// Builds the client connect command(s) for an export from its own data: the
+/// protocol decides the tool (`nvme connect` vs `iscsiadm`), the wanted
+/// transports decide how many, and `listen` supplies the target address. Ports
+/// mirror the server side in [`crate::reconcile`] — NVMe-oF `TRSVCID` 4420;
+/// iSCSI iSER 3260, plain TCP 3261 when iSER is also on else 3260 — kept as
+/// literals here so this stays a self-contained, unit-testable helper. The
+/// `loop` transport is local-only testing and is omitted. When `listen` is
+/// unspecified (the default — the service listens on all interfaces) there is
+/// no single reachable IP, so a `<server-ip>` placeholder is rendered.
+fn client_instructions(e: &Export, listen: std::net::IpAddr) -> Vec<ClientCmd> {
+    let addr = if listen.is_unspecified() {
+        "<server-ip>".to_owned()
+    } else {
+        listen.to_string()
+    };
+    match e.kind {
+        ExportKind::Nvme => {
+            let nqn = e.nqn();
+            [(e.want_rdma, "rdma", "RDMA"), (e.want_tcp, "tcp", "TCP")]
+                .into_iter()
+                .filter(|(want, _, _)| *want)
+                .map(|(_, trtype, label)| ClientCmd {
+                    label: label.to_owned(),
+                    cmd: format!("nvme connect -t {trtype} -a {addr} -s 4420 -n {nqn}"),
+                })
+                .collect()
+        }
+        ExportKind::Iscsi => {
+            let iqn = e.iqn();
+            let mut cmds = Vec::new();
+            if e.want_rdma {
+                cmds.push(ClientCmd {
+                    label: "iSER (RDMA)".to_owned(),
+                    cmd: format!(
+                        "iscsiadm -m discovery -t st -p {addr}:3260 -I iser\n\
+                         iscsiadm -m node -T {iqn} -p {addr}:3260 -I iser --login"
+                    ),
+                });
+            }
+            if e.want_tcp {
+                let port = if e.want_rdma { 3261 } else { 3260 };
+                cmds.push(ClientCmd {
+                    label: "TCP".to_owned(),
+                    cmd: format!(
+                        "iscsiadm -m discovery -t st -p {addr}:{port}\n\
+                         iscsiadm -m node -T {iqn} -p {addr}:{port} --login"
+                    ),
+                });
+            }
+            cmds
+        }
+    }
 }
 
 pub struct ExportsView {
@@ -118,6 +182,13 @@ pub async fn gather(
     let actual_lio = actual::lio::read(&state.lio_root);
     let iscsi_sessions = actual::lio::sessions(&state.lio_root);
     let rdma = actual::rdma::devices();
+    let listen: std::net::IpAddr = state
+        .db
+        .get_setting("listen_addr")
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
     let mut in_use: HashSet<String> = HashSet::new();
     match state.db.list_exports() {
         Ok(exports) => {
@@ -184,6 +255,7 @@ pub async fn gather(
                         clients,
                         enabled: e.enabled,
                         diagnose,
+                        client: client_instructions(e, listen),
                     }
                 })
                 .collect();
@@ -435,6 +507,79 @@ mod tests {
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
 
+    #[test]
+    fn client_instructions_per_protocol_transport_and_address() {
+        use crate::state::{Export, ExportKind};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let export = |kind, want_rdma, want_tcp| Export {
+            id: 1,
+            kind,
+            name: "vm1".into(),
+            device_path: "/dev/zvol/tank/vm1".into(),
+            enabled: true,
+            want_rdma,
+            want_tcp,
+            want_loop: true, // local-only — must never surface as a client command
+            allow_any_host: true,
+            initiators: vec![],
+            last_error: None,
+        };
+        let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 5).into();
+
+        // NVMe-oF: one `nvme connect` per network transport (loop omitted),
+        // carrying the derived NQN, port 4420 and the concrete listen address.
+        let nvme = super::client_instructions(&export(ExportKind::Nvme, true, true), addr);
+        assert_eq!(nvme.len(), 2);
+        assert_eq!(
+            nvme[0].cmd,
+            "nvme connect -t rdma -a 10.0.0.5 -s 4420 -n nqn.2026-06.io.greendot:vm1"
+        );
+        assert_eq!(
+            nvme[1].cmd,
+            "nvme connect -t tcp -a 10.0.0.5 -s 4420 -n nqn.2026-06.io.greendot:vm1"
+        );
+
+        // iSCSI: iSER on 3260, plain TCP bumped to 3261 because iSER is also on;
+        // each is a discovery + login pair against the derived IQN.
+        let iscsi = super::client_instructions(&export(ExportKind::Iscsi, true, true), addr);
+        assert_eq!(iscsi.len(), 2);
+        assert!(
+            iscsi[0].cmd.contains("iqn.2026-06.io.greendot:vm1"),
+            "{}",
+            iscsi[0].cmd
+        );
+        assert!(
+            iscsi[0].cmd.contains("-p 10.0.0.5:3260 -I iser --login"),
+            "{}",
+            iscsi[0].cmd
+        );
+        assert!(
+            iscsi[1].cmd.contains("-p 10.0.0.5:3261 --login"),
+            "{}",
+            iscsi[1].cmd
+        );
+        // TCP-only iSCSI keeps the standard 3260 port.
+        let tcp_only = super::client_instructions(&export(ExportKind::Iscsi, false, true), addr);
+        assert_eq!(tcp_only.len(), 1);
+        assert!(
+            tcp_only[0].cmd.contains("-p 10.0.0.5:3260 --login"),
+            "{}",
+            tcp_only[0].cmd
+        );
+
+        // An unspecified listen address renders the <server-ip> placeholder.
+        let unspec = super::client_instructions(
+            &export(ExportKind::Nvme, true, false),
+            Ipv4Addr::UNSPECIFIED.into(),
+        );
+        assert!(
+            unspec[0].cmd.contains("-a <server-ip> -s 4420"),
+            "{}",
+            unspec[0].cmd
+        );
+    }
+
     #[tokio::test]
     async fn create_toggle_delete_flow_against_fake_helper() {
         let app = test_app();
@@ -463,6 +608,12 @@ mod tests {
         assert!(body.contains("RDMA + TCP"), "{body}");
         // RDMA requested but not yet served → a Diagnose link is offered.
         assert!(body.contains("/exports/1/diagnose"), "{body}");
+        // Each export carries a copy-paste client connect command.
+        assert!(body.contains("Client instruction"), "{body}");
+        assert!(
+            body.contains("nvme connect -t rdma") && body.contains("nqn.2026-06.io.greendot:vm1"),
+            "{body}"
+        );
 
         // iSCSI export with an IQN initiator works and shows its protocol.
         let req = auth(form_post(
