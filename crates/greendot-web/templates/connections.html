@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}Connections — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Connections</h1>
+<p class="muted">Clients currently connected to your exports.</p>
+<div hx-get="/partials/connections" hx-trigger="every 5s" hx-swap="innerHTML">
+{% include "_connections.html" %}
+</div>
+{% endblock %}

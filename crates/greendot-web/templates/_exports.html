@@ -7,7 +7,7 @@
   <p class="empty">No exports yet — create one below.</p>
   {% else %}
   <table>
-    <thead><tr><th></th><th>Name</th><th>Protocol</th><th>Device</th><th>Transports</th><th>Hosts</th><th></th></tr></thead>
+    <thead><tr><th></th><th>Name</th><th>Protocol</th><th>Device</th><th>Transports</th><th>Hosts</th><th>Clients</th><th></th></tr></thead>
     <tbody>
       {% for r in view.rows %}
       <tr>
@@ -17,6 +17,10 @@
         <td>{{ r.device }}</td>
         <td>{{ r.transports }}</td>
         <td>{{ r.hosts }}</td>
+        <td>
+          {% if let Some(n) = r.clients %}<a href="/connections">{{ n }}</a>
+          {% else %}<span class="muted" title="NVMe-oF peers can't be tied to a specific export on this kernel — see Connections">—</span>{% endif %}
+        </td>
         <td>
           {% if r.diagnose %}<a role="button" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
           <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
