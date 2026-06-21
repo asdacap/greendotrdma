@@ -39,7 +39,8 @@
   </table>
   {% endif %}
 
-  <h2>New export</h2>
+  <details>
+  <summary>New export</summary>
   <form class="card" hx-post="/exports/create" hx-target="#exports-content" hx-swap="outerHTML">
     <label class="checkbox"><input type="radio" name="kind" value="nvme" checked> NVMe-oF</label>
     <label class="checkbox"><input type="radio" name="kind" value="iscsi"> iSCSI</label>
@@ -62,4 +63,5 @@
     </label>
     <button type="submit">Create export</button>
   </form>
+  </details>
 </div>

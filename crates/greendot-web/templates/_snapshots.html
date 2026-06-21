@@ -34,7 +34,8 @@
   </table>
   {% endif %}
 
-  <h2>New policy</h2>
+  <details>
+  <summary>New policy</summary>
   <form class="card" hx-post="/snapshots/policy/create" hx-target="#snapshots-content" hx-swap="outerHTML">
     <label>Dataset
       <select name="dataset" required>
@@ -54,8 +55,10 @@
     <label>Keep newer than N days <input name="keep_days" size="4" placeholder="∞"></label>
     <button type="submit">Create policy</button>
   </form>
+  </details>
 
-  <h2>Manual snapshot</h2>
+  <details>
+  <summary>Manual snapshot</summary>
   <form class="inline" hx-post="/snapshots/manual" hx-target="#snapshots-content" hx-swap="outerHTML">
     <select name="dataset" required>
       {% for d in view.datasets %}<option>{{ d }}</option>{% endfor %}
@@ -63,6 +66,7 @@
     <input name="name" placeholder="before-upgrade" required>
     <button>Snapshot now</button>
   </form>
+  </details>
 
   <h2>Existing snapshots</h2>
   {% if view.snapshots.is_empty() %}
