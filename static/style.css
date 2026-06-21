@@ -8,6 +8,7 @@
   --bg-rail: #0b1210;
   --panel: #121a17;
   --panel-2: #18221e;
+  --panel-hover: #1d2823;
   --inset: #0a100e;
   --border: #1e2a25;
   --border-strong: #2c3c34;
@@ -17,8 +18,12 @@
 
   /* Status triad — product semantics, hues unchanged. Treatment does the work. */
   --green: #34d058;
+  --green-rgb: 52, 208, 88;   /* same green, for translucent glows and rings */
+  --green-bright: #3fe066;    /* hover lift on a green fill */
+  --green-ink: #06250e;       /* text/icons sitting on a green fill */
   --yellow: #e3b341;
   --red: #f0564a;
+  --red-rgb: 240, 86, 74;
   --accent: #34d058;
 
   /* Pico provides the form layout (aligned, full-width controls); these map its
@@ -35,6 +40,14 @@
   --pico-form-element-border-color: var(--border);
   --pico-form-element-color: var(--text);
   --pico-form-element-placeholder-color: var(--faint);
+  --pico-border-radius: 5px;
+  --pico-form-element-spacing-vertical: .44rem;
+  --pico-form-element-spacing-horizontal: .6rem;
+  --pico-form-element-active-border-color: var(--green);
+  --pico-form-element-focus-color: rgba(var(--green-rgb), .14);
+  --pico-primary-inverse: var(--green-ink);
+  --pico-primary-hover-background: var(--green-bright);
+  --pico-primary-hover-border: var(--green-bright);
 
   --ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "SF Mono",
@@ -55,11 +68,11 @@ body {
 
 a { color: var(--green); }
 
+/* Form controls take Pico's focus ring (--pico-form-element-focus-color); the
+   outline is for the things Pico leaves bare — links, buttons, disclosures. */
 a:focus-visible,
 button:focus-visible,
-input:focus-visible,
-select:focus-visible,
-textarea:focus-visible,
+[role=button]:focus-visible,
 summary:focus-visible {
   outline: 2px solid var(--green);
   outline-offset: 2px;
@@ -121,13 +134,13 @@ summary:focus-visible {
 
 .sidebar a:hover {
   color: var(--text);
-  background: linear-gradient(90deg, rgba(52, 208, 88, .06), transparent 70%);
+  background: linear-gradient(90deg, rgba(var(--green-rgb), .06), transparent 70%);
 }
 
 .sidebar a[aria-current="page"] {
   color: var(--text);
   border-left-color: var(--green);
-  background: linear-gradient(90deg, rgba(52, 208, 88, .1), transparent 70%);
+  background: linear-gradient(90deg, rgba(var(--green-rgb), .1), transparent 70%);
 }
 
 .sidebar-footer {
@@ -162,7 +175,7 @@ main {
   min-width: 0;
   padding: 28px 36px 56px;
   max-width: 1180px;
-  background: radial-gradient(120% 55% at 0% 0%, rgba(52, 208, 88, .035), transparent 62%);
+  background: radial-gradient(120% 55% at 0% 0%, rgba(var(--green-rgb), .035), transparent 62%);
 }
 
 h1 {
@@ -179,7 +192,7 @@ h1::after {
   height: 2px;
   margin-top: 11px;
   background: var(--green);
-  box-shadow: 0 0 8px rgba(52, 208, 88, .6);
+  box-shadow: 0 0 8px rgba(var(--green-rgb), .6);
 }
 
 h1 .dot { width: 13px; height: 13px; }
@@ -203,7 +216,7 @@ h2::before {
   height: 6px;
   border-radius: 1px;
   background: var(--green);
-  box-shadow: 0 0 6px rgba(52, 208, 88, .7);
+  box-shadow: 0 0 6px rgba(var(--green-rgb), .7);
 }
 
 p { margin: 10px 0; }
@@ -230,7 +243,7 @@ code, .mono { font-family: var(--mono); }
 
 .dot-green {
   background: radial-gradient(circle at 35% 30%, #b7ffce, var(--green) 62%);
-  box-shadow: 0 0 0 1px rgba(52, 208, 88, .35), 0 0 7px 1px rgba(52, 208, 88, .65);
+  box-shadow: 0 0 0 1px rgba(var(--green-rgb), .35), 0 0 7px 1px rgba(var(--green-rgb), .65);
   animation: led-pulse 2.6s ease-in-out infinite;
 }
 
@@ -250,8 +263,8 @@ code, .mono { font-family: var(--mono); }
 }
 
 @keyframes led-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(52, 208, 88, .3), 0 0 6px 1px rgba(52, 208, 88, .5); }
-  50%      { box-shadow: 0 0 0 1px rgba(52, 208, 88, .5), 0 0 11px 2px rgba(52, 208, 88, .85); }
+  0%, 100% { box-shadow: 0 0 0 1px rgba(var(--green-rgb), .3), 0 0 6px 1px rgba(var(--green-rgb), .5); }
+  50%      { box-shadow: 0 0 0 1px rgba(var(--green-rgb), .5), 0 0 11px 2px rgba(var(--green-rgb), .85); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -373,10 +386,13 @@ td code { font-size: 12.5px; color: var(--text); }
 .usagebar-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--green), #5fe07f);
-  box-shadow: 0 0 6px rgba(52, 208, 88, .5);
+  box-shadow: 0 0 6px rgba(var(--green-rgb), .5);
 }
 
 /* ---- Forms -------------------------------------------------------------- */
+/* Pico paints the controls — inset fill, border, radius, focus ring — from the
+   tokens mapped in :root. The rules here only set the layout the brand wants
+   tighter than Pico's defaults: card chrome, label rhythm, the mono textarea. */
 
 .card {
   max-width: 480px;
@@ -387,97 +403,62 @@ td code { font-size: 12.5px; color: var(--text); }
 }
 
 .card label {
-  display: block;
   margin: 12px 0 0;
   color: var(--muted);
   font-size: 12.5px;
 }
 
-.card label.checkbox {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  color: var(--text);
-  font-size: 13.5px;
-}
-
-.card label.checkbox input { margin: 0; }
+/* Checkbox/radio options carry full-strength text; Pico lays them out inline. */
+.card label.checkbox { color: var(--text); font-size: 13.5px; }
 
 input, select, textarea, button { font: inherit; }
 
-.card input,
-.card select,
-.card textarea,
-.inline input,
-.inline select {
-  margin-top: 5px;
-  padding: 7px 9px;
-  background: var(--inset);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text);
-}
-
-/* Pico stretches every control to 100% and adds a row of spacing; the card wants
-   that (aligned fields), the inline action forms must stay compact and horizontal. */
 .card input, .card select, .card textarea { margin-bottom: 0; }
 .card fieldset { margin: 12px 0 0; }   /* same rhythm as a label row */
+.card textarea { font-family: var(--mono); font-size: 12.5px; }
+
+/* Inline action forms stay compact and horizontal (Pico stretches to 100%). */
 .inline input, .inline select { margin: 0; width: auto; }
 
-.card textarea {
-  width: 100%;
-  font-family: var(--mono);
-  font-size: 12.5px;
+/* Pico paints buttons (padding, radius, border, transitions); the brand only
+   swaps the colour tokens. The quiet panel button is the default — green primary
+   is reserved for a card's submit. <a role="button"> (e.g. Diagnose) rides the
+   same tokens; the spacing reset undoes Pico's extra-wide link-button padding. */
+button, [role=button] {
+  --pico-background-color: var(--panel-2);
+  --pico-border-color: var(--border-strong);
+  --pico-color: var(--text);
+  --pico-form-element-spacing-horizontal: .6rem;
+}
+button:is(:hover, :focus, :active),
+[role=button]:is(:hover, :focus, :active) {
+  --pico-background-color: var(--panel-hover);
+  --pico-border-color: var(--muted);
+  --pico-color: var(--text);
 }
 
-.card input:focus,
-.card select:focus,
-.card textarea:focus,
-.inline input:focus,
-.inline select:focus,
-.login-card input:focus {
-  border-color: var(--green);
-  outline: none;
-  box-shadow: 0 0 0 3px rgba(52, 208, 88, .14);
-}
-
-button {
-  padding: 6px 13px;
-  background: var(--panel-2);
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  color: var(--text);
-  cursor: pointer;
-  transition: border-color .12s ease, background .12s ease;
-}
-
-button:hover { border-color: var(--muted); background: #1d2823; }
-
-.card button[type="submit"] {
+.card button[type="submit"],
+.login-card button[type="submit"] {
+  --pico-background-color: var(--green);
+  --pico-border-color: var(--green);
+  --pico-color: var(--green-ink);
   margin-top: 18px;
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #06250e;
   font-weight: 650;
   letter-spacing: .01em;
 }
-
-.card button[type="submit"]:hover { background: #3fe066; border-color: #3fe066; }
-
-button.danger { color: var(--red); border-color: var(--border-strong); }
-button.danger:hover { border-color: var(--red); background: rgba(240, 86, 74, .08); }
-
-/* A link that sits in a row of action buttons (e.g. Diagnose). */
-a.btnlink {
-  display: inline-block;
-  padding: 6px 13px;
-  background: var(--panel-2);
-  border: 1px solid var(--border-strong);
-  border-radius: 5px;
-  color: var(--text);
-  text-decoration: none;
+.card button[type="submit"]:is(:hover, :focus, :active),
+.login-card button[type="submit"]:is(:hover, :focus, :active) {
+  --pico-background-color: var(--green-bright);
+  --pico-border-color: var(--green-bright);
+  --pico-color: var(--green-ink);
 }
-a.btnlink:hover { border-color: var(--muted); background: #1d2823; }
+
+button.danger { --pico-color: var(--red); }
+button.danger:is(:hover, :focus, :active) {
+  --pico-background-color: rgba(var(--red-rgb), .08);
+  --pico-border-color: var(--red);
+  --pico-color: var(--red);
+}
 
 /* Diagnose page: the RDMA-readiness checklist. */
 .criteria { list-style: none; padding: 0; margin: 18px 0; max-width: 720px; }
@@ -552,7 +533,7 @@ svg.chart polyline {
   stroke-width: 1.5;
   stroke-linejoin: round;
   stroke-linecap: round;
-  filter: drop-shadow(0 0 3px rgba(52, 208, 88, .55));
+  filter: drop-shadow(0 0 3px rgba(var(--green-rgb), .55));
 }
 
 .chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }
@@ -594,7 +575,7 @@ tr.edit .editbox { max-width: none; }
   align-items: center;
   justify-content: center;
   background:
-    radial-gradient(60% 50% at 50% 0%, rgba(52, 208, 88, .06), transparent 70%),
+    radial-gradient(60% 50% at 50% 0%, rgba(var(--green-rgb), .06), transparent 70%),
     var(--bg);
 }
 
@@ -619,34 +600,12 @@ tr.edit .editbox { max-width: none; }
 .login-card h1::after { display: none; }
 
 .login-card label {
-  display: block;
   margin: 16px 0 0;
   color: var(--muted);
   font-size: 12.5px;
 }
 
-.login-card input {
-  width: 100%;
-  margin-top: 6px;
-  padding: 9px 11px;
-  background: var(--inset);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  color: var(--text);
-  font: inherit;
-}
-
-.login-card button[type="submit"] {
-  width: 100%;
-  margin-top: 24px;
-  padding: 10px;
-  background: var(--accent);
-  border: none;
-  border-radius: 6px;
-  color: #06250e;
-  font: inherit;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.login-card button[type="submit"]:hover { background: #3fe066; }
+/* Inputs and the submit button inherit Pico's painting and the primary-submit
+   rule above; only the card's own chrome (width, green top edge, shadow) is
+   local. The label's top margin owns the field rhythm, as in .card. */
+.login-card input { margin-bottom: 0; }
