@@ -1,4 +1,5 @@
 use super::{AppState, page};
+use crate::actual::nic::{self, NicRdmaKind, NicStatus};
 use crate::actual::rdma;
 use crate::auth::CurrentUser;
 use crate::routes::exports::reconcile_state;
@@ -7,7 +8,7 @@ use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{KernelModule, NetdevName, Request};
+use greendot_proto::{KernelModule, NetdevName, PciAddress, Request};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -16,6 +17,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/settings", get(settings_page))
         .route("/settings/listen", post(set_listen))
         .route("/settings/rxe", post(enable_rxe))
+        .route("/settings/roce", post(set_roce))
         .route("/settings/install", post(install_deps))
 }
 
@@ -24,6 +26,50 @@ pub struct RdmaRow {
     pub netdev: String,
     pub state: &'static str,
     pub addrs: String,
+}
+
+/// One row of the per-NIC RDMA-capability table.
+pub struct NicRow {
+    pub netdev: String,
+    pub rdma: String,
+    pub addrs: String,
+    pub status: &'static str,
+    pub dot: &'static str,
+    /// `Some(pci)` → render an "Enable RoCE" button targeting that PCI address.
+    pub roce_pci: Option<String>,
+    /// True → render an "Enable Soft-RoCE" button for this netdev.
+    pub soft_roce: bool,
+}
+
+/// Map a classified NIC to a table row, dropping interfaces that aren't RDMA
+/// candidates (virtual interfaces, IB-only netdevs).
+fn nic_row(s: NicStatus) -> Option<NicRow> {
+    let (status, dot, roce_pci, soft_roce) = match &s.kind {
+        NicRdmaKind::Active => ("RDMA active", "dot-green", None, false),
+        NicRdmaKind::Inactive => ("RDMA device down", "dot-yellow", None, false),
+        NicRdmaKind::CapableDisabled { pci } => (
+            "RoCE-capable (Mellanox), disabled",
+            "dot-red",
+            Some(pci.clone()),
+            false,
+        ),
+        NicRdmaKind::SoftRoceable => ("no RDMA", "dot-gray", None, true),
+        NicRdmaKind::Unsupported => return None,
+    };
+    Some(NicRow {
+        rdma: s.rdma.unwrap_or_else(|| "—".into()),
+        addrs: s
+            .addrs
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        status,
+        dot,
+        roce_pci,
+        soft_roce,
+        netdev: s.netdev,
+    })
 }
 
 pub struct DepRow {
@@ -35,7 +81,7 @@ pub struct DepRow {
 pub struct SettingsView {
     pub listen_addr: String,
     pub rdma_devs: Vec<RdmaRow>,
-    pub plain_netdevs: Vec<String>,
+    pub nics: Vec<NicRow>,
     pub deps: Vec<DepRow>,
     /// Missing packages apt can install here — the one-click "Install missing".
     pub installable_packages: String,
@@ -84,14 +130,7 @@ async fn gather(
     form_error: Option<String>,
 ) -> SettingsView {
     let devs = rdma::devices();
-    let netdev_addrs = rdma::netdev_addrs();
-    let rdma_backed: Vec<&str> = devs.iter().filter_map(|d| d.netdev.as_deref()).collect();
-    let mut plain_netdevs: Vec<String> = netdev_addrs
-        .keys()
-        .filter(|n| !rdma_backed.contains(&n.as_str()))
-        .cloned()
-        .collect();
-    plain_netdevs.sort();
+    let nics: Vec<NicRow> = nic::interfaces().into_iter().filter_map(nic_row).collect();
     let deps: Vec<DepRow> = greendot_proto::REQUIRED_CLIS
         .iter()
         .map(|&cli| DepRow {
@@ -146,7 +185,7 @@ async fn gather(
                     .join(", "),
             })
             .collect(),
-        plain_netdevs,
+        nics,
         flash,
         form_error,
     }
@@ -245,6 +284,98 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
 }
 
 #[derive(Deserialize)]
+struct RoceForm {
+    pci: String,
+}
+
+/// Turn on hardware RoCE for a Mellanox NIC: confirm `enable_roce` is actually
+/// present and off (a VF may be PF-gated and can't self-enable), then set the
+/// param and reload the device. The reload briefly drops the NIC.
+async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>) -> Response {
+    let Ok(pci) = PciAddress::new(form.pci.trim()) else {
+        return page(SettingsPartial {
+            view: gather(
+                &state,
+                None,
+                Some(format!("invalid PCI address {:?}", form.pci)),
+            )
+            .await,
+        });
+    };
+    // Confirm enable_roce is present and currently false before reloading.
+    let probe = state
+        .helper
+        .collect(Request::DevlinkParams { pci: pci.clone() })
+        .await;
+    match nic::enable_roce_from_json(&probe.stdout) {
+        Some(false) => {}
+        Some(true) => {
+            return page(SettingsPartial {
+                view: gather(
+                    &state,
+                    Some(format!("RoCE is already enabled on {pci}")),
+                    None,
+                )
+                .await,
+            });
+        }
+        None => {
+            let why = if probe.ok {
+                format!(
+                    "{pci} has no settable enable_roce parameter — on an SR-IOV VF, enable RoCE on the host/PF"
+                )
+            } else {
+                probe
+                    .error
+                    .unwrap_or_else(|| format!("could not read devlink params for {pci}"))
+            };
+            return page(SettingsPartial {
+                view: gather(&state, None, Some(why)).await,
+            });
+        }
+    }
+    let steps = [
+        (
+            "roce-param",
+            format!("enable RoCE on {pci}"),
+            Request::RoceEnableParam { pci: pci.clone() },
+        ),
+        (
+            "devlink-reload",
+            format!("reload {pci}"),
+            Request::DevlinkReload { pci: pci.clone() },
+        ),
+    ];
+    for (kind, title, req) in steps {
+        match crate::task_runner::run(&state, req, kind, &title).await {
+            Ok(o) if o.ok => {}
+            Ok(o) => {
+                let msg = o.error.unwrap_or_else(|| "task failed".into());
+                return page(SettingsPartial {
+                    view: gather(&state, None, Some(msg)).await,
+                });
+            }
+            Err(e) => {
+                return page(SettingsPartial {
+                    view: gather(&state, None, Some(format!("{e:#}"))).await,
+                });
+            }
+        }
+    }
+    let _ = reconcile_state(&state).await;
+    page(SettingsPartial {
+        view: gather(
+            &state,
+            Some(format!(
+                "RoCE enabled on {pci}; reconnect if your session dropped"
+            )),
+            None,
+        )
+        .await,
+    })
+}
+
+#[derive(Deserialize)]
 struct InstallForm {
     /// Space-separated package names (from the dependency panel).
     packages: String,
@@ -315,6 +446,7 @@ mod tests {
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Listen address"), "{body}");
+        assert!(body.contains("Network interfaces"), "{body}");
 
         // Valid listen address persists; invalid is rejected.
         let (_, _, body) = send(
@@ -335,5 +467,12 @@ mod tests {
         assert!(body.contains("Soft-RoCE enabled on eth0"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/settings/rxe", "netdev=bad%2Fname"))).await;
         assert!(body.contains("invalid interface name"), "{body}");
+
+        // Enable-RoCE: the fake helper reports enable_roce=false, so set+reload
+        // run and report success; a malformed PCI address is rejected.
+        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "pci=0000:00:10.0"))).await;
+        assert!(body.contains("RoCE enabled on 0000:00:10.0"), "{body}");
+        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "pci=junk"))).await;
+        assert!(body.contains("invalid PCI address"), "{body}");
     }
 }

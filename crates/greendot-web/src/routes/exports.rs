@@ -190,11 +190,18 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
         };
     };
     let rdma = actual::rdma::devices();
+    // NICs that are RoCE-capable but have RoCE switched off — surfaced when no
+    // RDMA device exists, so the checklist explains why and points at Settings.
+    let capable_disabled: Vec<String> = actual::nic::interfaces()
+        .into_iter()
+        .filter(|n| matches!(n.kind, actual::nic::NicRdmaKind::CapableDisabled { .. }))
+        .map(|n| n.netdev)
+        .collect();
     let (criteria, dot, protocol) = match export.kind {
         ExportKind::Nvme => {
             let nvmet = actual::nvmet::read(&state.nvmet_root);
             (
-                nvme_diagnostics(&export, &nvmet, &rdma),
+                nvme_diagnostics(&export, &nvmet, &rdma, &capable_disabled),
                 nvme_dot(&export, &nvmet, &rdma),
                 "NVMe-oF",
             )
@@ -202,7 +209,7 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
         ExportKind::Iscsi => {
             let lio = actual::lio::read(&state.lio_root);
             (
-                iscsi_diagnostics(&export, &lio, &rdma),
+                iscsi_diagnostics(&export, &lio, &rdma, &capable_disabled),
                 iscsi_dot(&export, &lio, &rdma),
                 "iSCSI",
             )

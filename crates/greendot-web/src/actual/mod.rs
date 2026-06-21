@@ -5,6 +5,7 @@ pub mod apt;
 pub mod block;
 pub mod lio;
 pub mod lvm;
+pub mod nic;
 pub mod nvmet;
 pub mod rdma;
 pub mod zfs;

@@ -25,7 +25,7 @@ pub fn addr_served_by_rdma(traddr: &str, devs: &[RdmaDev]) -> bool {
     devs.iter().any(|d| d.addrs.contains(&addr))
 }
 
-fn read_trimmed(path: &Path) -> Option<String> {
+pub(crate) fn read_trimmed(path: &Path) -> Option<String> {
     std::fs::read_to_string(path)
         .ok()
         .map(|s| s.trim().to_owned())
@@ -39,7 +39,7 @@ fn backing_netdev(dev_dir: &Path) -> Option<String> {
         .or_else(|| read_trimmed(&dev_dir.join("ports/1/gid_attrs/ndevs/0")))
 }
 
-fn port_active(dev_dir: &Path) -> bool {
+pub(crate) fn port_active(dev_dir: &Path) -> bool {
     let Ok(ports) = std::fs::read_dir(dev_dir.join("ports")) else {
         return false;
     };

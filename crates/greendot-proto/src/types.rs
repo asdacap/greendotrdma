@@ -86,6 +86,10 @@ validated_string!(
     /// Network interface name (IFNAMSIZ-limited).
     NetdevName, validate::netdev, "netdev name");
 validated_string!(
+    /// PCI device address `DOMAIN:BUS:DEV.FUNC`, e.g. `0000:00:10.0` (the
+    /// `pci/` prefix is added by the helper, not stored here).
+    PciAddress, validate::pci_address, "PCI address");
+validated_string!(
     /// LIO backstore name.
     BackstoreName, validate::backstore_name, "backstore name");
 validated_string!(
@@ -342,7 +346,7 @@ pub fn package_for_cli(cli: &str) -> Option<&'static str> {
         "resize2fs" | "e2fsck" => "e2fsprogs",
         "btrfs" => "btrfs-progs",
         "modprobe" => "kmod",
-        "rdma" => "iproute2",
+        "rdma" | "devlink" => "iproute2",
         "nvme" => "nvme-cli",
         "targetcli" | "targetctl" => "targetcli-fb",
         "apt-get" => "apt",
@@ -363,6 +367,7 @@ pub const REQUIRED_CLIS: &[&str] = &[
     "btrfs",
     "modprobe",
     "rdma",
+    "devlink",
     "nvme",
     "targetctl",
 ];
@@ -488,6 +493,22 @@ mod tests {
     }
 
     #[rstest]
+    #[case::vf("0000:00:10.0", true)]
+    #[case::pf("0000:3b:00.1", true)]
+    #[case::hex_bus("0000:af:1e.7", true)]
+    #[case::empty("", false)]
+    #[case::no_domain("00:10.0", false)]
+    #[case::uppercase("0000:00:10.A", false)]
+    #[case::func_too_high("0000:00:10.8", false)]
+    #[case::func_hex("0000:00:10.f", false)]
+    #[case::short_domain("000:00:10.0", false)]
+    #[case::trailing_space("0000:00:10.0 ", false)]
+    #[case::slash("0000:00/10.0", false)]
+    fn pci_address(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(PciAddress::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
     #[case::simple("vm1-disk", true)]
     #[case::empty("", false)]
     #[case::slash("a/b", false)]
@@ -580,6 +601,7 @@ mod tests {
     fn cli_to_package_map() {
         assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
         assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
+        assert_eq!(package_for_cli("devlink"), Some("iproute2"));
         assert_eq!(package_for_cli("nonesuch"), None);
         // every required CLI maps to a valid package name
         for cli in REQUIRED_CLIS {

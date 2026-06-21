@@ -122,6 +122,31 @@ pub(crate) fn netdev(s: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || "_.-".contains(c))
 }
 
+/// PCI device address `DOMAIN:BUS:DEV.FUNC`, e.g. `0000:00:10.0`. Lowercase
+/// hex, fixed width, conventional function 0-7 (VFs never exceed it). Becomes
+/// the `pci/<addr>` handle in a root `devlink` command, so it is pinned exactly.
+pub(crate) fn pci_address(s: &str) -> bool {
+    let Some((bdf, func)) = s.split_once('.') else {
+        return false;
+    };
+    let mut parts = bdf.split(':');
+    let (Some(domain), Some(bus), Some(dev), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let lower_hex = |s: &str, len: usize| {
+        s.len() == len
+            && s.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    };
+    lower_hex(domain, 4)
+        && lower_hex(bus, 2)
+        && lower_hex(dev, 2)
+        && func.len() == 1
+        && func.chars().all(|c| ('0'..='7').contains(&c))
+}
+
 pub(crate) fn backstore_name(s: &str) -> bool {
     s.len() <= 63 && component(s)
 }

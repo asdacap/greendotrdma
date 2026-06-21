@@ -62,6 +62,9 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             None => Dispatch::OneShot(Response::Ok),
         },
         Request::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
+        Request::DevlinkParams { pci } => Dispatch::Task(modules::devlink_params(&pci)),
+        Request::RoceEnableParam { pci } => Dispatch::Task(modules::devlink_roce_enable(&pci)),
+        Request::DevlinkReload { pci } => Dispatch::Task(modules::devlink_reload(&pci)),
 
         Request::PartitionTableCreate { disk } => Dispatch::Task(partition::table_create(&disk)),
         Request::PartitionCreate {
@@ -194,6 +197,9 @@ mod tests {
     fn mp(s: &str) -> MountPath {
         MountPath::new(s).unwrap()
     }
+    fn pci(s: &str) -> PciAddress {
+        PciAddress::new(s).unwrap()
+    }
 
     /// Each task request must route to exactly the command its dedicated builder
     /// produces; the builder is the oracle, so a mis-wired arm (wrong function or
@@ -229,6 +235,15 @@ mod tests {
     #[case::rxe_link_add(
         Request::RxeLinkAdd { netdev: NetdevName::new("eth0").unwrap() },
         modules::rxe_link_add(&NetdevName::new("eth0").unwrap()))]
+    #[case::devlink_params(
+        Request::DevlinkParams { pci: pci("0000:00:10.0") },
+        modules::devlink_params(&pci("0000:00:10.0")))]
+    #[case::roce_enable_param(
+        Request::RoceEnableParam { pci: pci("0000:00:10.0") },
+        modules::devlink_roce_enable(&pci("0000:00:10.0")))]
+    #[case::devlink_reload(
+        Request::DevlinkReload { pci: pci("0000:00:10.0") },
+        modules::devlink_reload(&pci("0000:00:10.0")))]
     #[case::partition_table_create(
         Request::PartitionTableCreate { disk: disk("sdb") },
         partition::table_create(&disk("sdb")))]

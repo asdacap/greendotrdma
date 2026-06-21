@@ -176,6 +176,21 @@ pub enum Request {
     RxeLinkAdd {
         netdev: NetdevName,
     },
+    /// Read a NIC's devlink params (`devlink dev param show pci/<pci> -j`): a
+    /// privileged *read* used to confirm `enable_roce` before attempting a fix.
+    DevlinkParams {
+        pci: PciAddress,
+    },
+    /// Turn on hardware RoCE: `devlink dev param set pci/<pci> name enable_roce
+    /// value true cmode driverinit`. Takes effect only after a reload.
+    RoceEnableParam {
+        pci: PciAddress,
+    },
+    /// Re-init a device so a driverinit param takes effect (`devlink dev
+    /// reload pci/<pci>`). Resets the device's netdevs.
+    DevlinkReload {
+        pci: PciAddress,
+    },
     InstallPackages {
         packages: Vec<PackageName>,
     },
@@ -316,6 +331,15 @@ mod tests {
     #[case::modules(Request::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
+    #[case::devlink_params(Request::DevlinkParams {
+        pci: PciAddress::new("0000:00:10.0").unwrap(),
+    })]
+    #[case::roce_enable(Request::RoceEnableParam {
+        pci: PciAddress::new("0000:3b:00.1").unwrap(),
+    })]
+    #[case::devlink_reload(Request::DevlinkReload {
+        pci: PciAddress::new("0000:00:10.0").unwrap(),
+    })]
     #[case::install(Request::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
     })]
@@ -369,6 +393,8 @@ mod tests {
             r#"{"op":"lv_delete","vg":"vg0","name":"../x"}"#,
             r#"{"op":"vg_create","name":"-bad","devices":["/dev/sdb"]}"#,
             r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
+            r#"{"op":"roce_enable_param","pci":"0000:00:10.G"}"#,
+            r#"{"op":"devlink_reload","pci":"0000:00:10.0 ; reboot"}"#,
             r#"{"op":"no_such_op"}"#,
         ] {
             assert!(serde_json::from_str::<Request>(bad).is_err(), "{bad}");

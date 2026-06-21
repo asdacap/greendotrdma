@@ -165,7 +165,11 @@ fn crit(label: &str, ok: bool, detail: impl Into<String>) -> Criterion {
 /// The four steps of RDMA-device readiness, shared by both protocols: a device
 /// must exist, expose an ACTIVE port, map to a netdev, and that netdev must
 /// carry a usable IP. Pinpoints which link of the chain is broken.
-fn rdma_device_criteria(rdma: &[RdmaDev]) -> Vec<Criterion> {
+///
+/// `capable_disabled` names NICs that are RoCE-capable but have RoCE switched
+/// off (no `/sys/class/infiniband` device); when there is no RDMA device at
+/// all, that's the actionable explanation, pointing the user at Settings.
+fn rdma_device_criteria(rdma: &[RdmaDev], capable_disabled: &[String]) -> Vec<Criterion> {
     let active: Vec<String> = rdma
         .iter()
         .filter(|d| d.active)
@@ -184,7 +188,14 @@ fn rdma_device_criteria(rdma: &[RdmaDev]) -> Vec<Criterion> {
             "RDMA device present",
             !rdma.is_empty(),
             if rdma.is_empty() {
-                "none under /sys/class/infiniband".to_owned()
+                if capable_disabled.is_empty() {
+                    "none under /sys/class/infiniband".to_owned()
+                } else {
+                    format!(
+                        "none under /sys/class/infiniband — but {} is RoCE-capable with RoCE disabled; enable it in Settings",
+                        capable_disabled.join(", ")
+                    )
+                }
             } else {
                 rdma.iter()
                     .map(|d| d.name.as_str())
@@ -224,7 +235,12 @@ fn rdma_device_criteria(rdma: &[RdmaDev]) -> Vec<Criterion> {
 
 /// Ordered RDMA-readiness checklist for an NVMe-oF export, decomposing the same
 /// state `nvme_dot` consults into per-condition pass/fail rows.
-pub fn nvme_diagnostics(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Vec<Criterion> {
+pub fn nvme_diagnostics(
+    export: &Export,
+    actual: &ActualNvmet,
+    rdma: &[RdmaDev],
+    capable_disabled: &[String],
+) -> Vec<Criterion> {
     let nqn = export.nqn();
     let subsys = actual.subsystems.iter().find(|s| s.nqn == nqn.as_str());
     let ns = subsys.and_then(|s| s.namespaces.iter().find(|ns| ns.nsid == 1));
@@ -274,7 +290,7 @@ pub fn nvme_diagnostics(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev])
             },
         ),
     ];
-    crits.extend(rdma_device_criteria(rdma));
+    crits.extend(rdma_device_criteria(rdma, capable_disabled));
     crits.push({
         let (ok, detail) = match listen {
             Some(p) => {
@@ -295,7 +311,12 @@ pub fn nvme_diagnostics(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev])
 
 /// Ordered RDMA-readiness checklist for an iSCSI export (iSER), mirroring
 /// `iscsi_dot`.
-pub fn iscsi_diagnostics(export: &Export, actual: &ActualLio, rdma: &[RdmaDev]) -> Vec<Criterion> {
+pub fn iscsi_diagnostics(
+    export: &Export,
+    actual: &ActualLio,
+    rdma: &[RdmaDev],
+    capable_disabled: &[String],
+) -> Vec<Criterion> {
     let iqn = export.iqn();
     let backstore = actual.backstores.iter().find(|b| b.name == export.name);
     let target = actual.targets.iter().find(|t| t.iqn == iqn.as_str());
@@ -354,7 +375,7 @@ pub fn iscsi_diagnostics(export: &Export, actual: &ActualLio, rdma: &[RdmaDev]) 
             },
         ),
     ];
-    crits.extend(rdma_device_criteria(rdma));
+    crits.extend(rdma_device_criteria(rdma, capable_disabled));
     crits.push({
         let (ok, detail) = match portal {
             Some(p) => {
@@ -666,7 +687,7 @@ mod tests {
             ports: vec![port(1, "rdma", "10.0.0.5", true)],
         };
         // Healthy: every criterion passes and the verdict names the address.
-        let crits = nvme_diagnostics(&export(true, false, None), &good, &dev);
+        let crits = nvme_diagnostics(&export(true, false, None), &good, &dev, &[]);
         assert!(crits.iter().all(|c| c.ok), "{crits:#?}");
         assert!(
             find(&crits, "Listen address served")
@@ -677,17 +698,33 @@ mod tests {
         // Each fault flips exactly the criterion it owns; upstream rows stay green.
         assert!(
             !find(
-                &nvme_diagnostics(&export(false, true, None), &good, &dev),
+                &nvme_diagnostics(&export(false, true, None), &good, &dev, &[]),
                 "RDMA requested"
             )
             .ok
         );
-        let no_subsys = nvme_diagnostics(&export(true, false, None), &ActualNvmet::default(), &dev);
+        let no_subsys = nvme_diagnostics(
+            &export(true, false, None),
+            &ActualNvmet::default(),
+            &dev,
+            &[],
+        );
         assert!(!find(&no_subsys, "Subsystem configured").ok);
-        let no_dev = nvme_diagnostics(&export(true, false, None), &good, &[]);
+        let no_dev = nvme_diagnostics(&export(true, false, None), &good, &[], &[]);
         assert!(find(&no_dev, "Subsystem configured").ok);
         assert!(!find(&no_dev, "RDMA device present").ok);
         assert!(!find(&no_dev, "Listen address served").ok);
+
+        // No RDMA device but a RoCE-capable-disabled NIC: the verdict names it
+        // and points at Settings instead of a bare "none".
+        let disabled = nvme_diagnostics(&export(true, false, None), &good, &[], &["ens16".into()]);
+        let present = find(&disabled, "RDMA device present");
+        assert!(!present.ok);
+        assert!(
+            present.detail.contains("ens16") && present.detail.contains("Settings"),
+            "{}",
+            present.detail
+        );
 
         // Wildcard listen is served whenever any device carries an address.
         let wild = ActualNvmet {
@@ -696,7 +733,7 @@ mod tests {
         };
         assert!(
             find(
-                &nvme_diagnostics(&export(true, false, None), &wild, &dev),
+                &nvme_diagnostics(&export(true, false, None), &wild, &dev, &[]),
                 "Listen address served"
             )
             .ok
@@ -709,21 +746,21 @@ mod tests {
         let mut exp = export(true, false, None);
         exp.kind = crate::state::ExportKind::Iscsi;
         let good = lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true)]);
-        let crits = iscsi_diagnostics(&exp, &good, &dev);
+        let crits = iscsi_diagnostics(&exp, &good, &dev, &[]);
         assert!(crits.iter().all(|c| c.ok), "{crits:#?}");
 
         // A plain (non-iSER) portal fails the iSER-portal row.
         let no_iser = lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", false)]);
         assert!(
             !find(
-                &iscsi_diagnostics(&exp, &no_iser, &dev),
+                &iscsi_diagnostics(&exp, &no_iser, &dev, &[]),
                 "iSER portal exists"
             )
             .ok
         );
 
         // No RDMA device → device chain and the portal verdict fail together.
-        let no_dev = iscsi_diagnostics(&exp, &good, &[]);
+        let no_dev = iscsi_diagnostics(&exp, &good, &[], &[]);
         assert!(!find(&no_dev, "RDMA device present").ok);
         assert!(!find(&no_dev, "Portal address served").ok);
     }

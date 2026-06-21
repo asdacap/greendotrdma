@@ -200,6 +200,32 @@ pub(crate) mod testutil {
                                 )
                             })
                         }
+                        // Devlink param read: report enable_roce disabled so the
+                        // RoCE fix flow proceeds past its confirmation step.
+                        HelperRequest::DevlinkParams { .. } => {
+                            let json = r#"{"param":{"pci/0000:00:10.0":[{"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":false}]}]}}"#;
+                            wire::write_msg(
+                                w,
+                                &TaskEvent::Started {
+                                    command: "fake".into(),
+                                    args: vec![],
+                                    stdin: None,
+                                },
+                            )
+                            .and_then(|()| {
+                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
+                            })
+                            .and_then(|()| {
+                                wire::write_msg(
+                                    w,
+                                    &TaskEvent::Finished {
+                                        exit: 0,
+                                        ok: true,
+                                        error: None,
+                                    },
+                                )
+                            })
+                        }
                         // Everything else is a task: stream Started + a
                         // successful Finished.
                         _ => wire::write_msg(
