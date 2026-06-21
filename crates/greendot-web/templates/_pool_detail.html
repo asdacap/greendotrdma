@@ -34,34 +34,32 @@
   <p class="empty">This pool has no zvols yet.</p>
   {% else %}
   <table>
-    <thead><tr><th>Name</th><th>Used</th><th>Volsize</th></tr></thead>
+    <thead><tr><th>Name</th><th>Used</th><th>Volsize</th><th></th></tr></thead>
     <tbody>
       {% for z in view.zvols %}
       <tr>
         <td>{{ z.name }}</td>
         <td>{{ z.used }}</td>
         <td>{{ z.volsize }}</td>
+        <td><details class="editbtn"><summary>Edit</summary></details></td>
       </tr>
       <tr class="edit">
-        <td colspan="3">
-          <details>
-            <summary>Edit</summary>
-            <div class="card editbox">
-              <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
-                <input type="hidden" name="dataset" value="{{ z.name }}">
-                <input name="size" size="5" placeholder="new" required>
-                <select name="unit">
-                  <option>GiB</option><option>MiB</option><option>TiB</option>
-                </select>
-                <button>Resize</button>
-              </form>
-              <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
-                    hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
-                <input type="hidden" name="dataset" value="{{ z.name }}">
-                <button class="danger">Delete</button>
-              </form>
-            </div>
-          </details>
+        <td colspan="4">
+          <div class="card editbox">
+            <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
+              <input type="hidden" name="dataset" value="{{ z.name }}">
+              <input name="size" size="5" placeholder="new" required>
+              <select name="unit">
+                <option>GiB</option><option>MiB</option><option>TiB</option>
+              </select>
+              <button>Resize</button>
+            </form>
+            <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
+              <input type="hidden" name="dataset" value="{{ z.name }}">
+              <button class="danger">Delete</button>
+            </form>
+          </div>
         </td>
       </tr>
       {% endfor %}

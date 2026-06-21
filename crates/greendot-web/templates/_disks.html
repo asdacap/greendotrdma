@@ -16,7 +16,7 @@
   <p class="empty">No partitions.</p>
   {% else %}
   <table>
-    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th></tr></thead>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
     <tbody>
       {% for p in d.partitions %}
       <tr>
@@ -25,45 +25,43 @@
         <td>{{ p.fstype }}</td>
         <td>{{ p.label }}</td>
         <td>{{ p.mountpoint }}</td>
+        <td>{% if p.number.is_some() %}<details class="editbtn"><summary>Edit</summary></details>{% endif %}</td>
       </tr>
       {% if let Some(number) = p.number %}
       <tr class="edit">
-        <td colspan="5">
-          <details>
-            <summary>Edit</summary>
-            <div class="card editbox">
-              <p class="muted small">Filesystem: {{ p.fstype }}{% if p.mounted %} · mounted at {{ p.mountpoint }}{% endif %}</p>
-              {% if p.shrinkable %}
-              <form class="inline" hx-post="/disks/part/shrink" hx-target="#disks-content" hx-swap="outerHTML"
-                    hx-confirm="Shrink {{ p.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first.">
-                <input type="hidden" name="disk" value="{{ d.name }}">
-                <input type="hidden" name="number" value="{{ number }}">
-                <input name="size" size="6" placeholder="new size" required>
-                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-                <button>Shrink</button>
-              </form>
-              {% else %}
-              <p class="muted small">Shrink unavailable: {{ p.shrink_reason }}</p>
-              {% endif %}
-              {% if view.zfs_installed %}
-              {% if !view.pools.is_empty() %}
-              <form class="inline" hx-post="/disks/part/add-to-pool" hx-target="#disks-content" hx-swap="outerHTML"
-                    hx-confirm="Add {{ p.name }} to this pool? A single-disk vdev is refused if it would reduce the pool's redundancy.">
-                <input type="hidden" name="device" value="/dev/{{ p.name }}">
-                <select name="pool">{% for pool in view.pools %}<option>{{ pool }}</option>{% endfor %}</select>
-                <button>Add to pool</button>
-              </form>
-              {% endif %}
-              <a class="linklike" href="/zfs/pool/create?device=/dev/{{ p.name }}">Create new pool…</a>
-              {% endif %}
-              <form class="inline" hx-post="/disks/part/delete" hx-target="#disks-content" hx-swap="outerHTML"
-                    hx-confirm="Delete {{ p.name }}? Data on it becomes unreachable.">
-                <input type="hidden" name="disk" value="{{ d.name }}">
-                <input type="hidden" name="number" value="{{ number }}">
-                <button class="danger">Delete</button>
-              </form>
-            </div>
-          </details>
+        <td colspan="6">
+          <div class="card editbox">
+            <p class="muted small">Filesystem: {{ p.fstype }}{% if p.mounted %} · mounted at {{ p.mountpoint }}{% endif %}</p>
+            {% if p.shrinkable %}
+            <form class="inline" hx-post="/disks/part/shrink" hx-target="#disks-content" hx-swap="outerHTML"
+                  hx-confirm="Shrink {{ p.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first.">
+              <input type="hidden" name="disk" value="{{ d.name }}">
+              <input type="hidden" name="number" value="{{ number }}">
+              <input name="size" size="6" placeholder="new size" required>
+              <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+              <button>Shrink</button>
+            </form>
+            {% else %}
+            <p class="muted small">Shrink unavailable: {{ p.shrink_reason }}</p>
+            {% endif %}
+            {% if view.zfs_installed %}
+            {% if !view.pools.is_empty() %}
+            <form class="inline" hx-post="/disks/part/add-to-pool" hx-target="#disks-content" hx-swap="outerHTML"
+                  hx-confirm="Add {{ p.name }} to this pool? A single-disk vdev is refused if it would reduce the pool's redundancy.">
+              <input type="hidden" name="device" value="/dev/{{ p.name }}">
+              <select name="pool">{% for pool in view.pools %}<option>{{ pool }}</option>{% endfor %}</select>
+              <button>Add to pool</button>
+            </form>
+            {% endif %}
+            <a class="linklike" href="/zfs/pool/create?device=/dev/{{ p.name }}">Create new pool…</a>
+            {% endif %}
+            <form class="inline" hx-post="/disks/part/delete" hx-target="#disks-content" hx-swap="outerHTML"
+                  hx-confirm="Delete {{ p.name }}? Data on it becomes unreachable.">
+              <input type="hidden" name="disk" value="{{ d.name }}">
+              <input type="hidden" name="number" value="{{ number }}">
+              <button class="danger">Delete</button>
+            </form>
+          </div>
         </td>
       </tr>
       {% endif %}
