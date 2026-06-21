@@ -359,10 +359,12 @@ async fn gather_pool_create(
         .list_exports()
         .map(|es| es.into_iter().map(|e| e.device_path).collect())
         .unwrap_or_default();
-    let devices = block::available_block_devices(&in_use)
+    let devices = block::available_block_devices(&state.helper, &in_use)
         .await
         .into_iter()
-        .filter(|d| d.kind != block::AvailKind::Zvol && d.fstype.is_none())
+        .filter(|d| {
+            d.kind != block::AvailKind::Zvol && d.kind != block::AvailKind::Lv && d.fstype.is_none()
+        })
         .map(|d| PoolDeviceOption {
             checked: selected.contains(&d.path),
             path: d.path,

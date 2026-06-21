@@ -1,6 +1,7 @@
 pub mod charts;
 pub mod disks;
 pub mod exports;
+pub mod lvm;
 pub mod settings;
 pub mod snapshots;
 pub mod tasks;
@@ -43,6 +44,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/", get(dashboard))
         .route("/logout", post(auth::logout))
         .merge(zfs::router())
+        .merge(lvm::router())
         .merge(exports::router())
         .merge(settings::router())
         .merge(disks::router())

@@ -104,6 +104,12 @@ validated_string!(
     /// ZFS pool name (the first component of a dataset path).
     PoolName, validate::pool_name, "pool name");
 validated_string!(
+    /// LVM volume-group name, e.g. `vg0`.
+    VgName, validate::lvm_name, "volume group name");
+validated_string!(
+    /// LVM logical-volume name, e.g. `data`.
+    LvName, validate::lvm_name, "logical volume name");
+validated_string!(
     /// The helper's private btrfs temp-mount path (fixed shape, no traversal).
     MountPath, validate::mount_path, "mount path");
 
@@ -182,6 +188,16 @@ impl VdevLayout {
             _ => return None,
         })
     }
+}
+
+/// Which LVM reporting command the helper should run on the web side's behalf.
+/// LVM reporting needs root, so these reads go through the helper (unlike ZFS).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LvmReport {
+    Vgs,
+    Lvs,
+    Pvs,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +336,8 @@ pub enum TaskEvent {
 pub fn package_for_cli(cli: &str) -> Option<&'static str> {
     Some(match cli {
         "zfs" | "zpool" => "zfsutils-linux",
+        "vgs" | "lvs" | "pvs" | "vgcreate" | "vgextend" | "vgreduce" | "vgremove" | "lvcreate"
+        | "lvremove" | "lvextend" | "lvreduce" | "lvrename" => "lvm2",
         "sfdisk" | "lsblk" | "mount" | "umount" => "util-linux",
         "resize2fs" | "e2fsck" => "e2fsprogs",
         "btrfs" => "btrfs-progs",
@@ -336,6 +354,8 @@ pub fn package_for_cli(cli: &str) -> Option<&'static str> {
 pub const REQUIRED_CLIS: &[&str] = &[
     "zfs",
     "zpool",
+    "vgs",
+    "lvs",
     "sfdisk",
     "lsblk",
     "resize2fs",
@@ -427,14 +447,31 @@ mod tests {
     #[case::disk("/dev/sda", true)]
     #[case::partition("/dev/nvme0n1p2", true)]
     #[case::zvol("/dev/zvol/tank/vols/vm1", true)]
+    #[case::lv("/dev/vg0/data", true)]
     #[case::empty("", false)]
     #[case::relative("dev/sda", false)]
     #[case::traversal("/dev/../etc/shadow", false)]
     #[case::zvol_traversal("/dev/zvol/../sda", false)]
+    #[case::lv_traversal("/dev/vg0/../sda", false)]
+    #[case::lv_three_components("/dev/a/b/c", false)]
     #[case::outside_dev("/etc/passwd", false)]
     #[case::trailing("/dev/sda ", false)]
     fn device_path(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(DevicePath::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::simple("vg0", true)]
+    #[case::charset("vg-1_a.b+2", true)]
+    #[case::empty("", false)]
+    #[case::slash("vg/lv", false)]
+    #[case::leading_dash("-vg", false)]
+    #[case::dotdot("..", false)]
+    #[case::too_long(&"a".repeat(128), false)]
+    fn lvm_names(#[case] input: &str, #[case] ok: bool) {
+        // VgName and LvName share the same validator.
+        assert_eq!(VgName::new(input).is_ok(), ok, "{input:?}");
+        assert_eq!(LvName::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

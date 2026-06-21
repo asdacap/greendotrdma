@@ -8,9 +8,10 @@ export is actually served via **RDMA** — that's the green dot.
 - 🟡 yellow — serving, but TCP only (with the reason why RDMA isn't active)
 - 🔴 red — not serving (with the reason)
 
-Also on board: ZFS zvol management, GPT partitioning, scheduled snapshots
-with retention, live + historical traffic charts, a Prometheus `/metrics`
-endpoint, and one-click Soft-RoCE so any NIC can do real RDMA.
+Also on board: ZFS zvol management, LVM volume management (volume groups and
+linear + thin logical volumes), GPT partitioning, scheduled snapshots with
+retention, live + historical traffic charts, a Prometheus `/metrics` endpoint,
+and one-click Soft-RoCE so any NIC can do real RDMA.
 
 Every privileged operation runs as a recorded **task** — a real CLI command
 (`zfs`, `sfdisk`, `modprobe`, `rdma`, `targetctl`, `apt-get`) or, for NVMe-oF, a

@@ -1,6 +1,7 @@
 //! Block device inventory via `lsblk --json` (sysfs-backed, unprivileged).
 
 use crate::fmt::human_bytes;
+use crate::helper_client::HelperClient;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::HashSet;
@@ -32,6 +33,7 @@ pub struct Partition {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AvailKind {
     Zvol,
+    Lv,
     Partition,
     WholeDisk,
 }
@@ -136,12 +138,14 @@ fn in_use_fstype(fstype: Option<&str>) -> bool {
 }
 
 /// Pure core of [`available_block_devices`]: given the disk inventory, the
-/// candidate zvols (name, logical size), and the set of in-use device paths,
-/// produce the available devices. A device is available when it is unmounted,
-/// not a ZFS pool member, and not already in `in_use`.
+/// candidate zvols (name, logical size), the candidate LVs (`/dev/<vg>/<lv>`
+/// path, size), and the set of in-use device paths, produce the available
+/// devices. A device is available when it is unmounted, not a ZFS pool member,
+/// and not already in `in_use`.
 pub fn available_from_disks(
     disks: &[Disk],
     zvols: &[(String, u64)],
+    lvs: &[(String, u64)],
     in_use: &HashSet<String>,
 ) -> Vec<AvailDevice> {
     let mut out = Vec::new();
@@ -192,12 +196,28 @@ pub fn available_from_disks(
             });
         }
     }
+    for (path, size) in lvs {
+        if !in_use.contains(path) {
+            let name = path.strip_prefix("/dev/").unwrap_or(path);
+            out.push(AvailDevice {
+                label: format!("LV {name} — {}", human_bytes(*size)),
+                path: path.clone(),
+                kind: AvailKind::Lv,
+                fstype: None,
+                size: *size,
+            });
+        }
+    }
     out
 }
 
 /// Available block devices for the export dropdown and pool form. Infallible:
-/// a failed `lsblk` or absent ZFS just yields fewer (or no) entries.
-pub async fn available_block_devices(in_use: &HashSet<String>) -> Vec<AvailDevice> {
+/// a failed `lsblk`, absent ZFS, or absent LVM just yields fewer (or no)
+/// entries. Reads LVs through the helper (LVM reporting needs root).
+pub async fn available_block_devices(
+    helper: &HelperClient,
+    in_use: &HashSet<String>,
+) -> Vec<AvailDevice> {
     let disks = disks().await.unwrap_or_default();
     let zvols: Vec<(String, u64)> = super::zfs::datasets()
         .await
@@ -208,7 +228,17 @@ pub async fn available_block_devices(in_use: &HashSet<String>) -> Vec<AvailDevic
         .filter(|d| d.kind == super::zfs::DsKind::Volume)
         .map(|d| (d.name, d.volsize.unwrap_or(0)))
         .collect();
-    available_from_disks(&disks, &zvols, in_use)
+    // Thin pools are containers, not exportable block devices.
+    let lvs: Vec<(String, u64)> = super::lvm::logical_volumes(helper)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|l| l.kind != super::lvm::LvKind::ThinPool)
+        .map(|l| (format!("/dev/{}/{}", l.vg, l.name), l.size))
+        .collect();
+    available_from_disks(&disks, &zvols, &lvs, in_use)
 }
 
 pub async fn disks() -> Result<Vec<Disk>> {
@@ -338,11 +368,27 @@ mod tests {
             ("tank/vm1".to_string(), 10 << 30),
             ("tank/used".to_string(), 5 << 30), // in_use → out
         ];
-        let in_use = HashSet::from(["/dev/sda4".to_string(), "/dev/zvol/tank/used".to_string()]);
+        let lvs = vec![
+            ("/dev/vg0/data".to_string(), 8 << 30),
+            ("/dev/vg0/used".to_string(), 4 << 30), // in_use → out
+        ];
+        let in_use = HashSet::from([
+            "/dev/sda4".to_string(),
+            "/dev/zvol/tank/used".to_string(),
+            "/dev/vg0/used".to_string(),
+        ]);
 
-        let avail = available_from_disks(&disks, &zvols, &in_use);
+        let avail = available_from_disks(&disks, &zvols, &lvs, &in_use);
         let paths: Vec<&str> = avail.iter().map(|a| a.path.as_str()).collect();
-        assert_eq!(paths, ["/dev/sda2", "/dev/sdb", "/dev/zvol/tank/vm1"]);
+        assert_eq!(
+            paths,
+            [
+                "/dev/sda2",
+                "/dev/sdb",
+                "/dev/zvol/tank/vm1",
+                "/dev/vg0/data"
+            ]
+        );
 
         let sda2 = &avail[0];
         assert_eq!(sda2.kind, AvailKind::Partition);
@@ -350,5 +396,7 @@ mod tests {
         assert_eq!(avail[1].kind, AvailKind::WholeDisk);
         assert_eq!(avail[2].kind, AvailKind::Zvol);
         assert!(avail[2].label.starts_with("zvol tank/vm1"));
+        assert_eq!(avail[3].kind, AvailKind::Lv);
+        assert!(avail[3].label.starts_with("LV vg0/data"));
     }
 }

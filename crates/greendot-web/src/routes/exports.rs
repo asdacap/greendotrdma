@@ -125,7 +125,7 @@ pub async fn gather(
     {
         view.banner = Some(format!("reconcile problem: {err}"));
     }
-    view.devices = actual::block::available_block_devices(&in_use).await;
+    view.devices = actual::block::available_block_devices(&state.helper, &in_use).await;
     view
 }
 

@@ -1,0 +1,23 @@
+<div id="vg-create-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if view.not_installed %}
+  <p class="empty">LVM is not installed on this host.</p>
+  {% else %}
+  {% if view.devices.is_empty() %}
+  <p class="empty">No available block devices to build a VG from — free up an unmounted, unused partition first.</p>
+  {% else %}
+  <form class="card" hx-post="/lvm/vg" hx-target="#vg-create-content" hx-swap="outerHTML">
+    <label>VG name <input name="name" placeholder="vg0" required></label>
+    <fieldset>
+      <legend>Physical volumes</legend>
+      {% for d in view.devices %}
+      <label class="checkbox"><input type="checkbox" name="devices" value="{{ d.path }}"{% if d.checked %} checked{% endif %}> {{ d.label }}</label>
+      {% endfor %}
+    </fieldset>
+    <p class="muted small">Devices are initialised as PVs and added to the new group.</p>
+    <button type="submit">Create VG</button>
+  </form>
+  {% endif %}
+  {% endif %}
+  <p><a href="/lvm">← Back to LVM</a></p>
+</div>

@@ -14,6 +14,15 @@ pub struct HelperClient {
     socket: PathBuf,
 }
 
+/// Output of a task run drained by [`HelperClient::collect`].
+#[derive(Debug, Default)]
+pub struct HelperOutput {
+    pub ok: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub error: Option<String>,
+}
+
 impl HelperClient {
     pub fn new(socket: PathBuf) -> Self {
         HelperClient { socket }
@@ -30,6 +39,27 @@ impl HelperClient {
             wire::read_msg(&mut reader)?.context("helper closed connection without a response")
         })
         .await?
+    }
+
+    /// Runs a task request to completion, collecting its output without
+    /// recording a DB task. Used for privileged *reads* (e.g. LVM reporting)
+    /// that must not clutter the Tasks page.
+    pub async fn collect(&self, req: Request) -> HelperOutput {
+        let mut rx = self.run_task(req);
+        let mut out = HelperOutput::default();
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                TaskEvent::Stdout { data } => out.stdout.push_str(&data),
+                TaskEvent::Stderr { data } => out.stderr.push_str(&data),
+                TaskEvent::Finished { ok, error, .. } => {
+                    out.ok = ok;
+                    out.error = error;
+                    break;
+                }
+                TaskEvent::Started { .. } => {}
+            }
+        }
+        out
     }
 
     /// Runs a task request, delivering the helper's streamed events on the

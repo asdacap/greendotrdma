@@ -16,6 +16,19 @@ pub(crate) fn snap_name(s: &str) -> bool {
     s.len() <= 255 && component(s)
 }
 
+/// LVM volume-group / logical-volume name. LVM allows `[A-Za-z0-9+_.-]`; we
+/// additionally forbid a leading `-` (argv flag confusion) and the `.`/`..`
+/// entries, and there is no `/` so a name can't introduce a path component.
+pub(crate) fn lvm_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 127
+        && s != "."
+        && s != ".."
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+_.-".contains(c))
+}
+
 pub(crate) fn nqn(s: &str) -> bool {
     s.len() <= 223
         && s.strip_prefix("nqn.").is_some_and(|rest| {
@@ -45,9 +58,19 @@ pub(crate) fn block_dev(s: &str) -> bool {
 }
 
 pub(crate) fn device_path(s: &str) -> bool {
-    match s.strip_prefix("/dev/zvol/") {
-        Some(dataset) => dataset_name(dataset),
-        None => s.strip_prefix("/dev/").is_some_and(block_dev),
+    let Some(rest) = s.strip_prefix("/dev/") else {
+        return false;
+    };
+    if let Some(dataset) = rest.strip_prefix("zvol/") {
+        // ZFS zvol: /dev/zvol/<dataset>
+        dataset_name(dataset)
+    } else if let Some((vg, lv)) = rest.split_once('/') {
+        // LVM logical volume: /dev/<vg>/<lv> (the udev symlink). Exactly two
+        // components — a third `/` lands in `lv` and fails `lvm_name`.
+        lvm_name(vg) && lvm_name(lv)
+    } else {
+        // Bare block device: /dev/<dev>
+        block_dev(rest)
     }
 }
 
