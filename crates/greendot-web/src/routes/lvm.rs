@@ -9,7 +9,7 @@ use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
 use crate::routes::zfs::parse_size;
 use askama::Template;
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
@@ -32,6 +32,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/lvm/vg/delete", post(vg_remove))
         .route("/lvm/vg/create", axum::routing::get(vg_create_page))
         .route("/lvm/vg", post(vg_create))
+        .route("/lvm/vg/{name}", axum::routing::get(vg_detail_page))
 }
 
 pub struct VgRow {
@@ -41,6 +42,19 @@ pub struct VgRow {
     pub used_percent: u8,
     pub pv_count: u64,
     pub lv_count: u64,
+}
+
+impl VgRow {
+    fn new(v: lvm::Vg) -> Self {
+        VgRow {
+            used_percent: used_percent(v.size, v.free),
+            size: human_bytes(v.size),
+            free: human_bytes(v.free),
+            pv_count: v.pv_count,
+            lv_count: v.lv_count,
+            name: v.name,
+        }
+    }
 }
 
 pub struct PvRow {
@@ -62,6 +76,24 @@ pub struct LvRow {
     pub data_percent: String,
 }
 
+impl LvRow {
+    fn new(l: lvm::Lv) -> Self {
+        LvRow {
+            full_name: format!("{}/{}", l.vg, l.name),
+            type_label: match l.kind {
+                LvKind::Linear => "linear",
+                LvKind::ThinPool => "thin pool",
+                LvKind::Thin => "thin",
+            },
+            pool: l.pool.unwrap_or_default(),
+            data_percent: l.data_percent.map_or(String::new(), |p| format!("{p:.1}%")),
+            size: human_bytes(l.size),
+            vg: l.vg,
+            name: l.name,
+        }
+    }
+}
+
 pub struct DeviceOption {
     pub path: String,
     pub label: String,
@@ -72,10 +104,6 @@ pub struct DeviceOption {
 pub struct LvmView {
     pub vgs: Vec<VgRow>,
     pub pvs: Vec<PvRow>,
-    pub lvs: Vec<LvRow>,
-    pub vg_names: Vec<String>,
-    /// `vg/pool` identifiers for the thin-volume form.
-    pub thin_pools: Vec<String>,
     /// Empty raw devices offered for extending a VG.
     pub extend_devices: Vec<DeviceOption>,
     pub not_installed: bool,
@@ -110,37 +138,20 @@ async fn gather(state: &AppState, flash: Option<String>, form_error: Option<Stri
     let joined = tokio::try_join!(
         lvm::volume_groups(&state.helper),
         lvm::physical_volumes(&state.helper),
-        lvm::logical_volumes(&state.helper),
     );
-    let (Some(vgs), Some(pvs), Some(lvs)) = (match joined {
+    let (Some(vgs), Some(pvs)) = (match joined {
         Ok(t) => t,
         Err(e) => {
             view.error = Some(format!("could not read LVM state: {e:#}"));
             return view;
         }
     }) else {
-        // Any of the three missing ⇒ LVM isn't installed on this host.
+        // Either missing ⇒ LVM isn't installed on this host.
         view.not_installed = true;
         return view;
     };
 
-    view.vg_names = vgs.iter().map(|v| v.name.clone()).collect();
-    view.thin_pools = lvs
-        .iter()
-        .filter(|l| l.kind == LvKind::ThinPool)
-        .map(|l| format!("{}/{}", l.vg, l.name))
-        .collect();
-    view.vgs = vgs
-        .into_iter()
-        .map(|v| VgRow {
-            used_percent: used_percent(v.size, v.free),
-            size: human_bytes(v.size),
-            free: human_bytes(v.free),
-            pv_count: v.pv_count,
-            lv_count: v.lv_count,
-            name: v.name,
-        })
-        .collect();
+    view.vgs = vgs.into_iter().map(VgRow::new).collect();
     view.pvs = pvs
         .into_iter()
         .map(|p| PvRow {
@@ -149,22 +160,6 @@ async fn gather(state: &AppState, flash: Option<String>, form_error: Option<Stri
             size: human_bytes(p.size),
             free: human_bytes(p.free),
             name: p.name,
-        })
-        .collect();
-    view.lvs = lvs
-        .into_iter()
-        .map(|l| LvRow {
-            full_name: format!("{}/{}", l.vg, l.name),
-            type_label: match l.kind {
-                LvKind::Linear => "linear",
-                LvKind::ThinPool => "thin pool",
-                LvKind::Thin => "thin",
-            },
-            pool: l.pool.unwrap_or_default(),
-            data_percent: l.data_percent.map_or(String::new(), |p| format!("{p:.1}%")),
-            size: human_bytes(l.size),
-            vg: l.vg,
-            name: l.name,
         })
         .collect();
 
@@ -219,6 +214,113 @@ async fn form_failed(state: &AppState, message: impl Into<String>) -> Response {
     })
 }
 
+// ---- Per-VG page (logical-volume listing + creation) ----
+
+#[derive(Default)]
+pub struct VgDetailView {
+    pub name: String,
+    /// `None` when the named VG doesn't exist on this host.
+    pub vg: Option<VgRow>,
+    pub lvs: Vec<LvRow>,
+    /// `vg/pool` identifiers for this VG's thin pools, for the thin-volume form.
+    pub thin_pools: Vec<String>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "vg_detail.html")]
+struct VgDetailTemplate {
+    user: CurrentUser,
+    view: VgDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_vg_detail.html")]
+struct VgDetailPartial {
+    view: VgDetailView,
+}
+
+async fn gather_vg_detail(
+    state: &AppState,
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> VgDetailView {
+    let mut view = VgDetailView {
+        name: name.to_owned(),
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    let joined = tokio::try_join!(
+        lvm::volume_groups(&state.helper),
+        lvm::logical_volumes(&state.helper),
+    );
+    let (Some(vgs), Some(lvs)) = (match joined {
+        Ok(t) => t,
+        Err(e) => {
+            view.error = Some(format!("could not read LVM state: {e:#}"));
+            return view;
+        }
+    }) else {
+        // Either missing ⇒ LVM isn't installed on this host.
+        view.not_installed = true;
+        return view;
+    };
+    view.vg = vgs.into_iter().find(|v| v.name == name).map(VgRow::new);
+    view.thin_pools = lvs
+        .iter()
+        .filter(|l| l.vg == name && l.kind == LvKind::ThinPool)
+        .map(|l| format!("{}/{}", l.vg, l.name))
+        .collect();
+    view.lvs = lvs
+        .into_iter()
+        .filter(|l| l.vg == name)
+        .map(LvRow::new)
+        .collect();
+    view
+}
+
+async fn vg_detail_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(name): Path<String>,
+) -> Response {
+    page(VgDetailTemplate {
+        user,
+        view: gather_vg_detail(&state, &name, None, None).await,
+    })
+}
+
+/// Runs an LV request as a recorded task and re-renders the owning VG's detail
+/// partial with the outcome.
+async fn run_lv(
+    state: &AppState,
+    req: Request,
+    kind: &str,
+    title: &str,
+    success: String,
+    vg: &str,
+) -> Response {
+    let view = match crate::task_runner::run(state, req, kind, title).await {
+        Ok(outcome) => {
+            let (flash, error) = outcome.message(&success);
+            gather_vg_detail(state, vg, flash, error).await
+        }
+        Err(e) => gather_vg_detail(state, vg, None, Some(format!("{e:#}"))).await,
+    };
+    page(VgDetailPartial { view })
+}
+
+async fn lv_failed(state: &AppState, vg: &str, message: impl Into<String>) -> Response {
+    page(VgDetailPartial {
+        view: gather_vg_detail(state, vg, None, Some(message.into())).await,
+    })
+}
+
 // ---- Logical volumes ----
 
 #[derive(Deserialize)]
@@ -235,19 +337,21 @@ struct LvCreateForm {
 }
 
 async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreateForm>) -> Response {
+    // The detail page the form lives on; failures re-render this VG.
+    let scope = form.vg.trim().to_owned();
     let Ok(name) = LvName::new(form.name.trim()) else {
-        return form_failed(&state, format!("invalid LV name {:?}", form.name)).await;
+        return lv_failed(&state, &scope, format!("invalid LV name {:?}", form.name)).await;
     };
     let Some(size) = parse_size(&form.size, &form.unit) else {
-        return form_failed(&state, "invalid size").await;
+        return lv_failed(&state, &scope, "invalid size").await;
     };
     let (req, title, success) = if form.thin.is_some() {
         // Thin volume: the chosen pool (`vg/pool`) determines the VG.
         let Some((vg, pool)) = form.pool.split_once('/') else {
-            return form_failed(&state, "choose a thin pool").await;
+            return lv_failed(&state, &scope, "choose a thin pool").await;
         };
         let (Ok(vg), Ok(pool)) = (VgName::new(vg), LvName::new(pool)) else {
-            return form_failed(&state, "invalid thin pool").await;
+            return lv_failed(&state, &scope, "invalid thin pool").await;
         };
         (
             Request::ThinLvCreate {
@@ -261,7 +365,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
         )
     } else {
         let Ok(vg) = VgName::new(form.vg.trim()) else {
-            return form_failed(&state, "choose a volume group").await;
+            return lv_failed(&state, &scope, "choose a volume group").await;
         };
         (
             Request::LvCreate {
@@ -273,7 +377,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
             format!("created LV {vg}/{name}"),
         )
     };
-    run(&state, req, "lv-create", &title, success).await
+    run_lv(&state, req, "lv-create", &title, success, &scope).await
 }
 
 #[derive(Deserialize)]
@@ -288,23 +392,25 @@ async fn thin_pool_create(
     State(state): State<Arc<AppState>>,
     Form(form): Form<ThinPoolForm>,
 ) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (Ok(vg), Ok(name)) = (VgName::new(form.vg.trim()), LvName::new(form.name.trim())) else {
-        return form_failed(&state, "invalid thin pool name").await;
+        return lv_failed(&state, &scope, "invalid thin pool name").await;
     };
     let Some(size) = parse_size(&form.size, &form.unit) else {
-        return form_failed(&state, "invalid size").await;
+        return lv_failed(&state, &scope, "invalid size").await;
     };
     let req = Request::ThinPoolCreate {
         vg: vg.clone(),
         name: name.clone(),
         size,
     };
-    run(
+    run_lv(
         &state,
         req,
         "thin-pool-create",
         &format!("create thin pool {vg}/{name}"),
         format!("created thin pool {vg}/{name}"),
+        &scope,
     )
     .await
 }
@@ -326,41 +432,45 @@ fn parse_lv_resize(form: &LvResizeForm) -> Result<(VgName, LvName, u64), &'stati
 }
 
 async fn lv_resize(State(state): State<Arc<AppState>>, Form(form): Form<LvResizeForm>) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (vg, name, new_size) = match parse_lv_resize(&form) {
         Ok(v) => v,
-        Err(e) => return form_failed(&state, e).await,
+        Err(e) => return lv_failed(&state, &scope, e).await,
     };
     let req = Request::LvResize {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
-    run(
+    run_lv(
         &state,
         req,
         "lv-resize",
         &format!("grow {vg}/{name}"),
         format!("resized {vg}/{name}"),
+        &scope,
     )
     .await
 }
 
 async fn lv_shrink(State(state): State<Arc<AppState>>, Form(form): Form<LvResizeForm>) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (vg, name, new_size) = match parse_lv_resize(&form) {
         Ok(v) => v,
-        Err(e) => return form_failed(&state, e).await,
+        Err(e) => return lv_failed(&state, &scope, e).await,
     };
     let req = Request::LvShrink {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
-    run(
+    run_lv(
         &state,
         req,
         "lv-shrink",
         &format!("shrink {vg}/{name}"),
         format!("shrank {vg}/{name}"),
+        &scope,
     )
     .await
 }
@@ -373,24 +483,26 @@ struct LvRenameForm {
 }
 
 async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRenameForm>) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (Ok(vg), Ok(name), Ok(new_name)) = (
         VgName::new(form.vg.trim()),
         LvName::new(form.name.trim()),
         LvName::new(form.new_name.trim()),
     ) else {
-        return form_failed(&state, format!("invalid name {:?}", form.new_name)).await;
+        return lv_failed(&state, &scope, format!("invalid name {:?}", form.new_name)).await;
     };
     let req = Request::LvRename {
         vg: vg.clone(),
         name: name.clone(),
         new_name: new_name.clone(),
     };
-    run(
+    run_lv(
         &state,
         req,
         "lv-rename",
         &format!("rename {vg}/{name} to {new_name}"),
         format!("renamed {vg}/{name} to {new_name}"),
+        &scope,
     )
     .await
 }
@@ -402,19 +514,21 @@ struct LvDeleteForm {
 }
 
 async fn lv_delete(State(state): State<Arc<AppState>>, Form(form): Form<LvDeleteForm>) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (Ok(vg), Ok(name)) = (VgName::new(form.vg.trim()), LvName::new(form.name.trim())) else {
-        return form_failed(&state, "invalid logical volume").await;
+        return lv_failed(&state, &scope, "invalid logical volume").await;
     };
     let req = Request::LvDelete {
         vg: vg.clone(),
         name: name.clone(),
     };
-    run(
+    run_lv(
         &state,
         req,
         "lv-delete",
         &format!("delete {vg}/{name}"),
         format!("deleted {vg}/{name}"),
+        &scope,
     )
     .await
 }
@@ -651,17 +765,33 @@ mod tests {
         let app = test_app();
         let (cookie, csrf) = login(&app).await;
 
-        // Page renders whether or not LVM is installed on the test host.
+        // The index lists volume groups, each linking to its own page; the LV
+        // listing and create forms now live on that per-VG page instead.
         let req = HttpRequest::get("/lvm")
             .header(header::COOKIE, &cookie)
             .body(Body::empty())
             .unwrap();
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        // The fake helper reports vg0 with a linear and a thin-pool LV, so the
-        // page builds real rows rather than the not-installed placeholder.
-        assert!(body.contains("Logical volumes"), "{body}");
-        assert!(body.contains("vg0") && body.contains("data"), "{body}");
+        assert!(body.contains("Volume groups"), "{body}");
+        assert!(body.contains("/lvm/vg/vg0"), "{body}");
+
+        // The per-VG page hosts the LV listing and both create forms. The fake
+        // helper reports vg0 with a linear LV `data` and a thin pool `pool0`.
+        let req = HttpRequest::get("/lvm/vg/vg0")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Logical volumes") && body.contains("data"),
+            "{body}"
+        );
+        assert!(
+            body.contains("Create logical volume") && body.contains("Create thin pool"),
+            "{body}"
+        );
 
         // Valid linear LV create reaches the (fake) helper and reports success.
         let req = auth(

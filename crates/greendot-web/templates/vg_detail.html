@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — LVM — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Volume group {{ view.name }}</h1>
+<p><a href="/lvm">← Back to LVM</a></p>
+{% include "_vg_detail.html" %}
+{% endblock %}
