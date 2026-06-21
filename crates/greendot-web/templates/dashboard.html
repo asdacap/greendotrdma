@@ -5,4 +5,25 @@
 <div hx-get="/partials/exports" hx-trigger="every 5s" hx-swap="innerHTML">
   {% include "_dots.html" %}
 </div>
+
+<h2>RDMA-capable NICs</h2>
+{% if nics.is_empty() %}
+<p class="empty">Not available — no RDMA-capable network interfaces detected.</p>
+{% else %}
+<table>
+  <thead><tr><th></th><th>Interface</th><th>RDMA device</th><th>Addresses</th><th>Status</th></tr></thead>
+  <tbody>
+    {% for n in nics %}
+    <tr>
+      <td><span class="dot {{ n.dot }}"></span></td>
+      <td>{{ n.netdev }}</td>
+      <td class="small">{{ n.rdma }}</td>
+      <td class="small">{{ n.addrs }}</td>
+      <td class="small">{{ n.status }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted small">Enable RoCE or Soft-RoCE from <a href="/settings">Settings</a>.</p>
+{% endif %}
 {% endblock %}

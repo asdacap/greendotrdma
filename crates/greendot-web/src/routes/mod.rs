@@ -106,15 +106,22 @@ pub fn page<T: Template>(template: T) -> Response {
 struct DashboardTemplate {
     user: CurrentUser,
     view: exports::ExportsView,
+    /// RDMA-capable NICs and their status (empty → "not available").
+    nics: Vec<settings::NicRow>,
 }
 
 async fn dashboard(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
+    let nics = crate::actual::nic::interfaces()
+        .into_iter()
+        .filter_map(settings::nic_row)
+        .collect();
     page(DashboardTemplate {
         user,
         view: exports::gather(&state, None, None).await,
+        nics,
     })
 }
 
@@ -337,6 +344,25 @@ pub(crate) mod testutil {
             assert_eq!(status, StatusCode::OK, "{path}");
             assert!(body.contains(want), "{path}");
         }
+    }
+
+    #[tokio::test]
+    async fn dashboard_lists_rdma_capable_nics_section() {
+        let app = test_app();
+        let (cookie, _) = login(&app).await;
+        let req = Request::get("/")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        // The section header is always present; its body is either the NIC
+        // table or the "not available" fallback depending on the host.
+        assert!(body.contains("RDMA-capable NICs"), "{body}");
+        assert!(
+            body.contains("Not available") || body.contains("<th>Interface</th>"),
+            "{body}"
+        );
     }
 
     #[tokio::test]

@@ -43,8 +43,8 @@ pub struct NicRow {
 }
 
 /// Map a classified NIC to a table row, dropping interfaces that aren't RDMA
-/// candidates (virtual interfaces, IB-only netdevs).
-fn nic_row(s: NicStatus) -> Option<NicRow> {
+/// candidates (virtual interfaces, IB-only netdevs). Shared with the dashboard.
+pub(crate) fn nic_row(s: NicStatus) -> Option<NicRow> {
     let (status, dot, roce_pci, soft_roce) = match &s.kind {
         NicRdmaKind::Active => ("RDMA active", "dot-green", None, false),
         NicRdmaKind::Inactive => ("RDMA device down", "dot-yellow", None, false),
