@@ -20,7 +20,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/exports/create", post(create))
         .route("/exports/toggle", post(toggle))
         .route("/exports/delete", post(delete))
-        .route("/exports/reconcile", post(reconcile_now))
         .route("/exports/{id}/diagnose", get(diagnose_page))
         .route("/partials/exports", get(dots_partial))
 }
@@ -366,11 +365,6 @@ async fn delete(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) ->
         Err(e) => Err(e),
     };
     finish(&state, result, "export deleted".into()).await
-}
-
-async fn reconcile_now(State(state): State<Arc<AppState>>) -> Response {
-    let result = reconcile_state(&state).await;
-    finish(&state, result, "reconciled".into()).await
 }
 
 #[cfg(test)]

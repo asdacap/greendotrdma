@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings", get(settings_page))
+        .route("/settings/reconcile", post(reconcile_now))
         .route("/settings/listen", post(set_listen))
         .route("/settings/rxe", post(enable_rxe))
         .route("/settings/roce", post(set_roce))
@@ -198,6 +199,16 @@ async fn settings_page(
     page(SettingsTemplate {
         user,
         view: gather(&state, None, None).await,
+    })
+}
+
+async fn reconcile_now(State(state): State<Arc<AppState>>) -> Response {
+    let (flash, error) = match reconcile_state(&state).await {
+        Ok(()) => (Some("reconciled".into()), None),
+        Err(e) => (None, Some(format!("{e:#}"))),
+    };
+    page(SettingsPartial {
+        view: gather(&state, flash, error).await,
     })
 }
 

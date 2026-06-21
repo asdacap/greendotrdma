@@ -2,6 +2,11 @@
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
 
+  <form class="inline" hx-post="/settings/reconcile" hx-target="#settings-content" hx-swap="outerHTML">
+    <button>Reconcile now</button>
+  </form>
+  <p class="muted small">Reconciliation runs automatically on a timer; use this to force an immediate pass.</p>
+
   <h2>Dependencies</h2>
   <p class="muted small">Each operation runs a real CLI. Missing ones can be installed as a task.</p>
   <p class="muted small">Detected OS: {{ view.os_pretty }}</p>

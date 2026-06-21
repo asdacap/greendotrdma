@@ -3,10 +3,6 @@
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
 
-  <form class="inline" hx-post="/exports/reconcile" hx-target="#exports-content" hx-swap="outerHTML">
-    <button>Reconcile now</button>
-  </form>
-
   {% if view.rows.is_empty() %}
   <p class="empty">No exports yet — create one below.</p>
   {% else %}
