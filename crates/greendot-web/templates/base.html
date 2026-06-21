@@ -10,13 +10,17 @@
 <body hx-headers='{"X-Greendot-Csrf":"{{ user.csrf }}"}'>
   <nav class="sidebar">
     <div class="brand"><span class="dot dot-green"></span> GreenDotRDMA</div>
+    <p class="brand-sub">NVMe-oF · iSCSI · RDMA</p>
     <a href="/">Dashboard</a>
+    <span class="nav-label">Manage</span>
     <a href="/disks">Disks</a>
     <a href="/zfs">ZFS</a>
     <a href="/exports">Exports</a>
     <a href="/snapshots">Snapshots</a>
+    <span class="nav-label">Observe</span>
     <a href="/charts">Charts</a>
     <a href="/tasks">Tasks</a>
+    <span class="nav-label">System</span>
     <a href="/settings">Settings</a>
     <div class="sidebar-footer">
       <span class="muted">{{ user.username }}</span>
@@ -26,5 +30,17 @@
   <main>
     {% block content %}{% endblock %}
   </main>
+  <script>
+    // Mark the current section in the rail (no server round-trip needed).
+    (function () {
+      var path = location.pathname;
+      document.querySelectorAll(".sidebar a").forEach(function (a) {
+        var href = a.getAttribute("href");
+        if (href === path || (href !== "/" && path.indexOf(href) === 0)) {
+          a.setAttribute("aria-current", "page");
+        }
+      });
+    })();
+  </script>
 </body>
 </html>
