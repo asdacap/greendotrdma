@@ -1,4 +1,5 @@
 pub mod charts;
+pub mod connections;
 pub mod disks;
 pub mod exports;
 pub mod lvm;
@@ -57,6 +58,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(disks::router())
         .merge(snapshots::router())
         .merge(charts::router())
+        .merge(connections::router())
         .merge(tasks::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),

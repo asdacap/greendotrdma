@@ -44,6 +44,16 @@ impl Portal {
     }
 }
 
+/// One live iSCSI session: a connected initiator on one of our targets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IscsiSession {
+    pub target_iqn: String,
+    pub initiator_iqn: String,
+    /// The raw `info` text for an explicit-ACL session (empty for demo-mode
+    /// dynamic sessions, which expose no per-session attributes).
+    pub detail: String,
+}
+
 fn read_attr(dir: &Path, attr: &str) -> String {
     std::fs::read_to_string(dir.join(attr))
         .map(|s| s.trim().to_owned())
@@ -120,6 +130,50 @@ pub fn read(root: &Path) -> ActualLio {
     actual
 }
 
+/// Live iSCSI sessions from the LIO configfs tree (`iscsi/<iqn>/tpgt_1`).
+/// Explicit ACLs expose an `info` file naming the session state; we emit a row
+/// only when it reports a logged-in session. Demo-mode (`generate_node_acls`)
+/// sessions appear only in `dynamic_sessions`, one connected initiator IQN per
+/// line. Unprivileged, like [`read`].
+pub fn sessions(root: &Path) -> Vec<IscsiSession> {
+    let mut out = Vec::new();
+    for iqn in dir_names(&root.join("iscsi")) {
+        let tpg = root.join("iscsi").join(&iqn).join("tpgt_1");
+        if !tpg.is_dir() {
+            continue;
+        }
+        for initiator in dir_names(&tpg.join("acls")) {
+            let info = read_attr(&tpg.join("acls").join(&initiator), "info");
+            if !info.contains("LOGGED_IN") {
+                continue; // configured but not currently connected
+            }
+            out.push(IscsiSession {
+                target_iqn: iqn.clone(),
+                initiator_iqn: initiator,
+                detail: info,
+            });
+        }
+        for initiator in read_attr(&tpg, "dynamic_sessions")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+        {
+            if out
+                .iter()
+                .any(|s| s.target_iqn == iqn && s.initiator_iqn == initiator)
+            {
+                continue; // already captured as an explicit ACL
+            }
+            out.push(IscsiSession {
+                target_iqn: iqn.clone(),
+                initiator_iqn: initiator.to_owned(),
+                detail: String::new(),
+            });
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +232,52 @@ mod tests {
                     acls: vec!["iqn.1993-08.org.debian:01:abc".into()],
                 }],
             }
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn reads_iscsi_sessions_and_missing_root_is_empty() {
+        assert!(sessions(Path::new("/nonexistent/target")).is_empty());
+
+        let tmp = std::env::temp_dir().join(format!("gd-lio-sess{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let tpg = tmp.join("iscsi/iqn.2026-06.io.greendot:vm1/tpgt_1");
+        // Explicit ACL with a live (logged-in) session.
+        let live = tpg.join("acls/iqn.1993-08.org.debian:01:live");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::write(
+            live.join("info"),
+            "InitiatorName: iqn.1993-08.org.debian:01:live\nSession State: TARG_SESS_STATE_LOGGED_IN\n",
+        )
+        .unwrap();
+        // Explicit ACL that is configured but not connected — filtered out.
+        let idle = tpg.join("acls/iqn.1993-08.org.debian:01:idle");
+        std::fs::create_dir_all(&idle).unwrap();
+        std::fs::write(idle.join("info"), "No active iSCSI Session\n").unwrap();
+        // A demo-mode dynamic session — no ACL dir, listed only here.
+        std::fs::write(
+            tpg.join("dynamic_sessions"),
+            "iqn.1993-08.org.debian:01:dyn\n",
+        )
+        .unwrap();
+
+        let mut got = sessions(&tmp);
+        got.sort_by(|a, b| a.initiator_iqn.cmp(&b.initiator_iqn));
+        assert_eq!(
+            got,
+            vec![
+                IscsiSession {
+                    target_iqn: "iqn.2026-06.io.greendot:vm1".into(),
+                    initiator_iqn: "iqn.1993-08.org.debian:01:dyn".into(),
+                    detail: String::new(),
+                },
+                IscsiSession {
+                    target_iqn: "iqn.2026-06.io.greendot:vm1".into(),
+                    initiator_iqn: "iqn.1993-08.org.debian:01:live".into(),
+                    detail: "InitiatorName: iqn.1993-08.org.debian:01:live\nSession State: TARG_SESS_STATE_LOGGED_IN".into(),
+                },
+            ]
         );
         std::fs::remove_dir_all(&tmp).unwrap();
     }

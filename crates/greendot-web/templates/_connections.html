@@ -1,0 +1,42 @@
+<div id="connections-content">
+  <h2>iSCSI sessions</h2>
+  {% if view.iscsi.is_empty() %}
+  <p class="empty">No iSCSI sessions.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Export</th><th>Initiator</th><th>Target IQN</th></tr></thead>
+    <tbody>
+      {% for s in view.iscsi %}
+      <tr>
+        <td>{{ s.export }}</td>
+        <td class="small">{{ s.initiator_iqn }}</td>
+        <td class="small muted">{{ s.target_iqn }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>NVMe-oF (RDMA) peers</h2>
+  {% if view.nvme_unavailable %}
+  <p class="empty">Unavailable — could not read RDMA connection state.</p>
+  {% else if view.nvme.is_empty() %}
+  <p class="empty">No NVMe-oF RDMA peers connected.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Peer</th><th>Listen</th><th>State</th></tr></thead>
+    <tbody>
+      {% for p in view.nvme %}
+      <tr>
+        <td>{{ p.peer }}</td>
+        <td class="small">{{ p.listen }}</td>
+        <td class="small">{{ p.state }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <p class="muted small">NVMe-oF connections are shown at the RDMA transport level (peer IP only).
+  Per-NQN visibility and TCP NVMe connections require a kernel built with
+  <code>CONFIG_NVME_TARGET_DEBUGFS</code>.</p>
+</div>

@@ -10,7 +10,7 @@
       <span class="port-state">{% if r.dot_class == "dot-green" %}Live{% else if r.dot_class == "dot-yellow" %}TCP only{% else if r.dot_class == "dot-red" %}Down{% else %}Off{% endif %}</span>
     </span>
     <strong class="port-name">{{ r.name }}</strong>
-    <span class="port-meta">{{ r.transports }}</span>
+    <span class="port-meta">{{ r.transports }}{% if let Some(n) = r.clients %} · {{ n }} connected{% endif %}</span>
     <span class="port-reason">{{ r.dot_reason }}</span>
   </a>
   {% endfor %}

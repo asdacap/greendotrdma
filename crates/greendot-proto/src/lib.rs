@@ -191,6 +191,10 @@ pub enum Request {
     DevlinkReload {
         pci: PciAddress,
     },
+    /// Read live RDMA connections (`rdma -j resource show cm_id`): a privileged
+    /// *read* used to surface NVMe-oF/iSER peers the kernel exposes no other
+    /// way (this kernel lacks CONFIG_NVME_TARGET_DEBUGFS).
+    RdmaResources,
     InstallPackages {
         packages: Vec<PackageName>,
     },
@@ -340,6 +344,7 @@ mod tests {
     #[case::devlink_reload(Request::DevlinkReload {
         pci: PciAddress::new("0000:00:10.0").unwrap(),
     })]
+    #[case::rdma_resources(Request::RdmaResources)]
     #[case::install(Request::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
     })]

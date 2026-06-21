@@ -81,6 +81,19 @@ pub fn devlink_reload(pci: &PciAddress) -> TaskSpec {
     devlink(&["dev", "reload", &format!("pci/{pci}")])
 }
 
+/// `rdma -j resource show cm_id` — list live RDMA connections as JSON. A
+/// privileged *read* (collected, not recorded) used to surface NVMe-oF/iSER
+/// peers; root guarantees peer addresses are visible.
+pub fn rdma_resources() -> TaskSpec {
+    TaskSpec::new(
+        "rdma",
+        ["-j", "resource", "show", "cm_id"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -142,6 +155,16 @@ mod tests {
         assert_eq!(
             devlink_reload(&pci).args,
             ["dev", "reload", "pci/0000:00:10.0"].map(String::from)
+        );
+    }
+
+    #[test]
+    fn rdma_resources_args() {
+        let spec = rdma_resources();
+        assert_eq!(spec.command, "rdma");
+        assert_eq!(
+            spec.args,
+            ["-j", "resource", "show", "cm_id"].map(String::from)
         );
     }
 }

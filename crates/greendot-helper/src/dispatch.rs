@@ -65,6 +65,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::DevlinkParams { pci } => Dispatch::Task(modules::devlink_params(&pci)),
         Request::RoceEnableParam { pci } => Dispatch::Task(modules::devlink_roce_enable(&pci)),
         Request::DevlinkReload { pci } => Dispatch::Task(modules::devlink_reload(&pci)),
+        Request::RdmaResources => Dispatch::Task(modules::rdma_resources()),
 
         Request::PartitionTableCreate { disk } => Dispatch::Task(partition::table_create(&disk)),
         Request::PartitionCreate {

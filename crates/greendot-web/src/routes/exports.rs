@@ -85,6 +85,9 @@ pub struct ExportRow {
     pub device: String,
     pub transports: String,
     pub hosts: String,
+    /// Connected client count for iSCSI (live sessions); `None` for NVMe-oF,
+    /// whose RDMA peers can't be attributed per-export on this kernel.
+    pub clients: Option<usize>,
     pub enabled: bool,
     /// RDMA was requested but the export isn't fully serving over RDMA — offer
     /// the per-criterion Diagnose page.
@@ -113,6 +116,7 @@ pub async fn gather(
     };
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let actual_lio = actual::lio::read(&state.lio_root);
+    let iscsi_sessions = actual::lio::sessions(&state.lio_root);
     let rdma = actual::rdma::devices();
     let mut in_use: HashSet<String> = HashSet::new();
     match state.db.list_exports() {
@@ -149,6 +153,18 @@ pub async fn gather(
                             transports.push(label);
                         }
                     }
+                    let clients = match e.kind {
+                        ExportKind::Iscsi => {
+                            let iqn = e.iqn();
+                            Some(
+                                iscsi_sessions
+                                    .iter()
+                                    .filter(|s| s.target_iqn == iqn.as_str())
+                                    .count(),
+                            )
+                        }
+                        ExportKind::Nvme => None,
+                    };
                     ExportRow {
                         id: e.id,
                         name: e.name.clone(),
@@ -165,6 +181,7 @@ pub async fn gather(
                         } else {
                             format!("{} allowed", e.initiators.len())
                         },
+                        clients,
                         enabled: e.enabled,
                         diagnose,
                     }
