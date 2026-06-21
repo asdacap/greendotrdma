@@ -22,6 +22,7 @@
             rust-analyzer
             pkg-config
             cargo-deb
+            cargo-tarpaulin # line coverage (CI gates at --fail-under 65)
             patchelf # retarget release binaries onto Ubuntu's loader for the .deb
           ];
 

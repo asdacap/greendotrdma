@@ -44,5 +44,8 @@ jobs:
       - name: clippy
         run: nix develop --command cargo-clippy --all-targets -- -D warnings
 
-      - name: test
-        run: nix develop --command cargo test --workspace
+      # tarpaulin runs the full test suite under instrumentation and fails the
+      # build if line coverage drops below 65%. Invoked directly (not `cargo
+      # tarpaulin`) for the same dev-shell shim reason as fmt/clippy above.
+      - name: test + coverage (>=65%)
+        run: nix develop --command cargo-tarpaulin --workspace --fail-under 65 --timeout 120 --out Stdout
