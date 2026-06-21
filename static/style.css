@@ -456,6 +456,27 @@ form.inline {
   flex-wrap: wrap;
 }
 
+/* Disk-page create/wipe actions: a labelled column set off below the table. */
+.disk-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.disk-actions > form.inline { margin: 0; }   /* the column gap owns the spacing */
+
+.action-label {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.danger-label { color: var(--red); }
+
 /* ---- Charts ------------------------------------------------------------- */
 
 .chartgrid {

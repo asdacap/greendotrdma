@@ -69,17 +69,22 @@
     </tbody>
   </table>
   {% endif %}
-  <form class="inline" hx-post="/disks/part/create" hx-target="#disks-content" hx-swap="outerHTML">
-    <input type="hidden" name="disk" value="{{ d.name }}">
-    <input name="size" size="6" placeholder="rest">
-    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-    <input name="label" size="10" placeholder="label" required>
-    <button>Add partition</button>
-  </form>
-  <form class="inline" hx-post="/disks/table" hx-target="#disks-content" hx-swap="outerHTML"
-        hx-confirm="Write a brand-new empty GPT to /dev/{{ d.name }}? ALL existing partitions and data are lost.">
-    <input type="hidden" name="disk" value="{{ d.name }}">
-    <button class="danger">New GPT (wipe)</button>
-  </form>
+  <div class="disk-actions">
+    <form class="inline" hx-post="/disks/part/create" hx-target="#disks-content" hx-swap="outerHTML">
+      <span class="action-label">Add partition</span>
+      <input type="hidden" name="disk" value="{{ d.name }}">
+      <input name="size" size="6" placeholder="size">
+      <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+      <input name="label" size="10" placeholder="label" required>
+      <button>Add</button>
+      <span class="muted small">Leave size blank to use the rest of the disk{% if !d.no_space %} · {{ d.free }} free{% endif %}.</span>
+    </form>
+    <form class="inline" hx-post="/disks/table" hx-target="#disks-content" hx-swap="outerHTML"
+          hx-confirm="Write a brand-new empty GPT to /dev/{{ d.name }}? ALL existing partitions and data are lost.">
+      <span class="action-label danger-label">Reset disk</span>
+      <input type="hidden" name="disk" value="{{ d.name }}">
+      <button class="danger">New GPT (wipe)</button>
+    </form>
+  </div>
   {% endfor %}
 </div>

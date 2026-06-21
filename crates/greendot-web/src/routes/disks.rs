@@ -70,6 +70,7 @@ fn shrinkability(fstype: Option<&str>, mounted: bool) -> Shrink {
         Some("ext2" | "ext3" | "ext4" | "btrfs") => Shrink::No("mounted — unmount it first"),
         Some("xfs") => Shrink::No("XFS cannot be shrunk"),
         Some("zfs_member") => Shrink::No("part of a ZFS pool"),
+        Some("LVM2_member") => Shrink::No("part of an LVM volume group"),
         Some(_) => Shrink::No("this filesystem cannot be shrunk"),
     }
 }
@@ -78,6 +79,7 @@ fn fs_display(fstype: Option<&str>) -> String {
     match fstype {
         None => "no filesystem".into(),
         Some("zfs_member") => "ZFS".into(),
+        Some("LVM2_member") => "LVM".into(),
         Some(f) => f.into(),
     }
 }
@@ -506,9 +508,32 @@ async fn part_add_to_pool(
 
 #[cfg(test)]
 mod tests {
+    use super::{Shrink, fs_display, shrinkability};
     use crate::routes::testutil::{form_post, login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(None, "no filesystem")]
+    #[case(Some("ext4"), "ext4")]
+    #[case(Some("zfs_member"), "ZFS")]
+    #[case(Some("LVM2_member"), "LVM")]
+    fn fs_display_names_special_members(#[case] fstype: Option<&str>, #[case] expected: &str) {
+        assert_eq!(fs_display(fstype), expected);
+    }
+
+    #[rstest]
+    #[case(Some("zfs_member"), "part of a ZFS pool")]
+    #[case(Some("LVM2_member"), "part of an LVM volume group")]
+    #[case(Some("xfs"), "XFS cannot be shrunk")]
+    #[case(Some("reiserfs"), "this filesystem cannot be shrunk")]
+    fn shrinkability_blocks_claimed_members(#[case] fstype: Option<&str>, #[case] reason: &str) {
+        match shrinkability(fstype, false) {
+            Shrink::No(r) => assert_eq!(r, reason),
+            _ => panic!("expected Shrink::No for {fstype:?}"),
+        }
+    }
 
     #[tokio::test]
     async fn disks_page_and_partition_mutations() {

@@ -122,10 +122,17 @@ pub fn parse_lsblk(json: &str) -> Result<Vec<Disk>> {
 fn device_label(path: &str, size: u64, fstype: Option<&str>) -> String {
     let fs = match fstype {
         Some("zfs_member") => "ZFS",
+        Some("LVM2_member") => "LVM",
         Some(f) => f,
         None => "no filesystem",
     };
     format!("{path} — {} {fs}", human_bytes(size))
+}
+
+/// Filesystems that mean the device is already claimed (ZFS pool member or LVM
+/// physical volume) and so must not be offered for new pools/exports.
+fn in_use_fstype(fstype: Option<&str>) -> bool {
+    matches!(fstype, Some("zfs_member" | "LVM2_member"))
 }
 
 /// Pure core of [`available_block_devices`]: given the disk inventory, the
@@ -144,7 +151,7 @@ pub fn available_from_disks(
         if d.partitions.is_empty() {
             let path = format!("/dev/{}", d.name);
             if d.mountpoint.is_none()
-                && d.fstype.as_deref() != Some("zfs_member")
+                && !in_use_fstype(d.fstype.as_deref())
                 && !in_use.contains(&path)
             {
                 out.push(AvailDevice {
@@ -159,7 +166,7 @@ pub fn available_from_disks(
             for p in &d.partitions {
                 let path = format!("/dev/{}", p.name);
                 if p.mountpoint.is_none()
-                    && p.fstype.as_deref() != Some("zfs_member")
+                    && !in_use_fstype(p.fstype.as_deref())
                     && !in_use.contains(&path)
                 {
                     out.push(AvailDevice {
@@ -226,6 +233,16 @@ pub async fn disks() -> Result<Vec<Disk>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rstest::rstest;
+
+    #[rstest]
+    #[case(Some("ext4"), "/dev/sda1 — 1.0 GiB ext4")]
+    #[case(Some("zfs_member"), "/dev/sda1 — 1.0 GiB ZFS")]
+    #[case(Some("LVM2_member"), "/dev/sda1 — 1.0 GiB LVM")]
+    #[case(None, "/dev/sda1 — 1.0 GiB no filesystem")]
+    fn device_label_names_special_members(#[case] fstype: Option<&str>, #[case] expected: &str) {
+        assert_eq!(device_label("/dev/sda1", 1 << 30, fstype), expected);
+    }
 
     #[test]
     fn parses_lsblk_fixture_filtering_zvols_and_non_disks() {
@@ -301,6 +318,7 @@ mod tests {
                     part("sda2", None, Some("ext4")),          // available
                     part("sda3", None, Some("zfs_member")),    // pool member → out
                     part("sda4", None, None),                  // in_use → out
+                    part("sda5", None, Some("LVM2_member")),   // LVM PV → out
                 ],
             ),
             // empty disk → offered whole.
