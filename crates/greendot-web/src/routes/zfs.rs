@@ -4,7 +4,7 @@ use crate::actual::zfs::{self, DsKind};
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
 use askama::Template;
-use axum::extract::{Form, Query, State};
+use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
@@ -16,11 +16,12 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/zfs", axum::routing::get(zfs_page))
+        .route("/zfs/pool/create", axum::routing::get(pool_create_page))
+        .route("/zfs/pool", post(pool_create))
+        .route("/zfs/pool/{name}", axum::routing::get(pool_detail_page))
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
         .route("/zfs/zvol/delete", post(zvol_delete))
-        .route("/zfs/pool/create", axum::routing::get(pool_create_page))
-        .route("/zfs/pool", post(pool_create))
 }
 
 pub struct PoolRow {
@@ -33,26 +34,32 @@ pub struct PoolRow {
     pub healthy: bool,
 }
 
-pub struct DatasetRow {
+impl PoolRow {
+    fn new(p: zfs::Pool) -> Self {
+        PoolRow {
+            used_percent: (p.alloc.saturating_mul(100) / p.size.max(1)) as u8,
+            size: human_bytes(p.size),
+            free: human_bytes(p.free),
+            frag: p.frag_percent.map_or("–".into(), |f| format!("{f}%")),
+            healthy: p.health == "ONLINE",
+            health: p.health,
+            name: p.name,
+        }
+    }
+}
+
+pub struct ZvolRow {
     pub name: String,
-    pub indent_px: usize,
-    pub kind_label: &'static str,
     pub used: String,
-    pub avail: String,
     pub volsize: String,
-    pub is_volume: bool,
 }
 
 #[derive(Default)]
 pub struct ZfsView {
     pub pools: Vec<PoolRow>,
-    pub datasets: Vec<DatasetRow>,
-    pub parents: Vec<String>,
     /// True when the `zpool`/`zfs` binaries are absent on this host.
     pub not_installed: bool,
     pub error: Option<String>,
-    pub flash: Option<String>,
-    pub form_error: Option<String>,
 }
 
 #[derive(Template)]
@@ -62,55 +69,13 @@ struct ZfsTemplate {
     view: ZfsView,
 }
 
-#[derive(Template)]
-#[template(path = "_zfs.html")]
-struct ZfsPartial {
-    view: ZfsView,
-}
-
-async fn gather(flash: Option<String>, form_error: Option<String>) -> ZfsView {
-    let mut view = ZfsView {
-        flash,
-        form_error,
-        ..Default::default()
-    };
-    match tokio::try_join!(zfs::pools(), zfs::datasets()) {
-        Ok((Some(pools), Some(datasets))) => {
-            view.pools = pools
-                .into_iter()
-                .map(|p| PoolRow {
-                    used_percent: (p.alloc.saturating_mul(100) / p.size.max(1)) as u8,
-                    size: human_bytes(p.size),
-                    free: human_bytes(p.free),
-                    frag: p.frag_percent.map_or("–".into(), |f| format!("{f}%")),
-                    healthy: p.health == "ONLINE",
-                    health: p.health,
-                    name: p.name,
-                })
-                .collect();
-            view.parents = datasets
-                .iter()
-                .filter(|d| d.kind == DsKind::Filesystem)
-                .map(|d| d.name.clone())
-                .collect();
-            view.datasets = datasets
-                .into_iter()
-                .map(|d| DatasetRow {
-                    indent_px: d.name.matches('/').count() * 18,
-                    kind_label: match d.kind {
-                        DsKind::Filesystem => "filesystem",
-                        DsKind::Volume => "zvol",
-                    },
-                    used: human_bytes(d.used),
-                    avail: human_bytes(d.avail),
-                    volsize: d.volsize.map_or(String::new(), human_bytes),
-                    is_volume: d.kind == DsKind::Volume,
-                    name: d.name,
-                })
-                .collect();
-        }
-        // Either binary missing → ZFS isn't installed on this host.
-        Ok(_) => view.not_installed = true,
+/// The ZFS landing page: a pool index that links into each pool's own page.
+async fn gather() -> ZfsView {
+    let mut view = ZfsView::default();
+    match zfs::pools().await {
+        Ok(Some(pools)) => view.pools = pools.into_iter().map(PoolRow::new).collect(),
+        // Absent `zpool` ⇒ ZFS isn't installed on this host.
+        Ok(None) => view.not_installed = true,
         Err(e) => view.error = Some(format!("could not read ZFS state: {e:#}")),
     }
     view
@@ -122,7 +87,86 @@ async fn zfs_page(
 ) -> Response {
     page(ZfsTemplate {
         user,
-        view: gather(None, None).await,
+        view: gather().await,
+    })
+}
+
+// ---- Per-pool page (zvol listing + creation) ----
+
+#[derive(Default)]
+pub struct PoolDetailView {
+    pub name: String,
+    /// `None` when the named pool doesn't exist on this host.
+    pub pool: Option<PoolRow>,
+    pub zvols: Vec<ZvolRow>,
+    /// Filesystems in this pool, offered as zvol parents.
+    pub parents: Vec<String>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "pool_detail.html")]
+struct PoolDetailTemplate {
+    user: CurrentUser,
+    view: PoolDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_pool_detail.html")]
+struct PoolDetailPartial {
+    view: PoolDetailView,
+}
+
+async fn gather_pool_detail(
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> PoolDetailView {
+    let mut view = PoolDetailView {
+        name: name.to_owned(),
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match tokio::try_join!(zfs::pools(), zfs::datasets()) {
+        Ok((Some(pools), Some(datasets))) => {
+            view.pool = pools.into_iter().find(|p| p.name == name).map(PoolRow::new);
+            let prefix = format!("{name}/");
+            view.parents = datasets
+                .iter()
+                .filter(|d| {
+                    d.kind == DsKind::Filesystem && (d.name == name || d.name.starts_with(&prefix))
+                })
+                .map(|d| d.name.clone())
+                .collect();
+            view.zvols = datasets
+                .into_iter()
+                .filter(|d| d.kind == DsKind::Volume && d.name.starts_with(&prefix))
+                .map(|d| ZvolRow {
+                    used: human_bytes(d.used),
+                    volsize: d.volsize.map_or(String::new(), human_bytes),
+                    name: d.name,
+                })
+                .collect();
+        }
+        // Either binary missing → ZFS isn't installed on this host.
+        Ok(_) => view.not_installed = true,
+        Err(e) => view.error = Some(format!("could not read ZFS state: {e:#}")),
+    }
+    view
+}
+
+async fn pool_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(name): Path<String>,
+) -> Response {
+    page(PoolDetailTemplate {
+        user,
+        view: gather_pool_detail(&name, None, None).await,
     })
 }
 
@@ -138,22 +182,34 @@ pub fn parse_size(value: &str, unit: &str) -> Option<u64> {
     value.checked_mul(mult).filter(|&b| b > 0)
 }
 
-/// Runs the request as a recorded task and renders the partial with its
-/// outcome.
-async fn run(state: &AppState, req: Request, kind: &str, title: &str, success: String) -> Response {
+/// The pool (first path component) a dataset belongs to.
+fn pool_of(dataset: &str) -> &str {
+    dataset.split('/').next().unwrap_or(dataset)
+}
+
+/// Runs a zvol request as a recorded task and re-renders the owning pool's
+/// detail partial with the outcome.
+async fn run_zvol(
+    state: &AppState,
+    req: Request,
+    kind: &str,
+    title: &str,
+    success: String,
+    pool: &str,
+) -> Response {
     let view = match crate::task_runner::run(state, req, kind, title).await {
         Ok(outcome) => {
             let (flash, error) = outcome.message(&success);
-            gather(flash, error).await
+            gather_pool_detail(pool, flash, error).await
         }
-        Err(e) => gather(None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_pool_detail(pool, None, Some(format!("{e:#}"))).await,
     };
-    page(ZfsPartial { view })
+    page(PoolDetailPartial { view })
 }
 
-async fn form_failed(message: impl Into<String>) -> Response {
-    page(ZfsPartial {
-        view: gather(None, Some(message.into())).await,
+async fn zvol_failed(pool: &str, message: impl Into<String>) -> Response {
+    page(PoolDetailPartial {
+        view: gather_pool_detail(pool, None, Some(message.into())).await,
     })
 }
 
@@ -170,17 +226,18 @@ struct CreateForm {
 }
 
 async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
+    let pool = pool_of(&form.parent).to_owned();
     let Ok(dataset) = DatasetName::new(format!("{}/{}", form.parent, form.name.trim())) else {
-        return form_failed(format!("invalid zvol name {:?}", form.name)).await;
+        return zvol_failed(&pool, format!("invalid zvol name {:?}", form.name)).await;
     };
     let Some(size) = parse_size(&form.size, &form.unit) else {
-        return form_failed("invalid size").await;
+        return zvol_failed(&pool, "invalid size").await;
     };
     let volblocksize = match form.volblocksize.as_str() {
         "" => None,
         v => match v.parse() {
             Ok(v) => Some(v),
-            Err(_) => return form_failed("invalid volblocksize").await,
+            Err(_) => return zvol_failed(&pool, "invalid volblocksize").await,
         },
     };
     let req = Request::ZvolCreate {
@@ -189,12 +246,13 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
         volblocksize,
         sparse: form.sparse.is_some(),
     };
-    run(
+    run_zvol(
         &state,
         req,
         "zvol-create",
         &format!("create zvol {dataset}"),
         format!("created zvol {dataset}"),
+        &pool,
     )
     .await
 }
@@ -207,22 +265,24 @@ struct ResizeForm {
 }
 
 async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<ResizeForm>) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return form_failed("invalid dataset name").await;
+        return zvol_failed(&pool, "invalid dataset name").await;
     };
     let Some(new_size) = parse_size(&form.size, &form.unit) else {
-        return form_failed("invalid size").await;
+        return zvol_failed(&pool, "invalid size").await;
     };
     let req = Request::ZvolResize {
         dataset: dataset.clone(),
         new_size,
     };
-    run(
+    run_zvol(
         &state,
         req,
         "zvol-resize",
         &format!("resize {dataset}"),
         format!("resized {dataset}"),
+        &pool,
     )
     .await
 }
@@ -233,18 +293,20 @@ struct DeleteForm {
 }
 
 async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<DeleteForm>) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return form_failed("invalid dataset name").await;
+        return zvol_failed(&pool, "invalid dataset name").await;
     };
     let req = Request::ZvolDelete {
         dataset: dataset.clone(),
     };
-    run(
+    run_zvol(
         &state,
         req,
         "zvol-delete",
         &format!("delete {dataset}"),
         format!("deleted {dataset}"),
+        &pool,
     )
     .await
 }
@@ -428,6 +490,14 @@ mod tests {
         assert_eq!(parse_size(value, unit), expected);
     }
 
+    #[rstest]
+    #[case::pool_root("tank", "tank")]
+    #[case::nested("tank/vols/vm1", "tank")]
+    #[case::bare("rpool", "rpool")]
+    fn pool_derivation(#[case] dataset: &str, #[case] expected: &str) {
+        assert_eq!(pool_of(dataset), expected);
+    }
+
     mod routes {
         use crate::routes::testutil::{form_post, login, send, test_app};
         use axum::body::Body;
@@ -438,9 +508,9 @@ mod tests {
             let app = test_app();
             let (cookie, csrf) = login(&app).await;
 
-            // Page renders. ZFS may be unavailable on the test host, in which
-            // case the create form is replaced by a "not installed" notice —
-            // either is a successful render, not a failure.
+            // The ZFS index lists pools and links to pool creation — unless ZFS
+            // is unavailable on the test host, in which case it says so. Either
+            // is a successful render, not a failure.
             let req = HttpRequest::get("/zfs")
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
@@ -448,7 +518,22 @@ mod tests {
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
             assert!(
-                body.contains("Create zvol") || body.contains("ZFS is not installed"),
+                body.contains("Create pool") || body.contains("ZFS is not installed"),
+                "{body}"
+            );
+
+            // The per-pool page hosts the create-zvol form (or the same notice,
+            // or a "not found" when the pool is absent).
+            let req = HttpRequest::get("/zfs/pool/tank")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap();
+            let (status, _, body) = send(&app, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.contains("Create zvol")
+                    || body.contains("ZFS is not installed")
+                    || body.contains("not found"),
                 "{body}"
             );
 
