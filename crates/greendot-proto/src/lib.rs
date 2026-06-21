@@ -61,6 +61,46 @@ pub enum Request {
         disk: BlockDev,
         number: u32,
     },
+    /// Shrink a partition in place (start sector preserved). The web side runs
+    /// the filesystem shrink first, then this.
+    PartitionResize {
+        disk: BlockDev,
+        number: u32,
+        size_sectors: u64,
+    },
+
+    // Filesystem shrink steps (each one CLI command; the web side sequences
+    // them, filesystem always before the partition).
+    Fsck {
+        device: DevicePath,
+    },
+    ResizeExt {
+        device: DevicePath,
+        new_size_sectors: u64,
+    },
+    BtrfsMount {
+        device: DevicePath,
+        mount_path: MountPath,
+    },
+    BtrfsResize {
+        mount_path: MountPath,
+        new_size: u64,
+    },
+    Umount {
+        mount_path: MountPath,
+    },
+
+    // ZFS pools (zvol ops are above; reads happen unprivileged in greendot-web)
+    PoolCreate {
+        name: PoolName,
+        vdev: VdevLayout,
+        devices: Vec<DevicePath>,
+        ashift: Option<u8>,
+    },
+    PoolDeviceAdd {
+        pool: PoolName,
+        device: DevicePath,
+    },
 
     // NVMe-oF / iSCSI targets: the helper applies NvmetDesired directly to
     // configfs, and renders LioDesired to targetctl JSON (restore command).
@@ -170,6 +210,32 @@ mod tests {
             }],
         },
     })]
+    #[case::part_resize(Request::PartitionResize {
+        disk: BlockDev::new("sdb").unwrap(),
+        number: 2,
+        size_sectors: 2097152,
+    })]
+    #[case::resize_ext(Request::ResizeExt {
+        device: DevicePath::new("/dev/sdb2").unwrap(),
+        new_size_sectors: 2097152,
+    })]
+    #[case::btrfs_resize(Request::BtrfsResize {
+        mount_path: MountPath::new("/run/greendotrdma/btrfs-resize-sdb2").unwrap(),
+        new_size: 1 << 30,
+    })]
+    #[case::pool_create(Request::PoolCreate {
+        name: PoolName::new("tank").unwrap(),
+        vdev: VdevLayout::Mirror,
+        devices: vec![
+            DevicePath::new("/dev/sdb").unwrap(),
+            DevicePath::new("/dev/sdc").unwrap(),
+        ],
+        ashift: Some(12),
+    })]
+    #[case::pool_add(Request::PoolDeviceAdd {
+        pool: PoolName::new("tank").unwrap(),
+        device: DevicePath::new("/dev/sdd").unwrap(),
+    })]
     #[case::modules(Request::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
@@ -222,6 +288,8 @@ mod tests {
             r#"{"op":"zvol_delete","dataset":"../../etc"}"#,
             r#"{"op":"rxe_link_add","netdev":"eth0/../x"}"#,
             r#"{"op":"install_packages","packages":["foo;rm -rf"]}"#,
+            r#"{"op":"pool_create","name":"mirror","vdev":"stripe","devices":["/dev/sdb"],"ashift":null}"#,
+            r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
             r#"{"op":"no_such_op"}"#,
         ] {
             assert!(serde_json::from_str::<Request>(bad).is_err(), "{bad}");

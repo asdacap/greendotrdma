@@ -51,6 +51,46 @@ pub(crate) fn device_path(s: &str) -> bool {
     }
 }
 
+/// vdev keywords and other names `zpool` reserves; a pool may not be named any
+/// of these (they would be ambiguous with the `zpool create` grammar).
+pub(crate) const RESERVED_VDEV_KEYWORDS: &[&str] = &[
+    "mirror",
+    "raidz",
+    "raidz1",
+    "raidz2",
+    "raidz3",
+    "draid",
+    "draid1",
+    "draid2",
+    "draid3",
+    "spare",
+    "log",
+    "logs",
+    "cache",
+    "dedup",
+    "special",
+    "replacing",
+];
+
+pub(crate) fn pool_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 255
+        && s.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_.:-".contains(c))
+        && !RESERVED_VDEV_KEYWORDS
+            .iter()
+            .any(|k| k.eq_ignore_ascii_case(s))
+}
+
+/// The helper's private btrfs temp-mount path: exactly
+/// `/run/greendotrdma/btrfs-resize-<block_dev>`, so no caller can point a root
+/// mount/umount at an arbitrary location.
+pub(crate) fn mount_path(s: &str) -> bool {
+    s.strip_prefix("/run/greendotrdma/btrfs-resize-")
+        .is_some_and(block_dev)
+}
+
 pub(crate) fn netdev(s: &str) -> bool {
     (1..=15).contains(&s.len())
         && s != "."

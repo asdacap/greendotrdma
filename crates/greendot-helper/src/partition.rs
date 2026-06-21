@@ -38,6 +38,17 @@ pub fn partition_delete(disk: &BlockDev, number: u32) -> TaskSpec {
     TaskSpec::new("sfdisk", s(&["--delete", &dev(disk), &number.to_string()]))
 }
 
+/// Resizes partition `number` to `size_sectors`, preserving its start. The
+/// script carries *only* `size=` — with `-N`, sfdisk keeps the unspecified
+/// start sector (emitting `start=` would move the partition and corrupt data).
+pub fn partition_resize(disk: &BlockDev, number: u32, size_sectors: u64) -> TaskSpec {
+    TaskSpec::with_stdin(
+        "sfdisk",
+        s(&["-N", &number.to_string(), &dev(disk)]),
+        format!("size={size_sectors}\n"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -73,6 +84,19 @@ mod tests {
         assert_eq!(
             (d.command.as_str(), d.args, d.stdin),
             ("sfdisk", s(&["--delete", "/dev/sdb", "3"]), None)
+        );
+    }
+
+    #[test]
+    fn partition_resize_keeps_start() {
+        let r = partition_resize(&disk(), 2, 2097152);
+        assert_eq!(r.command, "sfdisk");
+        assert_eq!(r.args, s(&["-N", "2", "/dev/sdb"]));
+        let stdin = r.stdin.as_deref().unwrap();
+        assert_eq!(stdin, "size=2097152\n");
+        assert!(
+            !stdin.contains("start="),
+            "must not move the partition start"
         );
     }
 }

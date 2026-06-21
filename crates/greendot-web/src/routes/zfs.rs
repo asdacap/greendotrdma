@@ -1,13 +1,16 @@
 use super::{AppState, page};
+use crate::actual::block;
 use crate::actual::zfs::{self, DsKind};
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
 use askama::Template;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Query, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, Request};
+use greendot_proto::{DatasetName, DevicePath, PoolName, Request, VdevLayout};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -16,6 +19,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
         .route("/zfs/zvol/delete", post(zvol_delete))
+        .route("/zfs/pool/create", axum::routing::get(pool_create_page))
+        .route("/zfs/pool", post(pool_create))
 }
 
 pub struct PoolRow {
@@ -244,6 +249,165 @@ async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<Delete
     .await
 }
 
+// ---- Dedicated ZFS pool creation form ----
+
+pub struct PoolDeviceOption {
+    pub path: String,
+    pub label: String,
+    pub checked: bool,
+}
+
+#[derive(Default)]
+pub struct PoolCreateView {
+    pub devices: Vec<PoolDeviceOption>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "pool_create.html")]
+struct PoolCreateTemplate {
+    user: CurrentUser,
+    view: PoolCreateView,
+}
+
+#[derive(Template)]
+#[template(path = "_pool_create.html")]
+struct PoolCreatePartial {
+    view: PoolCreateView,
+}
+
+/// Available devices for a new pool: the shared inventory, minus zvols and
+/// filesystem-bearing partitions (a vdev must be an empty raw device).
+async fn gather_pool_create(
+    state: &AppState,
+    selected: &HashSet<String>,
+    error: Option<String>,
+) -> PoolCreateView {
+    // Absent `zpool` ⇒ ZFS not installed; an error still counts as installed.
+    if matches!(zfs::pools().await, Ok(None)) {
+        return PoolCreateView {
+            not_installed: true,
+            error,
+            ..Default::default()
+        };
+    }
+    let in_use: HashSet<String> = state
+        .db
+        .list_exports()
+        .map(|es| es.into_iter().map(|e| e.device_path).collect())
+        .unwrap_or_default();
+    let devices = block::available_block_devices(&in_use)
+        .await
+        .into_iter()
+        .filter(|d| d.kind != block::AvailKind::Zvol && d.fstype.is_none())
+        .map(|d| PoolDeviceOption {
+            checked: selected.contains(&d.path),
+            path: d.path,
+            label: d.label,
+        })
+        .collect();
+    PoolCreateView {
+        devices,
+        not_installed: false,
+        error,
+    }
+}
+
+async fn pool_create_failed(
+    state: &AppState,
+    selected: HashSet<String>,
+    message: String,
+) -> Response {
+    page(PoolCreatePartial {
+        view: gather_pool_create(state, &selected, Some(message)).await,
+    })
+}
+
+#[derive(Deserialize)]
+struct PoolCreateQuery {
+    #[serde(default)]
+    device: String,
+}
+
+async fn pool_create_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Query(q): Query<PoolCreateQuery>,
+) -> Response {
+    let selected: HashSet<String> = if q.device.is_empty() {
+        HashSet::new()
+    } else {
+        HashSet::from([q.device])
+    };
+    page(PoolCreateTemplate {
+        user,
+        view: gather_pool_create(&state, &selected, None).await,
+    })
+}
+
+async fn pool_create(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    // `devices` arrives as repeated keys, so read the raw pair list.
+    let (mut name, mut vdev, mut ashift) = (String::new(), String::new(), String::new());
+    let mut selected: HashSet<String> = HashSet::new();
+    let mut devices: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "name" => name = v,
+            "vdev" => vdev = v,
+            "ashift" => ashift = v,
+            "devices" => {
+                selected.insert(v.clone());
+                devices.push(v);
+            }
+            _ => {}
+        }
+    }
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_create_failed(&state, selected, format!("invalid pool name {name:?}")).await;
+    };
+    let Some(layout) = VdevLayout::parse(vdev.trim()) else {
+        return pool_create_failed(&state, selected, "choose a vdev layout".into()).await;
+    };
+    let mut device_paths = Vec::new();
+    for d in &devices {
+        let Ok(dp) = DevicePath::new(d.trim()) else {
+            return pool_create_failed(&state, selected, format!("invalid device {d:?}")).await;
+        };
+        device_paths.push(dp);
+    }
+    if device_paths.len() < layout.min_devices() {
+        let msg = format!("{vdev} needs at least {} devices", layout.min_devices());
+        return pool_create_failed(&state, selected, msg).await;
+    }
+    let ashift = match ashift.trim() {
+        "" => None,
+        a => match a.parse::<u8>() {
+            Ok(n) if (9..=16).contains(&n) => Some(n),
+            _ => return pool_create_failed(&state, selected, "ashift must be 9–16".into()).await,
+        },
+    };
+    let title = format!("create pool {pool}");
+    let req = Request::PoolCreate {
+        name: pool,
+        vdev: layout,
+        devices: device_paths,
+        ashift,
+    };
+    match crate::task_runner::run(&state, req, "pool-create", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, "/zfs"),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "pool creation failed".into());
+            pool_create_failed(&state, selected, msg).await
+        }
+        Err(e) => pool_create_failed(&state, selected, format!("{e:#}")).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,6 +477,54 @@ mod tests {
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
             assert!(body.contains("invalid zvol name"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn pool_create_form_and_validation() {
+            let app = test_app();
+            let (cookie, csrf) = login(&app).await;
+            let auth = |mut req: HttpRequest<Body>| {
+                req.headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+                req.headers_mut()
+                    .insert("x-greendot-csrf", csrf.parse().unwrap());
+                req
+            };
+
+            // The dedicated form renders (whether or not ZFS is installed).
+            let req = auth(
+                HttpRequest::get("/zfs/pool/create?device=%2Fdev%2Fsdb")
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+            let (status, _, body) = send(&app, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("Create ZFS pool"), "{body}");
+
+            // A reserved vdev keyword as the pool name is rejected.
+            let req = auth(form_post(
+                "/zfs/pool",
+                "name=mirror&vdev=stripe&devices=%2Fdev%2Fsdb",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid pool name"), "{body}");
+
+            // Too few devices for the chosen layout.
+            let req = auth(form_post(
+                "/zfs/pool",
+                "name=tank&vdev=mirror&devices=%2Fdev%2Fsdb",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("at least 2 devices"), "{body}");
+
+            // Valid mirror (two repeated devices= keys) → success redirect.
+            let req = auth(form_post(
+                "/zfs/pool",
+                "name=tank&vdev=mirror&devices=%2Fdev%2Fsdb&devices=%2Fdev%2Fsdc",
+            ));
+            let (status, headers, _) = send(&app, req).await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+            assert_eq!(headers[header::LOCATION], "/zfs");
         }
     }
 }
