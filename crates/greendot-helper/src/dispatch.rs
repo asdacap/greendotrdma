@@ -3,7 +3,7 @@
 //! are never recorded as tasks (auth would store the password).
 
 use crate::cmd::TaskSpec;
-use crate::{install, lio, modules, pam, partition, zfs};
+use crate::{fs, install, lio, modules, pam, partition, zfs};
 use greendot_proto::{NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
@@ -77,6 +77,35 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         )),
         Request::PartitionDelete { disk, number } => {
             Dispatch::Task(partition::partition_delete(&disk, number))
+        }
+        Request::PartitionResize {
+            disk,
+            number,
+            size_sectors,
+        } => Dispatch::Task(partition::partition_resize(&disk, number, size_sectors)),
+
+        Request::Fsck { device } => Dispatch::Task(fs::fsck(&device)),
+        Request::ResizeExt {
+            device,
+            new_size_sectors,
+        } => Dispatch::Task(fs::resize_ext(&device, new_size_sectors)),
+        Request::BtrfsMount { device, mount_path } => {
+            Dispatch::Task(fs::btrfs_mount(&device, &mount_path))
+        }
+        Request::BtrfsResize {
+            mount_path,
+            new_size,
+        } => Dispatch::Task(fs::btrfs_resize(&mount_path, new_size)),
+        Request::Umount { mount_path } => Dispatch::Task(fs::umount(&mount_path)),
+
+        Request::PoolCreate {
+            name,
+            vdev,
+            devices,
+            ashift,
+        } => Dispatch::Task(zfs::pool_create(&name, vdev, &devices, ashift)),
+        Request::PoolDeviceAdd { pool, device } => {
+            Dispatch::Task(zfs::pool_device_add(&pool, &device))
         }
 
         Request::InstallPackages { packages } => {

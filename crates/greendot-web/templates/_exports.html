@@ -45,10 +45,14 @@
     <label class="checkbox"><input type="radio" name="kind" value="iscsi"> iSCSI</label>
     <label>Name <input name="name" placeholder="vm1" required></label>
     <label>Block device
-      <input name="device" list="zvols" placeholder="/dev/zvol/tank/vm1" required>
-      <datalist id="zvols">
-        {% for z in view.zvols %}<option>{{ z }}</option>{% endfor %}
-      </datalist>
+      {% if view.devices.is_empty() %}
+      <select name="device" disabled><option>No available block devices</option></select>
+      <span class="muted small">Unmounted, non-pool block devices and zvols appear here.</span>
+      {% else %}
+      <select name="device" required>
+        {% for d in view.devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+      </select>
+      {% endif %}
     </label>
     <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> RDMA (iSER for iSCSI; plain TCP moves to port 3261)</label>
     <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>

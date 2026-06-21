@@ -11,6 +11,7 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use greendot_proto::{DevicePath, DotState, ExportName, Nqn};
 use serde::Deserialize;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -44,7 +45,7 @@ pub struct ExportRow {
 
 pub struct ExportsView {
     pub rows: Vec<ExportRow>,
-    pub zvols: Vec<String>,
+    pub devices: Vec<crate::actual::block::AvailDevice>,
     pub banner: Option<String>,
     pub flash: Option<String>,
     pub form_error: Option<String>,
@@ -57,7 +58,7 @@ pub async fn gather(
 ) -> ExportsView {
     let mut view = ExportsView {
         rows: vec![],
-        zvols: vec![],
+        devices: vec![],
         banner: None,
         flash,
         form_error,
@@ -65,8 +66,10 @@ pub async fn gather(
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let actual_lio = actual::lio::read(&state.lio_root);
     let rdma = actual::rdma::devices();
+    let mut in_use: HashSet<String> = HashSet::new();
     match state.db.list_exports() {
         Ok(exports) => {
+            in_use.extend(exports.iter().map(|e| e.device_path.clone()));
             view.rows = exports
                 .iter()
                 .map(|e| {
@@ -122,15 +125,7 @@ pub async fn gather(
     {
         view.banner = Some(format!("reconcile problem: {err}"));
     }
-    view.zvols = actual::zfs::datasets()
-        .await
-        .ok()
-        .flatten()
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|d| d.kind == actual::zfs::DsKind::Volume)
-        .map(|d| format!("/dev/zvol/{}", d.name))
-        .collect();
+    view.devices = actual::block::available_block_devices(&in_use).await;
     view
 }
 

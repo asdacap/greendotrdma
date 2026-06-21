@@ -1,10 +1,14 @@
 //! ZFS mutations as `zfs` CLI tasks. Reads happen unprivileged in greendot-web.
 
 use crate::cmd::TaskSpec;
-use greendot_proto::{DatasetName, SnapName};
+use greendot_proto::{DatasetName, DevicePath, PoolName, SnapName, VdevLayout};
 
 fn spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zfs", args)
+}
+
+fn zpool_spec(args: Vec<String>) -> TaskSpec {
+    TaskSpec::new("zpool", args)
 }
 
 fn s(parts: &[&str]) -> Vec<String> {
@@ -48,6 +52,32 @@ pub fn snapshot_destroy(dataset: &DatasetName, snap: &SnapName) -> TaskSpec {
     spec(s(&["destroy", &format!("{dataset}@{snap}")]))
 }
 
+/// `zpool create [-o ashift=N] <name> [mirror|raidzN] <dev>…`. A plain stripe
+/// emits no vdev keyword.
+pub fn pool_create(
+    name: &PoolName,
+    vdev: VdevLayout,
+    devices: &[DevicePath],
+    ashift: Option<u8>,
+) -> TaskSpec {
+    let mut args = s(&["create"]);
+    if let Some(a) = ashift {
+        args.extend(s(&["-o", &format!("ashift={a}")]));
+    }
+    args.push(name.to_string());
+    if let Some(keyword) = vdev.keyword() {
+        args.push(keyword.to_string());
+    }
+    args.extend(devices.iter().map(|d| d.to_string()));
+    zpool_spec(args)
+}
+
+/// `zpool add <pool> <device>`. No `-f`: zpool refuses (and reports) a vdev
+/// that would reduce the pool's redundancy, which is the desired behaviour.
+pub fn pool_device_add(pool: &PoolName, device: &DevicePath) -> TaskSpec {
+    zpool_spec(s(&["add", pool.as_str(), device.as_str()]))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -74,6 +104,45 @@ mod tests {
             expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
         assert_eq!(spec.stdin, None);
+    }
+
+    fn dp(s: &str) -> DevicePath {
+        DevicePath::new(s).unwrap()
+    }
+
+    fn pool() -> PoolName {
+        PoolName::new("tank").unwrap()
+    }
+
+    #[rstest]
+    #[case::stripe(VdevLayout::Stripe, None, &["sdb"],
+        &["create", "tank", "/dev/sdb"])]
+    #[case::mirror_ashift(VdevLayout::Mirror, Some(12), &["sdb", "sdc"],
+        &["create", "-o", "ashift=12", "tank", "mirror", "/dev/sdb", "/dev/sdc"])]
+    #[case::raidz2(VdevLayout::Raidz2, None, &["sdb", "sdc", "sdd"],
+        &["create", "tank", "raidz2", "/dev/sdb", "/dev/sdc", "/dev/sdd"])]
+    fn pool_create_args(
+        #[case] vdev: VdevLayout,
+        #[case] ashift: Option<u8>,
+        #[case] devs: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let devices: Vec<_> = devs.iter().map(|d| dp(&format!("/dev/{d}"))).collect();
+        let spec = pool_create(&pool(), vdev, &devices, ashift);
+        assert_eq!(spec.command, "zpool");
+        assert_eq!(
+            spec.args,
+            expected.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+            "stripe must not emit an empty vdev keyword"
+        );
+    }
+
+    #[test]
+    fn pool_add_args() {
+        let spec = pool_device_add(&pool(), &dp("/dev/sdd"));
+        assert_eq!(spec.command, "zpool");
+        assert_eq!(spec.args, s(&["add", "tank", "/dev/sdd"]));
+        assert!(!spec.args.iter().any(|a| a == "-f"), "no forced add");
     }
 
     #[test]

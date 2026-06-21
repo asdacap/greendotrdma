@@ -3,6 +3,7 @@
 
 mod cmd;
 mod dispatch;
+mod fs;
 mod install;
 mod lio;
 mod modules;

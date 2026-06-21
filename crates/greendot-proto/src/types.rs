@@ -100,6 +100,12 @@ validated_string!(
 validated_string!(
     /// A Debian/Ubuntu package name (for the install task).
     PackageName, validate::package_name, "package name");
+validated_string!(
+    /// ZFS pool name (the first component of a dataset path).
+    PoolName, validate::pool_name, "pool name");
+validated_string!(
+    /// The helper's private btrfs temp-mount path (fixed shape, no traversal).
+    MountPath, validate::mount_path, "mount path");
 
 /// A string whose Debug/Display output must never leak (passwords).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +134,53 @@ impl Transport {
             Transport::Tcp => "tcp",
             Transport::Loop => "loop",
         }
+    }
+}
+
+/// How `zpool create` should arrange the chosen devices into one top-level vdev.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VdevLayout {
+    Stripe,
+    Mirror,
+    Raidz1,
+    Raidz2,
+    Raidz3,
+}
+
+impl VdevLayout {
+    /// The `zpool create` vdev keyword, or `None` for a plain stripe (which
+    /// takes no keyword — the devices are listed bare).
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            VdevLayout::Stripe => None,
+            VdevLayout::Mirror => Some("mirror"),
+            VdevLayout::Raidz1 => Some("raidz1"),
+            VdevLayout::Raidz2 => Some("raidz2"),
+            VdevLayout::Raidz3 => Some("raidz3"),
+        }
+    }
+
+    /// Minimum device count `zpool` requires for this layout.
+    pub fn min_devices(self) -> usize {
+        match self {
+            VdevLayout::Stripe => 1,
+            VdevLayout::Mirror | VdevLayout::Raidz1 => 2,
+            VdevLayout::Raidz2 => 3,
+            VdevLayout::Raidz3 => 4,
+        }
+    }
+
+    /// Parses a form value (`stripe`/`mirror`/`raidz1`…) into a layout.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "stripe" => VdevLayout::Stripe,
+            "mirror" => VdevLayout::Mirror,
+            "raidz1" => VdevLayout::Raidz1,
+            "raidz2" => VdevLayout::Raidz2,
+            "raidz3" => VdevLayout::Raidz3,
+            _ => return None,
+        })
     }
 }
 
@@ -267,7 +320,9 @@ pub enum TaskEvent {
 pub fn package_for_cli(cli: &str) -> Option<&'static str> {
     Some(match cli {
         "zfs" | "zpool" => "zfsutils-linux",
-        "sfdisk" | "lsblk" => "util-linux",
+        "sfdisk" | "lsblk" | "mount" | "umount" => "util-linux",
+        "resize2fs" | "e2fsck" => "e2fsprogs",
+        "btrfs" => "btrfs-progs",
         "modprobe" => "kmod",
         "rdma" => "iproute2",
         "nvme" => "nvme-cli",
@@ -283,6 +338,9 @@ pub const REQUIRED_CLIS: &[&str] = &[
     "zpool",
     "sfdisk",
     "lsblk",
+    "resize2fs",
+    "e2fsck",
+    "btrfs",
     "modprobe",
     "rdma",
     "nvme",
@@ -433,6 +491,52 @@ mod tests {
     #[case::shell_meta("foo;rm", false)]
     fn package_name(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(PackageName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::simple("tank", true)]
+    #[case::dashed("fast-pool.1", true)]
+    #[case::colon("rpool:0", true)]
+    #[case::empty("", false)]
+    #[case::leading_digit("0pool", false)]
+    #[case::leading_dash("-pool", false)]
+    #[case::slash("a/b", false)]
+    #[case::space("a b", false)]
+    #[case::reserved_mirror("mirror", false)]
+    #[case::reserved_raidz("raidz2", false)]
+    #[case::reserved_case("RaidZ1", false)]
+    #[case::reserved_cache("cache", false)]
+    #[case::controller_ok("c3pool", true)]
+    #[case::too_long(&"a".repeat(256), false)]
+    fn pool_name(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(PoolName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::sda("/run/greendotrdma/btrfs-resize-sda3", true)]
+    #[case::nvme("/run/greendotrdma/btrfs-resize-nvme0n1p2", true)]
+    #[case::empty("", false)]
+    #[case::wrong_prefix("/run/greendotrdma/sda3", false)]
+    #[case::traversal("/run/greendotrdma/btrfs-resize-../etc", false)]
+    #[case::trailing_slash("/run/greendotrdma/btrfs-resize-sda3/", false)]
+    #[case::path_in_name("/run/greendotrdma/btrfs-resize-/dev/sda", false)]
+    fn mount_path(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(MountPath::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::stripe(VdevLayout::Stripe, None, 1)]
+    #[case::mirror(VdevLayout::Mirror, Some("mirror"), 2)]
+    #[case::raidz1(VdevLayout::Raidz1, Some("raidz1"), 2)]
+    #[case::raidz2(VdevLayout::Raidz2, Some("raidz2"), 3)]
+    #[case::raidz3(VdevLayout::Raidz3, Some("raidz3"), 4)]
+    fn vdev_layout(#[case] layout: VdevLayout, #[case] keyword: Option<&str>, #[case] min: usize) {
+        assert_eq!(layout.keyword(), keyword);
+        assert_eq!(layout.min_devices(), min);
+        // parse() round-trips the snake_case form value.
+        let form = keyword.unwrap_or("stripe");
+        assert_eq!(VdevLayout::parse(form), Some(layout));
+        assert_eq!(VdevLayout::parse("nonsense"), None);
     }
 
     #[test]
