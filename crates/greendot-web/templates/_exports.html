@@ -12,7 +12,7 @@
       {% for r in view.rows %}
       <tr>
         <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
-        <td>{{ r.name }}<br><span class="muted small">{{ r.dot_reason }}</span></td>
+        <td>{{ r.name }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}</span></td>
         <td>{{ r.protocol }}</td>
         <td>{{ r.device }}</td>
         <td>{{ r.transports }}</td>
@@ -31,6 +31,7 @@
           {% endfor %}
           </details>
           {% endif %}
+          {% if !r.external %}
           {% if r.diagnose %}<a role="button" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
           <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
             <input type="hidden" name="id" value="{{ r.id }}">
@@ -42,6 +43,7 @@
             <input type="hidden" name="id" value="{{ r.id }}">
             <button class="danger">Delete</button>
           </form>
+          {% endif %}
         </td>
       </tr>
       {% endfor %}

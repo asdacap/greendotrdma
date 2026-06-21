@@ -1,6 +1,9 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
-use crate::dot::{Criterion, iscsi_diagnostics, iscsi_dot, nvme_diagnostics, nvme_dot};
+use crate::dot::{
+    Criterion, external_iscsi_dot, external_nvme_dot, iscsi_diagnostics, iscsi_dot,
+    nvme_diagnostics, nvme_dot,
+};
 use crate::reconcile::RECONCILE_ERROR_KEY;
 use crate::state::{Export, ExportKind, NewExport};
 use crate::{actual, reconcile};
@@ -9,7 +12,7 @@ use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{DevicePath, DotState, ExportName, Nqn};
+use greendot_proto::{DevicePath, DotState, ExportName, Nqn, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -94,6 +97,19 @@ pub struct ExportRow {
     pub diagnose: bool,
     /// Copy-paste commands a client runs to connect, one per network transport.
     pub client: Vec<ClientCmd>,
+    /// Present on the box but not managed by greendot (foreign NQN/IQN, e.g.
+    /// provisioned by democratic-csi). Rendered read-only with an "External"
+    /// badge; its dot reflects only the observed transport.
+    pub external: bool,
+}
+
+/// CSS class for a dot state. The disabled (gray) case is handled by the caller.
+fn dot_class(state: DotState) -> &'static str {
+    match state {
+        DotState::Green => "dot-green",
+        DotState::Yellow => "dot-yellow",
+        DotState::Red => "dot-red",
+    }
 }
 
 /// A labelled client-side connect command shown under each export.
@@ -158,6 +174,113 @@ fn client_instructions(e: &Export, listen: std::net::IpAddr) -> Vec<ClientCmd> {
     }
 }
 
+/// Rows for NVMe-oF subsystems present in nvmet but outside greendot's NQN
+/// prefix. Their dot reflects only the observed transport (see [`external_nvme_dot`]).
+fn foreign_nvme_rows(
+    actual: &actual::nvmet::ActualNvmet,
+    rdma: &[actual::rdma::RdmaDev],
+) -> Vec<ExportRow> {
+    actual
+        .subsystems
+        .iter()
+        .filter(|s| !s.nqn.starts_with(OUR_NQN_PREFIX))
+        .map(|s| {
+            let dot = external_nvme_dot(&s.nqn, actual, rdma);
+            let mut transports: Vec<&str> = actual
+                .ports
+                .iter()
+                .filter(|p| p.subsystems.iter().any(|n| n == &s.nqn))
+                .map(|p| match p.trtype.as_str() {
+                    "rdma" => "RDMA",
+                    "tcp" => "TCP",
+                    "loop" => "loop",
+                    other => other,
+                })
+                .collect();
+            transports.sort_unstable();
+            transports.dedup();
+            ExportRow {
+                id: 0,
+                name: s.nqn.clone(),
+                protocol: "NVMe-oF",
+                dot_class: dot_class(dot.state),
+                dot_reason: dot.reason,
+                device: join_devices(s.namespaces.iter().map(|n| n.device_path.as_str())),
+                transports: transports.join(" + "),
+                hosts: if s.allow_any_host {
+                    "any host".into()
+                } else {
+                    format!("{} allowed", s.allowed_hosts.len())
+                },
+                clients: None,
+                enabled: true,
+                diagnose: false,
+                client: vec![],
+                external: true,
+            }
+        })
+        .collect()
+}
+
+/// Rows for iSCSI targets present in LIO but outside greendot's IQN prefix.
+fn foreign_iscsi_rows(
+    actual: &actual::lio::ActualLio,
+    sessions: &[actual::lio::IscsiSession],
+    rdma: &[actual::rdma::RdmaDev],
+) -> Vec<ExportRow> {
+    actual
+        .targets
+        .iter()
+        .filter(|t| !t.iqn.starts_with(OUR_IQN_PREFIX))
+        .map(|t| {
+            let dot = external_iscsi_dot(t, rdma);
+            let mut transports: Vec<&str> = Vec::new();
+            if t.portals.iter().any(|p| p.iser) {
+                transports.push("iSER");
+            }
+            if t.portals.iter().any(|p| !p.iser) {
+                transports.push("TCP");
+            }
+            let devices = t.luns.iter().filter_map(|lun| {
+                actual
+                    .backstores
+                    .iter()
+                    .find(|b| &b.name == lun)
+                    .map(|b| b.udev_path.as_str())
+            });
+            ExportRow {
+                id: 0,
+                name: t.iqn.clone(),
+                protocol: "iSCSI",
+                dot_class: dot_class(dot.state),
+                dot_reason: dot.reason,
+                device: join_devices(devices),
+                transports: transports.join(" + "),
+                hosts: if t.demo_mode {
+                    "any host".into()
+                } else {
+                    format!("{} allowed", t.acls.len())
+                },
+                clients: Some(sessions.iter().filter(|s| s.target_iqn == t.iqn).count()),
+                enabled: true,
+                diagnose: false,
+                client: vec![],
+                external: true,
+            }
+        })
+        .collect()
+}
+
+/// Joins backing-device paths for display, collapsing the empty set to an em dash.
+fn join_devices<'a>(devices: impl Iterator<Item = &'a str>) -> String {
+    let devices: Vec<&str> = devices.filter(|d| !d.is_empty()).collect();
+    if devices.is_empty() {
+        "—".to_owned()
+    } else {
+        devices.join(", ")
+    }
+}
+
 pub struct ExportsView {
     pub rows: Vec<ExportRow>,
     pub devices: Vec<crate::actual::block::AvailDevice>,
@@ -203,13 +326,8 @@ pub async fn gather(
                             ExportKind::Nvme => nvme_dot(e, &actual_nvmet, &rdma),
                             ExportKind::Iscsi => iscsi_dot(e, &actual_lio, &rdma),
                         };
-                        let class = match dot.state {
-                            DotState::Green => "dot-green",
-                            DotState::Yellow => "dot-yellow",
-                            DotState::Red => "dot-red",
-                        };
                         (
-                            class,
+                            dot_class(dot.state),
                             dot.reason,
                             e.want_rdma && dot.state != DotState::Green,
                         )
@@ -256,12 +374,21 @@ pub async fn gather(
                         enabled: e.enabled,
                         diagnose,
                         client: client_instructions(e, listen),
+                        external: false,
                     }
                 })
                 .collect();
         }
         Err(e) => view.banner = Some(format!("could not read export store: {e:#}")),
     }
+
+    // Foreign exports: subsystems/targets present on the box that greendot didn't
+    // create (NQN/IQN outside our prefix — e.g. democratic-csi). We don't manage
+    // them, but the dashboard's whole job is to say whether an export is honestly
+    // on RDMA, so we observe them read-only with the same dot.
+    view.rows.extend(foreign_nvme_rows(&actual_nvmet, &rdma));
+    view.rows
+        .extend(foreign_iscsi_rows(&actual_lio, &iscsi_sessions, &rdma));
     if let Ok(Some(err)) = state.db.get_setting(RECONCILE_ERROR_KEY)
         && !err.is_empty()
     {
@@ -351,11 +478,7 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
     DiagnoseView {
         name: export.name,
         protocol,
-        dot_class: match dot.state {
-            DotState::Green => "dot-green",
-            DotState::Yellow => "dot-yellow",
-            DotState::Red => "dot-red",
-        },
+        dot_class: dot_class(dot.state),
         dot_reason: dot.reason,
         criteria,
         not_found: false,

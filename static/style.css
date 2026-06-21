@@ -224,6 +224,17 @@ p { margin: 10px 0; }
 .flash { color: var(--green); }
 .empty { color: var(--muted); }
 
+.badge {
+  display: inline-block;
+  font-size: 11px;
+  line-height: 1.5;
+  padding: 0 7px;
+  border-radius: 999px;
+  color: var(--muted);
+  border: 1px solid var(--border-strong);
+  vertical-align: middle;
+}
+
 code, .mono { font-family: var(--mono); }
 
 /* ---- Signature: link-state LED ------------------------------------------ */
