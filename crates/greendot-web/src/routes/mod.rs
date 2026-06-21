@@ -20,6 +20,10 @@ const HTMX_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../static/htmx.min.js"
 ));
+const PICO_CSS: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../static/pico.css"
+));
 const STYLE_CSS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../static/style.css"
@@ -63,6 +67,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route(
             "/static/htmx.min.js",
             get(async || asset("text/javascript", HTMX_JS)),
+        )
+        .route(
+            "/static/pico.css",
+            get(async || asset("text/css", PICO_CSS)),
         )
         .route(
             "/static/style.css",

@@ -21,6 +21,21 @@
   --red: #f0564a;
   --accent: #34d058;
 
+  /* Pico provides the form layout (aligned, full-width controls); these map its
+     tokens onto the panel palette so anything it renders stays on-brand. */
+  --pico-font-family: var(--ui);
+  --pico-background-color: var(--bg);
+  --pico-color: var(--text);
+  --pico-muted-color: var(--muted);
+  --pico-muted-border-color: var(--border);
+  --pico-primary: var(--green);
+  --pico-primary-background: var(--green);
+  --pico-primary-border: var(--green);
+  --pico-form-element-background-color: var(--inset);
+  --pico-form-element-border-color: var(--border);
+  --pico-form-element-color: var(--text);
+  --pico-form-element-placeholder-color: var(--faint);
+
   --ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "SF Mono",
           "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
@@ -403,7 +418,11 @@ input, select, textarea, button { font: inherit; }
   color: var(--text);
 }
 
-.inline input, .inline select { margin-top: 0; }
+/* Pico stretches every control to 100% and adds a row of spacing; the card wants
+   that (aligned fields), the inline action forms must stay compact and horizontal. */
+.card input, .card select, .card textarea { margin-bottom: 0; }
+.card fieldset { margin: 12px 0 0; }   /* same rhythm as a label row */
+.inline input, .inline select { margin: 0; width: auto; }
 
 .card textarea {
   width: 100%;
@@ -533,7 +552,9 @@ svg.chart polyline {
 }
 
 details { margin: 10px 0; }
-details summary { cursor: pointer; color: var(--muted); }
+/* Plain disclosure toggles — Pico would right-align the label and float a chevron. */
+details summary { cursor: pointer; color: var(--muted); text-align: left; list-style: revert; }
+details summary::after { content: none; }
 details summary:hover { color: var(--text); }
 
 /* "Edit" drawer: a full-width row beneath the item it edits. */
