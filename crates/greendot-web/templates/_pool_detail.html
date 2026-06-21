@@ -1,0 +1,94 @@
+<div id="pool-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.not_installed %}
+  <p class="empty">ZFS is not installed on this host.</p>
+  {% else if view.pool.is_none() %}
+  <p class="empty">Pool {{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(pool) = view.pool %}
+  <table>
+    <thead><tr><th>Health</th><th>Size</th><th>Used</th><th>Free</th><th>Frag</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>
+          {% if pool.healthy %}<span class="dot dot-green"></span>{% else %}<span class="dot dot-red"></span>{% endif %}
+          {{ pool.health }}
+        </td>
+        <td>{{ pool.size }}</td>
+        <td>
+          <div class="usagebar"><div class="usagebar-fill" style="width: {{ pool.used_percent }}%"></div></div>
+          {{ pool.used_percent }}%
+        </td>
+        <td>{{ pool.free }}</td>
+        <td>{{ pool.frag }}</td>
+      </tr>
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Zvols</h2>
+  {% if view.zvols.is_empty() %}
+  <p class="empty">This pool has no zvols yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Name</th><th>Used</th><th>Volsize</th><th></th></tr></thead>
+    <tbody>
+      {% for z in view.zvols %}
+      <tr>
+        <td>{{ z.name }}</td>
+        <td>{{ z.used }}</td>
+        <td>{{ z.volsize }}</td>
+        <td>
+          <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
+            <input type="hidden" name="dataset" value="{{ z.name }}">
+            <input name="size" size="5" placeholder="new" required>
+            <select name="unit">
+              <option>GiB</option><option>MiB</option><option>TiB</option>
+            </select>
+            <button>Resize</button>
+          </form>
+          <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
+            <input type="hidden" name="dataset" value="{{ z.name }}">
+            <button class="danger">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Create zvol</h2>
+  <form class="card" hx-post="/zfs/zvol" hx-target="#pool-detail-content" hx-swap="outerHTML">
+    <label>Parent dataset
+      <select name="parent" required>
+        {% for p in view.parents %}<option>{{ p }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Name <input name="name" placeholder="vm1" required></label>
+    <label>Size
+      <input name="size" size="6" required>
+      <select name="unit">
+        <option>GiB</option><option>MiB</option><option>TiB</option>
+      </select>
+    </label>
+    <label>Block size
+      <select name="volblocksize">
+        <option value="">default</option>
+        <option value="4096">4 KiB</option>
+        <option value="8192">8 KiB</option>
+        <option value="16384">16 KiB</option>
+        <option value="32768">32 KiB</option>
+        <option value="65536">64 KiB</option>
+        <option value="131072">128 KiB</option>
+      </select>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="sparse" value="1"> Sparse (thin-provisioned)</label>
+    <button type="submit">Create</button>
+  </form>
+  {% endif %}
+</div>
