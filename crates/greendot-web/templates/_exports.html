@@ -22,6 +22,15 @@
           {% else %}<span class="muted" title="NVMe-oF peers can't be tied to a specific export on this kernel — see Connections">—</span>{% endif %}
         </td>
         <td>
+          {% if !r.client.is_empty() %}
+          <details class="clientinst">
+          <summary>Client instruction</summary>
+          {% for c in r.client %}
+          <p class="muted small">Connect over {{ c.label }}:</p>
+          <pre class="log">{{ c.cmd }}</pre>
+          {% endfor %}
+          </details>
+          {% endif %}
           {% if r.diagnose %}<a role="button" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
           <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
             <input type="hidden" name="id" value="{{ r.id }}">
