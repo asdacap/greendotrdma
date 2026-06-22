@@ -10,16 +10,22 @@
 //! pre-check and the CLI.
 
 use crate::actual::lio::ActualLio;
+use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::ActualNvmet;
 use crate::config::Config;
 use crate::helper_client::HelperClient;
-use crate::state::{Export, ExportKind, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+use crate::state::{Export, ExportKind, NfsExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
+    NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec,
     NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request, Transport,
 };
 use std::collections::BTreeSet;
 use std::net::IpAddr;
+
+/// greendot's NFS `fsid`s are offset into a reserved high range so they don't
+/// collide with foreign numeric `fsid=`s in `/etc/exports`.
+const NFS_FSID_BASE: u32 = 0x6700_0000;
 
 pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
 
@@ -131,6 +137,65 @@ pub fn render_lio(exports: &[Export], listen: IpAddr) -> LioDesired {
     LioDesired {
         backstores,
         targets,
+    }
+}
+
+/// Renders the desired NFS state from the enabled exports. Entries whose path
+/// or every client fails validation are skipped (like `render_nvmet`).
+pub fn render_nfs(nfs_exports: &[NfsExport], rdma_port: u16) -> NfsDesired {
+    let exports = nfs_exports
+        .iter()
+        .filter(|e| e.enabled)
+        .filter_map(|e| {
+            let path = NfsExportPath::new(&e.path).ok()?;
+            let clients: Vec<NfsClientSpec> = e
+                .clients
+                .iter()
+                .filter_map(|c| {
+                    Some(NfsClientSpec {
+                        client: NfsClient::new(&c.client).ok()?,
+                        rw: c.rw,
+                    })
+                })
+                .collect();
+            // An export with no valid client can't be served — drop it.
+            (!clients.is_empty()).then_some(NfsExportSpec {
+                path,
+                fsid: NFS_FSID_BASE | (e.id as u32),
+                clients,
+            })
+        })
+        .collect();
+    NfsDesired { exports, rdma_port }
+}
+
+/// Whether actual NFS state realizes the desired state. Scoped to greendot's
+/// own exports (the managed file is the baseline, like the OUR_ prefix for
+/// nvmet): what we last applied must equal what's desired (catches adds *and*
+/// removes), each desired path must be live in the export table, and the RDMA
+/// listener must be active whenever we export anything. Foreign exports never
+/// force a re-apply.
+pub fn nfs_satisfied(d: &NfsDesired, a: &ActualNfs) -> bool {
+    let want: BTreeSet<(String, String, bool)> = d
+        .exports
+        .iter()
+        .flat_map(|e| {
+            e.clients
+                .iter()
+                .map(move |c| (e.path.to_string(), c.client.to_string(), c.rw))
+        })
+        .collect();
+    want == a.managed
+        && d.exports.iter().all(|e| a.exported(e.path.as_str()))
+        && (d.exports.is_empty() || a.rdma_port.is_some())
+}
+
+/// The NFS-over-RDMA module to load when any NFS export is enabled.
+pub fn nfs_modules(nfs_exports: &[NfsExport]) -> Vec<KernelModule> {
+    if nfs_exports.iter().any(|e| e.enabled) {
+        vec![KernelModule::Rpcrdma]
+    } else {
+        Vec::new()
     }
 }
 
@@ -299,17 +364,21 @@ pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
     let exports = desired.exports;
     let helper = HelperClient::new(cfg.helper_socket.clone());
 
+    let nfs_exports = desired.nfs_exports;
     let nvmet_desired = render_nvmet(&exports, desired.listen);
     let lio_desired = render_lio(&exports, desired.listen);
+    let nfs_desired = render_nfs(&nfs_exports, NFS_RDMA_PORT);
     let nvmet_ok = nvmet_satisfied(&nvmet_desired, &crate::actual::nvmet::read(&cfg.nvmet_root));
     let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
-    if nvmet_ok && lio_ok {
+    let nfs_ok = nfs_satisfied(&nfs_desired, &crate::actual::nfs::read(&helper).await);
+    if nvmet_ok && lio_ok && nfs_ok {
         println!("already reconciled; nothing to do");
         return Ok(true);
     }
 
     let mut ok = true;
-    let modules = modules_for(&exports);
+    let mut modules = modules_for(&exports);
+    modules.extend(nfs_modules(&nfs_exports));
     if !modules.is_empty() {
         ok &= run_step(
             &helper,
@@ -329,6 +398,12 @@ pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
             desired: lio_desired,
         };
         ok &= run_step(&helper, req, "Apply iSCSI configuration").await;
+    }
+    if !nfs_ok {
+        let req = Request::NfsApply {
+            desired: nfs_desired,
+        };
+        ok &= run_step(&helper, req, "Apply NFS configuration").await;
     }
     Ok(ok)
 }
@@ -502,5 +577,116 @@ mod tests {
             vec![KernelModule::Iscsi, KernelModule::Iser]
         );
         assert!(modules_for(&[]).is_empty());
+    }
+
+    #[test]
+    fn renders_and_satisfies_nfs() {
+        use crate::actual::nfs::{ActualNfs, NfsExportEntry};
+        use crate::state::{NfsClientEntry, NfsExport};
+
+        let exp = NfsExport {
+            id: 1,
+            path: "/tank/share".into(),
+            enabled: true,
+            clients: vec![NfsClientEntry {
+                client: "192.168.101.0/24".into(),
+                rw: true,
+            }],
+            last_error: None,
+        };
+        let d = render_nfs(std::slice::from_ref(&exp), NFS_RDMA_PORT);
+        assert_eq!(d.exports.len(), 1);
+        assert_eq!(d.exports[0].path.as_str(), "/tank/share");
+        assert_eq!(d.exports[0].fsid, NFS_FSID_BASE | 1);
+        assert_eq!(d.rdma_port, NFS_RDMA_PORT);
+
+        let entry = |path: &str, clients: &[&str]| NfsExportEntry {
+            path: path.into(),
+            clients: clients.iter().map(|c| c.to_string()).collect(),
+        };
+        let mgd = |specs: &[(&str, &str, bool)]| {
+            specs
+                .iter()
+                .map(|(p, c, rw)| (p.to_string(), c.to_string(), *rw))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
+        let good = ActualNfs {
+            exports: vec![entry("/tank/share", &["192.168.101.0/24"])],
+            rdma_port: Some(NFS_RDMA_PORT),
+            managed: mgd(&[("/tank/share", "192.168.101.0/24", true)]),
+        };
+        assert!(nfs_satisfied(&d, &good), "managed==desired, live, rdma on");
+        // Post-reboot before apply: nothing managed yet → re-apply.
+        assert!(!nfs_satisfied(
+            &d,
+            &ActualNfs {
+                managed: mgd(&[]),
+                ..good.clone()
+            }
+        ));
+        // Same client but read-only (option drift) → re-apply.
+        assert!(!nfs_satisfied(
+            &d,
+            &ActualNfs {
+                managed: mgd(&[("/tank/share", "192.168.101.0/24", false)]),
+                ..good.clone()
+            }
+        ));
+        // TCP-only (RDMA listener missing) → re-apply to assert it.
+        assert!(!nfs_satisfied(
+            &d,
+            &ActualNfs {
+                rdma_port: None,
+                ..good.clone()
+            }
+        ));
+        // Path dropped from the live table → re-apply.
+        assert!(!nfs_satisfied(
+            &d,
+            &ActualNfs {
+                exports: vec![],
+                ..good.clone()
+            }
+        ));
+        // A foreign export present does not force a re-apply.
+        let with_foreign = ActualNfs {
+            exports: vec![
+                entry("/tank/share", &["192.168.101.0/24"]),
+                entry("/srv/foreign", &["*"]),
+            ],
+            ..good.clone()
+        };
+        assert!(nfs_satisfied(&d, &with_foreign));
+
+        // Empty desired is satisfied only when greendot manages nothing.
+        let empty = render_nfs(&[], NFS_RDMA_PORT);
+        assert!(nfs_satisfied(&empty, &ActualNfs::default()));
+        assert!(!nfs_satisfied(
+            &empty,
+            &ActualNfs {
+                managed: mgd(&[("/old", "*", false)]),
+                ..ActualNfs::default()
+            }
+        ));
+
+        // Disabled exports render nothing and request no module.
+        let disabled = NfsExport {
+            enabled: false,
+            ..exp
+        };
+        assert!(
+            render_nfs(std::slice::from_ref(&disabled), NFS_RDMA_PORT)
+                .exports
+                .is_empty()
+        );
+        assert!(nfs_modules(&[disabled]).is_empty());
+        let enabled = NfsExport {
+            id: 2,
+            path: "/x".into(),
+            enabled: true,
+            clients: vec![],
+            last_error: None,
+        };
+        assert_eq!(nfs_modules(&[enabled]), vec![KernelModule::Rpcrdma]);
     }
 }

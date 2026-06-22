@@ -15,7 +15,18 @@ let
 
   # The CLIs the services shell out to. On Ubuntu these are on the default
   # systemd PATH (/usr/bin etc.); on NixOS we put them on the service `path`.
-  tools = [ targetctl pkgs.zfs pkgs.kmod pkgs.rdma-core pkgs.util-linux pkgs.nvme-cli ];
+  # `nfs-utils` provides `exportfs` and `pkgs.systemd` provides `systemctl` for
+  # the NFS apply path (start nfs-server, exportfs the share).
+  tools = [
+    targetctl
+    pkgs.zfs
+    pkgs.kmod
+    pkgs.rdma-core
+    pkgs.util-linux
+    pkgs.nvme-cli
+    pkgs.nfs-utils
+    pkgs.systemd
+  ];
 
   configToml = pkgs.writeText "greendot-config.toml" ''
     listen = "127.0.0.1:8080"
@@ -49,7 +60,12 @@ let
         "nvmet_rdma"
         "nvme_rdma"
         "rdma_rxe"
+        # NFS-over-RDMA server transport (svcrdma/xprtrdma alias `rpcrdma`).
+        "rpcrdma"
       ] ++ extraKernelModules;
+      # The NFS server: provides nfsd + the `nfs-server` unit greendot starts,
+      # and `exportfs`/`mount.nfs`. greendot manages only its own exports file.
+      services.nfs.server.enable = true;
       environment.systemPackages = with pkgs; [
         greendot
         nvme-cli
@@ -58,6 +74,7 @@ let
         util-linux
         curl
         zfs
+        nfs-utils
       ];
 
       # Accounts: the service user/group and an admin login.

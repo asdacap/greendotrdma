@@ -44,6 +44,76 @@
     {% endif %}
   </details>
 
+  <h2>Filesystems</h2>
+  {% if view.fs_rows.is_empty() %}
+  <p class="empty">This pool has no child filesystem datasets yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Name</th><th>Used</th><th>Mountpoint</th><th>Mounted</th><th></th></tr></thead>
+    <tbody>
+      {% for f in view.fs_rows %}
+      <tr>
+        <td>{{ f.name }}</td>
+        <td>{{ f.used }}</td>
+        <td>{{ f.mountpoint }}</td>
+        <td>
+          {% if f.mounted %}<span class="dot dot-green"></span> yes
+          {% else %}<span class="dot dot-gray"></span> no{% endif %}
+        </td>
+        <td>
+          <div class="rowactions">
+            {% if f.mounted %}
+            <form class="inline" hx-post="/zfs/fs/unmount" hx-target="#pool-detail-content" hx-swap="outerHTML">
+              <input type="hidden" name="dataset" value="{{ f.name }}">
+              <button>Unmount</button>
+            </form>
+            {% else if f.mountable %}
+            <form class="inline" hx-post="/zfs/fs/mount" hx-target="#pool-detail-content" hx-swap="outerHTML">
+              <input type="hidden" name="dataset" value="{{ f.name }}">
+              <button>Mount</button>
+            </form>
+            {% endif %}
+            <details>
+              <summary>Mountpoint</summary>
+              <form class="inline" hx-post="/zfs/fs/set-mountpoint" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                <input type="hidden" name="dataset" value="{{ f.name }}">
+                <input name="mountpoint" size="16" placeholder="/srv/share" required>
+                <button>Set</button>
+              </form>
+            </details>
+            <details>
+              <summary>Destroy</summary>
+              <form class="inline" hx-post="/zfs/fs/destroy" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                    hx-confirm="Destroy {{ f.name }}? This deletes the dataset and its data.">
+                <input type="hidden" name="dataset" value="{{ f.name }}">
+                <label class="checkbox"><input type="checkbox" name="recursive" value="1"> recursive (children + snapshots)</label>
+                <button class="danger">Destroy</button>
+              </form>
+            </details>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <details>
+  <summary>Create filesystem</summary>
+  <form class="card" hx-post="/zfs/fs" hx-target="#pool-detail-content" hx-swap="outerHTML">
+    <label>Parent dataset
+      <select name="parent" required>
+        {% for p in view.parents %}<option>{{ p }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Name <input name="name" placeholder="share" required></label>
+    <label>Mountpoint (optional — inherits the default if blank)
+      <input name="mountpoint" placeholder="/srv/share">
+    </label>
+    <button type="submit">Create</button>
+  </form>
+  </details>
+
   <h2>Zvols</h2>
   {% if view.zvols.is_empty() %}
   <p class="empty">This pool has no zvols yet.</p>

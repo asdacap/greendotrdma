@@ -39,4 +39,26 @@
   <p class="muted small">NVMe-oF connections are shown at the RDMA transport level (peer IP only).
   Per-NQN visibility and TCP NVMe connections require a kernel built with
   <code>CONFIG_NVME_TARGET_DEBUGFS</code>.</p>
+
+  <h2>NFS (RDMA) peers</h2>
+  {% if view.nfs_unavailable %}
+  <p class="empty">Unavailable — could not read RDMA connection state.</p>
+  {% else if view.nfs.is_empty() %}
+  <p class="empty">No NFS-over-RDMA peers connected.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Peer</th><th>Listen</th><th>State</th></tr></thead>
+    <tbody>
+      {% for p in view.nfs %}
+      <tr>
+        <td>{{ p.peer }}</td>
+        <td class="small">{{ p.listen }}</td>
+        <td class="small">{{ p.state }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  <p class="muted small">NFS-over-RDMA peers connect to the server-wide listener on port 20049
+  (peer IP only); NFS has no per-share connection binding.</p>
 </div>

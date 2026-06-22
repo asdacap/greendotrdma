@@ -17,6 +17,8 @@ fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
         KernelModule::Iscsi => &["target_core_mod", "iscsi_target_mod"],
         KernelModule::Iser => &["ib_isert"],
         KernelModule::Rxe => &["rdma_rxe"],
+        // The real module is `rpcrdma`; `svcrdma`/`xprtrdma` are aliases for it.
+        KernelModule::Rpcrdma => &["rpcrdma"],
     }
 }
 

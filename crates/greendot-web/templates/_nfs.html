@@ -1,0 +1,56 @@
+<div id="nfs-content">
+  {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.rows.is_empty() %}
+  <p class="empty">No NFS exports yet — create one below.</p>
+  {% else %}
+  <table>
+    <thead><tr><th></th><th>Path</th><th>Clients</th><th></th></tr></thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr>
+        <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
+        <td>{{ r.path }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}</span></td>
+        <td>{{ r.clients }}</td>
+        <td>
+          <details class="clientinst">
+          <summary>Mount instruction</summary>
+          <pre class="log">{{ r.mount_cmd }}</pre>
+          <p class="muted small">Run as root on a client with an RDMA NIC. Not persistent — add an <code>_netdev,rdma,port=20049</code> entry to <code>/etc/fstab</code> to mount at boot.</p>
+          </details>
+          {% if !r.external %}
+          {% if r.diagnose %}<a role="button" href="/nfs/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
+          <form class="inline" hx-post="/nfs/toggle" hx-target="#nfs-content" hx-swap="outerHTML">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <input type="hidden" name="enable" value="{{ !r.enabled }}">
+            <button>{% if r.enabled %}Disable{% else %}Enable{% endif %}</button>
+          </form>
+          <form class="inline" hx-post="/nfs/delete" hx-target="#nfs-content" hx-swap="outerHTML"
+                hx-confirm="Delete NFS export {{ r.path }}? Clients will lose access.">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <button class="danger">Delete</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <details>
+  <summary>New NFS share</summary>
+  <form class="card" hx-post="/nfs/create" hx-target="#nfs-content" hx-swap="outerHTML">
+    <label>Export path (absolute mounted directory)
+      <input name="path" placeholder="/tank/share" required>
+    </label>
+    <label>Allowed clients (one per line: host, IP, CIDR, or <code>*</code>)
+      <textarea name="clients" rows="3" placeholder="192.168.101.0/24&#10;*"></textarea>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="readonly" value="1"> Read-only (ro)</label>
+    <button type="submit">Create share</button>
+  </form>
+  </details>
+</div>

@@ -67,6 +67,33 @@ pub struct NewExport {
     pub initiators: Vec<String>,
 }
 
+/// A file-level NFS export of an absolute directory path, served over RDMA.
+/// Unlike [`Export`] (a block device), this has a directory path and a list of
+/// client access specs — different enough to warrant its own type/table.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NfsExport {
+    pub id: i64,
+    pub path: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub clients: Vec<NfsClientEntry>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NfsClientEntry {
+    pub client: String,
+    #[serde(default = "default_true")]
+    pub rw: bool,
+}
+
+pub struct NewNfsExport {
+    pub path: String,
+    pub clients: Vec<NfsClientEntry>,
+}
+
 pub struct Db {
     /// Task run-history — the one table that stays in SQLite.
     conn: Mutex<Connection>,
@@ -84,9 +111,11 @@ struct ConfigDoc {
     /// Monotonic id counters, never reused, so URLs stay stable across deletes.
     next_export_id: i64,
     next_policy_id: i64,
+    next_nfs_export_id: i64,
     settings: BTreeMap<String, String>,
     export: Vec<Export>,
     policy: Vec<SnapshotPolicy>,
+    nfs_export: Vec<NfsExport>,
 }
 
 fn default_true() -> bool {
@@ -263,6 +292,52 @@ impl Db {
         self.persist(&doc)
     }
 
+    pub fn insert_nfs_export(&self, new: &NewNfsExport) -> Result<i64> {
+        let mut doc = self.config.lock().unwrap();
+        if doc.nfs_export.iter().any(|e| e.path == new.path) {
+            anyhow::bail!("an NFS export of {:?} already exists", new.path);
+        }
+        doc.next_nfs_export_id += 1;
+        let id = doc.next_nfs_export_id;
+        doc.nfs_export.push(NfsExport {
+            id,
+            path: new.path.clone(),
+            enabled: true,
+            clients: new.clients.clone(),
+            last_error: None,
+        });
+        self.persist(&doc)?;
+        Ok(id)
+    }
+
+    pub fn list_nfs_exports(&self) -> Result<Vec<NfsExport>> {
+        let mut exports = self.config.lock().unwrap().nfs_export.clone();
+        exports.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(exports)
+    }
+
+    pub fn set_nfs_export_enabled(&self, id: i64, enabled: bool) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.nfs_export.iter_mut().find(|e| e.id == id) {
+            e.enabled = enabled;
+        }
+        self.persist(&doc)
+    }
+
+    pub fn set_nfs_export_error(&self, id: i64, error: Option<&str>) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.nfs_export.iter_mut().find(|e| e.id == id) {
+            e.last_error = error.map(str::to_owned);
+        }
+        self.persist(&doc)
+    }
+
+    pub fn delete_nfs_export(&self, id: i64) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        doc.nfs_export.retain(|e| e.id != id);
+        self.persist(&doc)
+    }
+
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
         Ok(self.config.lock().unwrap().settings.get(key).cloned())
     }
@@ -418,6 +493,7 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
 /// The desired state needed to reconcile, read straight from the config TOML.
 pub struct Desired {
     pub exports: Vec<Export>,
+    pub nfs_exports: Vec<NfsExport>,
     pub listen: IpAddr,
 }
 
@@ -432,12 +508,18 @@ pub fn read_desired(state_path: &Path) -> Result<Desired> {
     for e in &mut exports {
         e.initiators.sort();
     }
+    let mut nfs_exports = doc.nfs_export;
+    nfs_exports.sort_by(|a, b| a.path.cmp(&b.path));
     let listen = doc
         .settings
         .get("listen_addr")
         .and_then(|s| s.parse().ok())
         .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
-    Ok(Desired { exports, listen })
+    Ok(Desired {
+        exports,
+        nfs_exports,
+        listen,
+    })
 }
 
 /// Reads the desired-state config from `path`, or the default document if the
@@ -579,6 +661,49 @@ mod tests {
             db.get_setting("listen_addr").unwrap().as_deref(),
             Some("10.0.0.6")
         );
+    }
+
+    #[test]
+    fn nfs_export_crud_and_duplicate_path() {
+        let db = Db::in_memory().unwrap();
+        let new = |path: &str| NewNfsExport {
+            path: path.into(),
+            clients: vec![NfsClientEntry {
+                client: "192.168.101.0/24".into(),
+                rw: true,
+            }],
+        };
+        let id = db.insert_nfs_export(&new("/tank/share")).unwrap();
+        db.insert_nfs_export(&new("/srv/ro")).unwrap();
+        assert!(
+            db.insert_nfs_export(&new("/tank/share")).is_err(),
+            "duplicate path must fail"
+        );
+
+        let exports = db.list_nfs_exports().unwrap();
+        assert_eq!(
+            exports.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+            ["/srv/ro", "/tank/share"],
+            "sorted by path"
+        );
+        let share = exports.iter().find(|e| e.id == id).unwrap();
+        assert!(share.enabled && share.last_error.is_none());
+        assert_eq!(share.clients[0].client, "192.168.101.0/24");
+
+        db.set_nfs_export_enabled(id, false).unwrap();
+        db.set_nfs_export_error(id, Some("exportfs failed"))
+            .unwrap();
+        let share = db
+            .list_nfs_exports()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert!(!share.enabled);
+        assert_eq!(share.last_error.as_deref(), Some("exportfs failed"));
+
+        db.delete_nfs_export(id).unwrap();
+        assert_eq!(db.list_nfs_exports().unwrap().len(), 1);
     }
 
     #[test]

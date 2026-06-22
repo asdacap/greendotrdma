@@ -8,6 +8,7 @@ mod install;
 mod lio;
 mod lvm;
 mod modules;
+mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
@@ -177,6 +178,33 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                     let mut sink = SocketSink(&mut writer);
                     let root = std::path::Path::new(nvmet::NVMET_ROOT);
                     if nvmet::apply(&desired, root, &mut sink).is_err() {
+                        return; // socket write failed; client gone
+                    }
+                }
+                Dispatch::NfsApply(desired) => {
+                    let _guard = ctx.mutate_lock.lock().unwrap();
+                    let mut sink = SocketSink(&mut writer);
+                    if nfs::apply(
+                        &desired,
+                        std::path::Path::new(nfs::NFS_EXPORTS_FILE),
+                        std::path::Path::new(nfs::NFSD_PORTLIST),
+                        &mut sink,
+                    )
+                    .is_err()
+                    {
+                        return; // socket write failed; client gone
+                    }
+                }
+                Dispatch::NfsReport => {
+                    // A read: no mutate_lock (mirrors how reads stream).
+                    let mut sink = SocketSink(&mut writer);
+                    if nfs::report_into(
+                        std::path::Path::new(nfs::NFSD_PORTLIST),
+                        std::path::Path::new(nfs::NFS_EXPORTS_FILE),
+                        &mut sink,
+                    )
+                    .is_err()
+                    {
                         return; // socket write failed; client gone
                     }
                 }

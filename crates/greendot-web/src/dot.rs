@@ -2,10 +2,12 @@
 //! actual configfs state, and the RDMA device list.
 
 use crate::actual::lio::{ActualLio, Portal, Target};
+use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::{ActualNvmet, Port};
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
-use crate::state::Export;
+use crate::state::{Export, NfsExport};
 use greendot_proto::DotState;
+use std::net::IpAddr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dot {
@@ -206,6 +208,56 @@ pub fn external_iscsi_dot(target: &Target, rdma: &[RdmaDev]) -> Dot {
     Dot {
         state: DotState::Yellow,
         reason,
+    }
+}
+
+/// The green dot for an NFS export. Green only when the path is exported, the
+/// nfsd RDMA listener is active, and an RDMA device backs the server listen
+/// address. NFSoRDMA binds server-wide on `0.0.0.0:<port>` (no per-export
+/// listen), so the listen check uses the same "any active device" standard the
+/// wildcard nvmet port already uses.
+pub fn nfs_dot(export: &NfsExport, actual: &ActualNfs, rdma: &[RdmaDev], listen: IpAddr) -> Dot {
+    if let Some(error) = &export.last_error {
+        return red(format!("reconcile failed: {error}"));
+    }
+    if !actual.exported(&export.path) {
+        return red("not exported (reconcile pending?)");
+    }
+    let Some(port) = actual.rdma_port else {
+        return Dot {
+            state: DotState::Yellow,
+            reason: "exported over TCP only — NFSoRDMA transport not active".to_owned(),
+        };
+    };
+    if !addr_served_by_rdma(&listen.to_string(), rdma) {
+        return Dot {
+            state: DotState::Yellow,
+            reason: format!("NFSoRDMA enabled but no RDMA device backs listen address {listen}"),
+        };
+    }
+    Dot {
+        state: DotState::Green,
+        reason: format!("serving via NFSoRDMA on {listen}:{port}"),
+    }
+}
+
+/// RDMA status for a foreign NFS export (present in the export table but not
+/// managed by greendot). It is exported by definition, so this reports only the
+/// observed transport — the desired-state-free reading of [`external_nvme_dot`].
+pub fn external_nfs_dot(actual: &ActualNfs, rdma: &[RdmaDev], listen: IpAddr) -> Dot {
+    match actual.rdma_port {
+        Some(port) if addr_served_by_rdma(&listen.to_string(), rdma) => Dot {
+            state: DotState::Green,
+            reason: format!("serving via NFSoRDMA on {listen}:{port}"),
+        },
+        Some(_) => Dot {
+            state: DotState::Yellow,
+            reason: format!("NFSoRDMA listener active but no RDMA device backs {listen}"),
+        },
+        None => Dot {
+            state: DotState::Yellow,
+            reason: "exported over TCP only — no NFSoRDMA listener".to_owned(),
+        },
     }
 }
 
@@ -454,6 +506,49 @@ pub fn iscsi_diagnostics(
             None => (false, "no iSER portal address".to_owned()),
         };
         crit("Portal address served by RDMA", ok, detail)
+    });
+    crits
+}
+
+/// Ordered RDMA-readiness checklist for an NFS export, decomposing the same
+/// state `nfs_dot` consults into per-condition pass/fail rows.
+pub fn nfs_diagnostics(
+    export: &NfsExport,
+    actual: &ActualNfs,
+    rdma: &[RdmaDev],
+    capable_disabled: &[String],
+    listen: IpAddr,
+) -> Vec<Criterion> {
+    let exported = actual.exported(&export.path);
+    let mut crits = vec![crit(
+        "Path exported by nfsd",
+        exported,
+        if exported {
+            export.path.clone()
+        } else {
+            "not in the export table (reconcile pending?)".to_owned()
+        },
+    )];
+    crits.extend(rdma_device_criteria(rdma, capable_disabled));
+    crits.push(crit(
+        "nfsd RDMA listener active",
+        actual.rdma_port.is_some(),
+        match actual.rdma_port {
+            Some(p) => format!("rdma {p} in /proc/fs/nfsd/portlist"),
+            None => "no rdma line in portlist — serving TCP only".to_owned(),
+        },
+    ));
+    crits.push({
+        let served = addr_served_by_rdma(&listen.to_string(), rdma);
+        crit(
+            "Listen address served by RDMA",
+            served,
+            if served {
+                format!("RDMA backs {listen}")
+            } else {
+                format!("no RDMA device backs {listen}")
+            },
+        )
     });
     crits
 }
@@ -895,5 +990,100 @@ mod tests {
         let no_dev = iscsi_diagnostics(&exp, &good, &[], &[]);
         assert!(!find(&no_dev, "RDMA device present").ok);
         assert!(!find(&no_dev, "Portal address served").ok);
+    }
+
+    use crate::actual::nfs::{ActualNfs, NfsExportEntry};
+    use crate::state::NfsExport;
+
+    fn nfs_export(last_error: Option<&str>) -> NfsExport {
+        NfsExport {
+            id: 1,
+            path: "/tank/share".into(),
+            enabled: true,
+            clients: vec![],
+            last_error: last_error.map(Into::into),
+        }
+    }
+
+    fn actual_nfs(exported: bool, rdma_port: Option<u16>) -> ActualNfs {
+        let exports = if exported {
+            vec![NfsExportEntry {
+                path: "/tank/share".into(),
+                clients: vec!["*".into()],
+            }]
+        } else {
+            vec![]
+        };
+        ActualNfs {
+            exports,
+            rdma_port,
+            managed: Default::default(),
+        }
+    }
+
+    #[rstest]
+    // Green: exported, RDMA listener active, a device backs the listen address.
+    #[case::green(nfs_export(None), actual_nfs(true, Some(20049)), vec![rdma_dev("10.0.0.5")], DotState::Green, "nfsordma")]
+    // Yellow: exported but only TCP (no RDMA listener).
+    #[case::yellow_tcp(nfs_export(None), actual_nfs(true, None), vec![rdma_dev("10.0.0.5")], DotState::Yellow, "tcp only")]
+    // Yellow: RDMA listener active but no RDMA device.
+    #[case::yellow_no_dev(nfs_export(None), actual_nfs(true, Some(20049)), vec![], DotState::Yellow, "no RDMA device")]
+    // Red: not in the export table yet.
+    #[case::red_not_exported(nfs_export(None), actual_nfs(false, Some(20049)), vec![rdma_dev("10.0.0.5")], DotState::Red, "not exported")]
+    // Red: a recorded reconcile error wins.
+    #[case::red_error(nfs_export(Some("exportfs failed")), actual_nfs(true, Some(20049)), vec![rdma_dev("10.0.0.5")], DotState::Red, "exportfs failed")]
+    fn nfs_dot_truth_table(
+        #[case] export: NfsExport,
+        #[case] actual: ActualNfs,
+        #[case] rdma: Vec<RdmaDev>,
+        #[case] want_state: DotState,
+        #[case] reason_contains: &str,
+    ) {
+        // Wildcard listen: an RDMA device with any address backs it.
+        let listen: IpAddr = "0.0.0.0".parse().unwrap();
+        let dot = nfs_dot(&export, &actual, &rdma, listen);
+        assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
+        assert!(
+            dot.reason
+                .to_lowercase()
+                .contains(&reason_contains.to_lowercase()),
+            "reason {:?} should mention {:?}",
+            dot.reason,
+            reason_contains
+        );
+    }
+
+    #[test]
+    fn nfs_diagnostics_and_external_dot() {
+        let listen: IpAddr = "0.0.0.0".parse().unwrap();
+        let dev = vec![rdma_dev("10.0.0.5")];
+        // Healthy: every criterion passes.
+        let crits = nfs_diagnostics(
+            &nfs_export(None),
+            &actual_nfs(true, Some(20049)),
+            &dev,
+            &[],
+            listen,
+        );
+        assert!(crits.iter().all(|c| c.ok), "{crits:#?}");
+        // TCP-only flips exactly the listener row.
+        let tcp = nfs_diagnostics(
+            &nfs_export(None),
+            &actual_nfs(true, None),
+            &dev,
+            &[],
+            listen,
+        );
+        assert!(!find(&tcp, "RDMA listener active").ok);
+        assert!(find(&tcp, "Path exported").ok);
+        // External dot reports the observed transport without desired state.
+        assert_eq!(
+            external_nfs_dot(&actual_nfs(true, Some(20049)), &dev, listen).state,
+            DotState::Green
+        );
+        assert_eq!(
+            external_nfs_dot(&actual_nfs(true, None), &dev, listen).state,
+            DotState::Yellow
+        );
     }
 }

@@ -4,7 +4,7 @@
 
 use crate::cmd::TaskSpec;
 use crate::{fs, install, lio, lvm, modules, pam, partition, zfs};
-use greendot_proto::{NvmetDesired, Request, Response};
+use greendot_proto::{NfsDesired, NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
 pub struct Ctx {
@@ -22,6 +22,12 @@ pub enum Dispatch {
     /// Apply NVMe-oF state by writing configfs directly (no external CLI),
     /// streamed as a task like any command.
     NvmetApply(NvmetDesired),
+    /// Apply NFS state: write our exports file + surgical `exportfs` + assert
+    /// the RDMA listener, streamed as a task.
+    NfsApply(NfsDesired),
+    /// Privileged read of NFS actual state (`exportfs -s` + portlist), streamed
+    /// as a task; collected by the web, never recorded.
+    NfsReport,
     /// A refused operation recorded as a failed task carrying this message
     /// (e.g. install on an unsupported distro), so the reason reaches the UI.
     FailedTask(String),
@@ -54,8 +60,24 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             Dispatch::Task(zfs::snapshot_destroy(&dataset, &snap))
         }
 
+        Request::ZfsFsCreate {
+            dataset,
+            mountpoint,
+        } => Dispatch::Task(zfs::zfs_fs_create(&dataset, mountpoint.as_ref())),
+        Request::ZfsSetMountpoint {
+            dataset,
+            mountpoint,
+        } => Dispatch::Task(zfs::zfs_set_mountpoint(&dataset, &mountpoint)),
+        Request::ZfsMount { dataset } => Dispatch::Task(zfs::zfs_mount(&dataset)),
+        Request::ZfsUnmount { dataset } => Dispatch::Task(zfs::zfs_unmount(&dataset)),
+        Request::ZfsDestroy { dataset, recursive } => {
+            Dispatch::Task(zfs::zfs_destroy(&dataset, recursive))
+        }
+
         Request::NvmetApply { desired } => Dispatch::NvmetApply(desired),
         Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
+        Request::NfsApply { desired } => Dispatch::NfsApply(desired),
+        Request::NfsReport => Dispatch::NfsReport,
 
         Request::EnsureModules { modules: list } => match modules::ensure(&list) {
             Some(spec) => Dispatch::Task(spec),
@@ -221,6 +243,21 @@ mod tests {
     #[case::snapshot_destroy(
         Request::SnapshotDestroy { dataset: ds("tank/vm1"), snap: sn("daily") },
         zfs::snapshot_destroy(&ds("tank/vm1"), &sn("daily")))]
+    #[case::zfs_fs_create(
+        Request::ZfsFsCreate { dataset: ds("tank/share"), mountpoint: Some(MountPoint::new("/srv/share").unwrap()) },
+        zfs::zfs_fs_create(&ds("tank/share"), Some(&MountPoint::new("/srv/share").unwrap())))]
+    #[case::zfs_set_mountpoint(
+        Request::ZfsSetMountpoint { dataset: ds("tank/share"), mountpoint: MountPoint::new("/srv/share").unwrap() },
+        zfs::zfs_set_mountpoint(&ds("tank/share"), &MountPoint::new("/srv/share").unwrap()))]
+    #[case::zfs_mount(
+        Request::ZfsMount { dataset: ds("tank/share") },
+        zfs::zfs_mount(&ds("tank/share")))]
+    #[case::zfs_unmount(
+        Request::ZfsUnmount { dataset: ds("tank/share") },
+        zfs::zfs_unmount(&ds("tank/share")))]
+    #[case::zfs_destroy(
+        Request::ZfsDestroy { dataset: ds("tank/share"), recursive: true },
+        zfs::zfs_destroy(&ds("tank/share"), true))]
     #[case::pool_create(
         Request::PoolCreate { name: PoolName::new("tank").unwrap(), vdev: VdevLayout::Mirror, devices: vec![dev("/dev/sdb"), dev("/dev/sdc")], ashift: Some(12) },
         zfs::pool_create(&PoolName::new("tank").unwrap(), VdevLayout::Mirror, &[dev("/dev/sdb"), dev("/dev/sdc")], Some(12)))]
@@ -349,6 +386,16 @@ mod tests {
         assert!(matches!(
             plan(&ctx, Request::NvmetApply { desired: desired.clone() }),
             Dispatch::NvmetApply(d) if d == desired
+        ));
+        // NFS apply/report route to their special arms.
+        let nfs = NfsDesired::default();
+        assert!(matches!(
+            plan(&ctx, Request::NfsApply { desired: nfs.clone() }),
+            Dispatch::NfsApply(d) if d == nfs
+        ));
+        assert!(matches!(
+            plan(&ctx, Request::NfsReport),
+            Dispatch::NfsReport
         ));
     }
 }

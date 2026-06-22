@@ -28,6 +28,10 @@ pub struct Dataset {
     pub avail: u64,
     /// Only for volumes.
     pub volsize: Option<u64>,
+    /// Filesystem mountpoint: an absolute path, or `none`/`legacy`/`-`.
+    pub mountpoint: String,
+    /// Whether the dataset is currently mounted (`-`/`no` ⇒ false).
+    pub mounted: bool,
 }
 
 // Consumed by the snapshots page (Phase 7); parser is already exercised by tests.
@@ -86,11 +90,11 @@ pub fn parse_zpool_list(out: &str) -> Result<Vec<Pool>> {
         .collect()
 }
 
-/// `zfs list -Hp -t filesystem,volume -o name,type,used,avail,volsize`
+/// `zfs list -Hp -t filesystem,volume -o name,type,used,avail,volsize,mountpoint,mounted`
 pub fn parse_zfs_list(out: &str) -> Result<Vec<Dataset>> {
     out.lines()
         .map(|line| {
-            let f = fields(line, 5)?;
+            let f = fields(line, 7)?;
             let kind = match f[1] {
                 "filesystem" => DsKind::Filesystem,
                 "volume" => DsKind::Volume,
@@ -102,6 +106,9 @@ pub fn parse_zfs_list(out: &str) -> Result<Vec<Dataset>> {
                 used: num(f[2])?,
                 avail: num(f[3])?,
                 volsize: opt_num(f[4])?,
+                mountpoint: f[5].into(),
+                // `mounted` is yes/no for filesystems, `-` for volumes.
+                mounted: f[6] == "yes",
             })
         })
         .collect()
@@ -165,7 +172,7 @@ pub async fn datasets() -> Result<Option<Vec<Dataset>>> {
         "-t",
         "filesystem,volume",
         "-o",
-        "name,type,used,avail,volsize",
+        "name,type,used,avail,volsize,mountpoint,mounted",
     ])
     .await?
     .map(|out| parse_zfs_list(&out))
@@ -227,13 +234,21 @@ mod tests {
 
     #[test]
     fn parses_zfs_list_filesystems_and_volumes() {
-        let out = "tank\tfilesystem\t1024000\t2886218022912\t-\n\
-                   tank/vols\tfilesystem\t512000\t2886218022912\t-\n\
-                   tank/vols/vm1\tvolume\t10737418240\t2886218022912\t10737418240\n";
+        let out = "tank\tfilesystem\t1024000\t2886218022912\t-\t/tank\tyes\n\
+                   tank/share\tfilesystem\t512000\t2886218022912\t-\tlegacy\tno\n\
+                   tank/vols/vm1\tvolume\t10737418240\t2886218022912\t10737418240\t-\t-\n";
         let ds = parse_zfs_list(out).unwrap();
         assert_eq!(ds.len(), 3);
         assert_eq!(ds[0].kind, DsKind::Filesystem);
-        assert_eq!(ds[0].volsize, None);
+        assert_eq!(
+            (ds[0].volsize, ds[0].mountpoint.as_str(), ds[0].mounted),
+            (None, "/tank", true)
+        );
+        // legacy/unmounted filesystem.
+        assert_eq!(
+            (ds[1].mountpoint.as_str(), ds[1].mounted),
+            ("legacy", false)
+        );
         assert_eq!(
             ds[2],
             Dataset {
@@ -242,10 +257,12 @@ mod tests {
                 used: 10_737_418_240,
                 avail: 2_886_218_022_912,
                 volsize: Some(10_737_418_240),
+                mountpoint: "-".into(),
+                mounted: false, // volumes report `-`
             }
         );
         assert!(
-            parse_zfs_list("tank\tbookmark\t1\t2\t-\n").is_err(),
+            parse_zfs_list("tank\tbookmark\t1\t2\t-\t-\t-\n").is_err(),
             "unknown type must error"
         );
     }

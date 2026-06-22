@@ -4,6 +4,7 @@ pub mod disks;
 pub mod docs;
 pub mod exports;
 pub mod lvm;
+pub mod nfs;
 pub mod settings;
 pub mod snapshots;
 pub mod tasks;
@@ -55,6 +56,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(zfs::router())
         .merge(lvm::router())
         .merge(exports::router())
+        .merge(nfs::router())
         .merge(settings::router())
         .merge(disks::router())
         .merge(snapshots::router())

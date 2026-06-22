@@ -8,7 +8,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, DevicePath, PoolName, Request, VdevLayout};
+use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, Request, VdevLayout};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -23,6 +23,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
         .route("/zfs/zvol/delete", post(zvol_delete))
+        .route("/zfs/fs", post(fs_create))
+        .route("/zfs/fs/mount", post(fs_mount))
+        .route("/zfs/fs/unmount", post(fs_unmount))
+        .route("/zfs/fs/set-mountpoint", post(fs_set_mountpoint))
+        .route("/zfs/fs/destroy", post(fs_destroy))
 }
 
 pub struct PoolRow {
@@ -53,6 +58,16 @@ pub struct ZvolRow {
     pub name: String,
     pub used: String,
     pub volsize: String,
+}
+
+pub struct FsRow {
+    pub name: String,
+    pub used: String,
+    /// Mountpoint path, or `none`/`legacy`/`-`.
+    pub mountpoint: String,
+    pub mounted: bool,
+    /// Whether `zfs mount` applies (an absolute-path mountpoint, not yet mounted).
+    pub mountable: bool,
 }
 
 #[derive(Default)]
@@ -100,7 +115,9 @@ pub struct PoolDetailView {
     /// `None` when the named pool doesn't exist on this host.
     pub pool: Option<PoolRow>,
     pub zvols: Vec<ZvolRow>,
-    /// Filesystems in this pool, offered as zvol parents.
+    /// Child filesystem datasets in this pool (mount/unmount/destroy targets).
+    pub fs_rows: Vec<FsRow>,
+    /// Filesystems in this pool, offered as zvol/filesystem parents.
     pub parents: Vec<String>,
     /// Empty raw devices offered to expand this pool (the "Add device" form).
     pub add_devices: Vec<PoolDeviceOption>,
@@ -152,6 +169,19 @@ async fn gather_pool_detail(
                     d.kind == DsKind::Filesystem && (d.name == name || d.name.starts_with(&prefix))
                 })
                 .map(|d| d.name.clone())
+                .collect();
+            // Child filesystem datasets (the pool root itself is managed via
+            // pools, not listed here as a mount/destroy target).
+            view.fs_rows = datasets
+                .iter()
+                .filter(|d| d.kind == DsKind::Filesystem && d.name.starts_with(&prefix))
+                .map(|d| FsRow {
+                    mountable: !d.mounted && d.mountpoint.starts_with('/'),
+                    mounted: d.mounted,
+                    mountpoint: d.mountpoint.clone(),
+                    used: human_bytes(d.used),
+                    name: d.name.clone(),
+                })
                 .collect();
             view.zvols = datasets
                 .into_iter()
@@ -317,6 +347,160 @@ async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<Delete
         "zvol-delete",
         &format!("delete {dataset}"),
         format!("deleted {dataset}"),
+        &pool,
+    )
+    .await
+}
+
+// ---- Filesystem dataset lifecycle (mount support) ----
+
+#[derive(Deserialize)]
+struct FsCreateForm {
+    parent: String,
+    name: String,
+    #[serde(default)]
+    mountpoint: String,
+}
+
+async fn fs_create(State(state): State<Arc<AppState>>, Form(form): Form<FsCreateForm>) -> Response {
+    let pool = pool_of(&form.parent).to_owned();
+    let Ok(dataset) = DatasetName::new(format!("{}/{}", form.parent, form.name.trim())) else {
+        return pool_op_failed(
+            &state,
+            &pool,
+            format!("invalid dataset name {:?}", form.name),
+        )
+        .await;
+    };
+    let mountpoint = match form.mountpoint.trim() {
+        "" => None,
+        m => match MountPoint::new(m) {
+            Ok(mp) => Some(mp),
+            Err(_) => {
+                return pool_op_failed(&state, &pool, format!("invalid mountpoint {m:?}")).await;
+            }
+        },
+    };
+    let req = Request::ZfsFsCreate {
+        dataset: dataset.clone(),
+        mountpoint,
+    };
+    run_pool_op(
+        &state,
+        req,
+        "fs-create",
+        &format!("create filesystem {dataset}"),
+        format!("created filesystem {dataset}"),
+        &pool,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct FsDatasetForm {
+    dataset: String,
+}
+
+async fn fs_mount(State(state): State<Arc<AppState>>, Form(form): Form<FsDatasetForm>) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
+    let Ok(dataset) = DatasetName::new(form.dataset) else {
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+    };
+    run_pool_op(
+        &state,
+        Request::ZfsMount {
+            dataset: dataset.clone(),
+        },
+        "fs-mount",
+        &format!("mount {dataset}"),
+        format!("mounted {dataset}"),
+        &pool,
+    )
+    .await
+}
+
+async fn fs_unmount(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<FsDatasetForm>,
+) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
+    let Ok(dataset) = DatasetName::new(form.dataset) else {
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+    };
+    run_pool_op(
+        &state,
+        Request::ZfsUnmount {
+            dataset: dataset.clone(),
+        },
+        "fs-unmount",
+        &format!("unmount {dataset}"),
+        format!("unmounted {dataset}"),
+        &pool,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct FsMountpointForm {
+    dataset: String,
+    mountpoint: String,
+}
+
+async fn fs_set_mountpoint(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<FsMountpointForm>,
+) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
+    let Ok(dataset) = DatasetName::new(form.dataset) else {
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+    };
+    let Ok(mountpoint) = MountPoint::new(form.mountpoint.trim()) else {
+        return pool_op_failed(
+            &state,
+            &pool,
+            format!("invalid mountpoint {:?}", form.mountpoint),
+        )
+        .await;
+    };
+    run_pool_op(
+        &state,
+        Request::ZfsSetMountpoint {
+            dataset: dataset.clone(),
+            mountpoint: mountpoint.clone(),
+        },
+        "fs-set-mountpoint",
+        &format!("set {dataset} mountpoint={mountpoint}"),
+        format!("set {dataset} mountpoint to {mountpoint}"),
+        &pool,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct FsDestroyForm {
+    dataset: String,
+    #[serde(default)]
+    recursive: Option<String>,
+}
+
+async fn fs_destroy(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<FsDestroyForm>,
+) -> Response {
+    let pool = pool_of(&form.dataset).to_owned();
+    let Ok(dataset) = DatasetName::new(form.dataset) else {
+        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+    };
+    let req = Request::ZfsDestroy {
+        dataset: dataset.clone(),
+        recursive: form.recursive.is_some(),
+    };
+    run_pool_op(
+        &state,
+        req,
+        "fs-destroy",
+        &format!("destroy {dataset}"),
+        format!("destroyed {dataset}"),
         &pool,
     )
     .await
@@ -608,6 +792,60 @@ mod tests {
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
             assert!(body.contains("invalid zvol name"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn filesystem_mount_lifecycle_flow() {
+            let app = test_app();
+            let (cookie, csrf) = login(&app).await;
+            let auth = |mut req: HttpRequest<Body>| {
+                req.headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+                req.headers_mut()
+                    .insert("x-greendot-csrf", csrf.parse().unwrap());
+                req
+            };
+
+            // Create a filesystem dataset with an explicit mountpoint.
+            let (_, _, body) = send(
+                &app,
+                auth(form_post(
+                    "/zfs/fs",
+                    "parent=tank&name=share&mountpoint=%2Fsrv%2Fshare",
+                )),
+            )
+            .await;
+            assert!(body.contains("created filesystem tank/share"), "{body}");
+
+            // Mount / unmount route to the (fake) helper and report success.
+            let (_, _, body) = send(
+                &app,
+                auth(form_post("/zfs/fs/mount", "dataset=tank%2Fshare")),
+            )
+            .await;
+            assert!(body.contains("mounted tank/share"), "{body}");
+
+            // A relative mountpoint is rejected before the helper.
+            let (_, _, body) = send(
+                &app,
+                auth(form_post(
+                    "/zfs/fs/set-mountpoint",
+                    "dataset=tank%2Fshare&mountpoint=relative",
+                )),
+            )
+            .await;
+            assert!(body.contains("invalid mountpoint"), "{body}");
+
+            // Destroy (recursive) succeeds through the fake helper.
+            let (_, _, body) = send(
+                &app,
+                auth(form_post(
+                    "/zfs/fs/destroy",
+                    "dataset=tank%2Fshare&recursive=1",
+                )),
+            )
+            .await;
+            assert!(body.contains("destroyed tank/share"), "{body}");
         }
 
         #[tokio::test]
