@@ -1,0 +1,29 @@
+<div id="snap-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.snap.is_none() %}
+  <p class="empty">Snapshot {{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(snap) = view.snap %}
+  <table>
+    <thead><tr><th>Snapshot</th><th>Used</th><th>Created</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ snap.name }}</td>
+        <td>{{ snap.used }}</td>
+        <td>{{ snap.created }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Destroy snapshot</h2>
+  <form class="inline" hx-post="/snapshots/delete"
+        hx-confirm="Destroy snapshot {{ snap.name }}?">
+    <input type="hidden" name="name" value="{{ snap.name }}">
+    <button class="danger">Destroy</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

@@ -56,27 +56,7 @@
         <td>{{ z.name }}</td>
         <td>{{ z.used }}</td>
         <td>{{ z.volsize }}</td>
-        <td>
-          <div class="rowactions">
-            <details>
-              <summary>Resize</summary>
-              <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#pool-detail-content" hx-swap="outerHTML">
-                <input type="hidden" name="dataset" value="{{ z.name }}">
-                <input name="size" size="5" placeholder="new" required>
-                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-                <button>Resize</button>
-              </form>
-            </details>
-            <details>
-              <summary>Delete</summary>
-              <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#pool-detail-content" hx-swap="outerHTML"
-                    hx-confirm="Delete {{ z.name }}? This destroys the volume's data.">
-                <input type="hidden" name="dataset" value="{{ z.name }}">
-                <button class="danger">Delete</button>
-              </form>
-            </details>
-          </div>
-        </td>
+        <td><a href="/zfs/pool/{{ view.name }}/zvol/{{ z.rel }}">Manage</a></td>
       </tr>
       {% endfor %}
     </tbody>

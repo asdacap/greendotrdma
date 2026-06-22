@@ -83,18 +83,7 @@
         <td class="small">{{ n.addrs }}</td>
         <td class="small">{{ n.status }}</td>
         <td>
-          {% if let Some(pci) = n.roce_pci %}
-          <form class="inline" hx-post="/settings/roce" hx-target="#settings-content" hx-swap="outerHTML"
-                hx-confirm="Enabling RoCE reloads {{ pci }} and briefly drops its network. If you reach this UI over this NIC your session will disconnect — reconnect after a few seconds.">
-            <input type="hidden" name="pci" value="{{ pci }}">
-            <button>Enable RoCE</button>
-          </form>
-          {% else if n.soft_roce %}
-          <form class="inline" hx-post="/settings/rxe" hx-target="#settings-content" hx-swap="outerHTML">
-            <input type="hidden" name="netdev" value="{{ n.netdev }}">
-            <button>Enable Soft-RoCE</button>
-          </form>
-          {% endif %}
+          {% if n.roce_pci.is_some() || n.soft_roce %}<a href="/settings/nic/{{ n.netdev }}">Manage</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

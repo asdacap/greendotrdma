@@ -33,6 +33,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/lvm/vg/create", axum::routing::get(vg_create_page))
         .route("/lvm/vg", post(vg_create))
         .route("/lvm/vg/{name}", axum::routing::get(vg_detail_page))
+        .route("/lvm/vg/{vg}/lv/{name}", axum::routing::get(lv_detail_page))
+        .route("/lvm/pv/{*id}", axum::routing::get(pv_detail_page))
 }
 
 pub struct VgRow {
@@ -59,6 +61,9 @@ impl VgRow {
 
 pub struct PvRow {
     pub name: String,
+    /// `name` minus its leading `/`, so the device works as a URL path segment;
+    /// the detail handler rebuilds it as `format!("/{id}")`.
+    pub path_id: String,
     pub vg: String,
     pub size: String,
     pub free: String,
@@ -104,8 +109,6 @@ pub struct DeviceOption {
 pub struct LvmView {
     pub vgs: Vec<VgRow>,
     pub pvs: Vec<PvRow>,
-    /// Empty raw devices offered for extending a VG.
-    pub extend_devices: Vec<DeviceOption>,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -116,12 +119,6 @@ pub struct LvmView {
 #[template(path = "lvm.html")]
 struct LvmTemplate {
     user: CurrentUser,
-    view: LvmView,
-}
-
-#[derive(Template)]
-#[template(path = "_lvm.html")]
-struct LvmPartial {
     view: LvmView,
 }
 
@@ -159,28 +156,8 @@ async fn gather(state: &AppState, flash: Option<String>, form_error: Option<Stri
             vg: p.vg.unwrap_or_else(|| "–".into()),
             size: human_bytes(p.size),
             free: human_bytes(p.free),
+            path_id: p.name.trim_start_matches('/').to_owned(),
             name: p.name,
-        })
-        .collect();
-
-    let in_use: HashSet<String> = state
-        .db
-        .list_exports()
-        .map(|es| es.into_iter().map(|e| e.device_path).collect())
-        .unwrap_or_default();
-    view.extend_devices = block::available_block_devices(&state.helper, &in_use)
-        .await
-        .into_iter()
-        .filter(|d| {
-            matches!(
-                d.kind,
-                block::AvailKind::WholeDisk | block::AvailKind::Partition
-            ) && d.fstype.is_none()
-        })
-        .map(|d| DeviceOption {
-            path: d.path,
-            label: d.label,
-            checked: false,
         })
         .collect();
     view
@@ -196,24 +173,6 @@ async fn lvm_page(
     })
 }
 
-/// Runs the request as a recorded task and re-renders the partial.
-async fn run(state: &AppState, req: Request, kind: &str, title: &str, success: String) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather(state, flash, error).await
-        }
-        Err(e) => gather(state, None, Some(format!("{e:#}"))).await,
-    };
-    page(LvmPartial { view })
-}
-
-async fn form_failed(state: &AppState, message: impl Into<String>) -> Response {
-    page(LvmPartial {
-        view: gather(state, None, Some(message.into())).await,
-    })
-}
-
 // ---- Per-VG page (logical-volume listing + creation) ----
 
 #[derive(Default)]
@@ -224,6 +183,8 @@ pub struct VgDetailView {
     pub lvs: Vec<LvRow>,
     /// `vg/pool` identifiers for this VG's thin pools, for the thin-volume form.
     pub thin_pools: Vec<String>,
+    /// Empty raw devices offered for extending this VG (the "Extend" form).
+    pub extend_devices: Vec<DeviceOption>,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -271,6 +232,30 @@ async fn gather_vg_detail(
         return view;
     };
     view.vg = vgs.into_iter().find(|v| v.name == name).map(VgRow::new);
+    // A device added to the VG must be an empty raw device, so offer the same
+    // candidates as VG creation (no formatted partitions or existing PVs).
+    if view.vg.is_some() {
+        let in_use: HashSet<String> = state
+            .db
+            .list_exports()
+            .map(|es| es.into_iter().map(|e| e.device_path).collect())
+            .unwrap_or_default();
+        view.extend_devices = block::available_block_devices(&state.helper, &in_use)
+            .await
+            .into_iter()
+            .filter(|d| {
+                matches!(
+                    d.kind,
+                    block::AvailKind::WholeDisk | block::AvailKind::Partition
+                ) && d.fstype.is_none()
+            })
+            .map(|d| DeviceOption {
+                path: d.path,
+                label: d.label,
+                checked: false,
+            })
+            .collect();
+    }
     view.thin_pools = lvs
         .iter()
         .filter(|l| l.vg == name && l.kind == LvKind::ThinPool)
@@ -318,6 +303,177 @@ async fn run_lv(
 async fn lv_failed(state: &AppState, vg: &str, message: impl Into<String>) -> Response {
     page(VgDetailPartial {
         view: gather_vg_detail(state, vg, None, Some(message.into())).await,
+    })
+}
+
+// ---- Per-LV page (grow / shrink / rename / delete) ----
+
+#[derive(Default)]
+pub struct LvDetailView {
+    pub vg: String,
+    pub name: String,
+    /// `None` when the named LV doesn't exist in this VG on this host.
+    pub lv: Option<LvRow>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "lv_detail.html")]
+struct LvDetailTemplate {
+    user: CurrentUser,
+    view: LvDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_lv_detail.html")]
+struct LvDetailPartial {
+    view: LvDetailView,
+}
+
+async fn gather_lv_detail(
+    state: &AppState,
+    vg: &str,
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> LvDetailView {
+    let mut view = LvDetailView {
+        vg: vg.to_owned(),
+        name: name.to_owned(),
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match lvm::logical_volumes(&state.helper).await {
+        Ok(Some(lvs)) => {
+            view.lv = lvs
+                .into_iter()
+                .find(|l| l.vg == vg && l.name == name)
+                .map(LvRow::new);
+        }
+        // Absent ⇒ LVM isn't installed on this host.
+        Ok(None) => view.not_installed = true,
+        Err(e) => view.error = Some(format!("could not read LVM state: {e:#}")),
+    }
+    view
+}
+
+async fn lv_detail_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path((vg, name)): Path<(String, String)>,
+) -> Response {
+    page(LvDetailTemplate {
+        user,
+        view: gather_lv_detail(&state, &vg, &name, None, None).await,
+    })
+}
+
+/// Runs an LV request as a recorded task and re-renders the owning LV's detail
+/// partial with the outcome (stay-on-page ops: grow / shrink / rename).
+async fn run_lv_detail(
+    state: &AppState,
+    req: Request,
+    kind: &str,
+    title: &str,
+    success: String,
+    vg: &str,
+    name: &str,
+) -> Response {
+    let view = match crate::task_runner::run(state, req, kind, title).await {
+        Ok(outcome) => {
+            let (flash, error) = outcome.message(&success);
+            gather_lv_detail(state, vg, name, flash, error).await
+        }
+        Err(e) => gather_lv_detail(state, vg, name, None, Some(format!("{e:#}"))).await,
+    };
+    page(LvDetailPartial { view })
+}
+
+async fn lv_detail_failed(
+    state: &AppState,
+    vg: &str,
+    name: &str,
+    message: impl Into<String>,
+) -> Response {
+    page(LvDetailPartial {
+        view: gather_lv_detail(state, vg, name, None, Some(message.into())).await,
+    })
+}
+
+// ---- Per-PV page (remove from VG) ----
+
+#[derive(Default)]
+pub struct PvDetailView {
+    /// `None` when the named PV doesn't exist on this host.
+    pub pv: Option<PvRow>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "pv_detail.html")]
+struct PvDetailTemplate {
+    user: CurrentUser,
+    view: PvDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_pv_detail.html")]
+struct PvDetailPartial {
+    view: PvDetailView,
+}
+
+async fn gather_pv_detail(
+    state: &AppState,
+    device: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> PvDetailView {
+    let mut view = PvDetailView {
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match lvm::physical_volumes(&state.helper).await {
+        Ok(Some(pvs)) => {
+            view.pv = pvs.into_iter().find(|p| p.name == device).map(|p| PvRow {
+                in_vg: p.vg.is_some(),
+                vg: p.vg.unwrap_or_else(|| "–".into()),
+                size: human_bytes(p.size),
+                free: human_bytes(p.free),
+                path_id: p.name.trim_start_matches('/').to_owned(),
+                name: p.name,
+            });
+        }
+        // Absent ⇒ LVM isn't installed on this host.
+        Ok(None) => view.not_installed = true,
+        Err(e) => view.error = Some(format!("could not read LVM state: {e:#}")),
+    }
+    view
+}
+
+async fn pv_detail_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<String>,
+) -> Response {
+    // The wildcard segment drops the device's leading `/`; rebuild it.
+    let device = format!("/{id}");
+    page(PvDetailTemplate {
+        user,
+        view: gather_pv_detail(&state, &device, None, None).await,
+    })
+}
+
+async fn pv_detail_failed(state: &AppState, device: &str, message: impl Into<String>) -> Response {
+    page(PvDetailPartial {
+        view: gather_pv_detail(state, device, None, Some(message.into())).await,
     })
 }
 
@@ -432,45 +588,48 @@ fn parse_lv_resize(form: &LvResizeForm) -> Result<(VgName, LvName, u64), &'stati
 }
 
 async fn lv_resize(State(state): State<Arc<AppState>>, Form(form): Form<LvResizeForm>) -> Response {
-    let scope = form.vg.trim().to_owned();
+    // The LV's detail page hosts this form; stay on it after running.
+    let (scope_vg, scope_name) = (form.vg.trim().to_owned(), form.name.trim().to_owned());
     let (vg, name, new_size) = match parse_lv_resize(&form) {
         Ok(v) => v,
-        Err(e) => return lv_failed(&state, &scope, e).await,
+        Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
     let req = Request::LvResize {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
-    run_lv(
+    run_lv_detail(
         &state,
         req,
         "lv-resize",
         &format!("grow {vg}/{name}"),
         format!("resized {vg}/{name}"),
-        &scope,
+        &scope_vg,
+        &scope_name,
     )
     .await
 }
 
 async fn lv_shrink(State(state): State<Arc<AppState>>, Form(form): Form<LvResizeForm>) -> Response {
-    let scope = form.vg.trim().to_owned();
+    let (scope_vg, scope_name) = (form.vg.trim().to_owned(), form.name.trim().to_owned());
     let (vg, name, new_size) = match parse_lv_resize(&form) {
         Ok(v) => v,
-        Err(e) => return lv_failed(&state, &scope, e).await,
+        Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
     let req = Request::LvShrink {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
-    run_lv(
+    run_lv_detail(
         &state,
         req,
         "lv-shrink",
         &format!("shrink {vg}/{name}"),
         format!("shrank {vg}/{name}"),
-        &scope,
+        &scope_vg,
+        &scope_name,
     )
     .await
 }
@@ -483,26 +642,34 @@ struct LvRenameForm {
 }
 
 async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRenameForm>) -> Response {
-    let scope = form.vg.trim().to_owned();
+    let (scope_vg, scope_name) = (form.vg.trim().to_owned(), form.name.trim().to_owned());
     let (Ok(vg), Ok(name), Ok(new_name)) = (
         VgName::new(form.vg.trim()),
         LvName::new(form.name.trim()),
         LvName::new(form.new_name.trim()),
     ) else {
-        return lv_failed(&state, &scope, format!("invalid name {:?}", form.new_name)).await;
+        return lv_detail_failed(
+            &state,
+            &scope_vg,
+            &scope_name,
+            format!("invalid name {:?}", form.new_name),
+        )
+        .await;
     };
     let req = Request::LvRename {
         vg: vg.clone(),
         name: name.clone(),
         new_name: new_name.clone(),
     };
-    run_lv(
+    // The LV now lives under `new_name`, so re-gather (and stay) on that name.
+    run_lv_detail(
         &state,
         req,
         "lv-rename",
         &format!("rename {vg}/{name} to {new_name}"),
         format!("renamed {vg}/{name} to {new_name}"),
-        &scope,
+        &scope_vg,
+        new_name.as_str(),
     )
     .await
 }
@@ -513,24 +680,30 @@ struct LvDeleteForm {
     name: String,
 }
 
-async fn lv_delete(State(state): State<Arc<AppState>>, Form(form): Form<LvDeleteForm>) -> Response {
-    let scope = form.vg.trim().to_owned();
+async fn lv_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<LvDeleteForm>,
+) -> Response {
+    // Removing the LV leaves its page nonexistent, so on success go back to the
+    // owning VG; on failure the LV still exists, so re-render its detail.
+    let (scope_vg, scope_name) = (form.vg.trim().to_owned(), form.name.trim().to_owned());
     let (Ok(vg), Ok(name)) = (VgName::new(form.vg.trim()), LvName::new(form.name.trim())) else {
-        return lv_failed(&state, &scope, "invalid logical volume").await;
+        return lv_detail_failed(&state, &scope_vg, &scope_name, "invalid logical volume").await;
     };
+    let title = format!("delete {vg}/{name}");
     let req = Request::LvDelete {
         vg: vg.clone(),
         name: name.clone(),
     };
-    run_lv(
-        &state,
-        req,
-        "lv-delete",
-        &format!("delete {vg}/{name}"),
-        format!("deleted {vg}/{name}"),
-        &scope,
-    )
-    .await
+    match crate::task_runner::run(&state, req, "lv-delete", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, &format!("/lvm/vg/{scope_vg}")),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "delete failed".into());
+            lv_detail_failed(&state, &scope_vg, &scope_name, msg).await
+        }
+        Err(e) => lv_detail_failed(&state, &scope_vg, &scope_name, format!("{e:#}")).await,
+    }
 }
 
 // ---- Volume group: extend / reduce / remove ----
@@ -541,46 +714,58 @@ struct VgDeviceForm {
     device: String,
 }
 
+/// Extend lives on the VG's detail page (a section-level action there), so it
+/// stays on that page after running.
 async fn vg_extend(State(state): State<Arc<AppState>>, Form(form): Form<VgDeviceForm>) -> Response {
+    let scope = form.vg.trim().to_owned();
     let (Ok(vg), Ok(device)) = (
         VgName::new(form.vg.trim()),
         DevicePath::new(form.device.trim()),
     ) else {
-        return form_failed(&state, "invalid volume group or device").await;
+        return lv_failed(&state, &scope, "invalid volume group or device").await;
     };
     let req = Request::VgExtend {
         vg: vg.clone(),
         device: device.clone(),
     };
-    run(
+    run_lv(
         &state,
         req,
         "vg-extend",
         &format!("extend {vg} with {device}"),
         format!("added {device} to {vg}"),
+        &scope,
     )
     .await
 }
 
-async fn vg_reduce(State(state): State<Arc<AppState>>, Form(form): Form<VgDeviceForm>) -> Response {
+/// Remove-from-VG lives on the PV's detail page; on success the PV is no longer
+/// in a VG so go back to the LVM index, otherwise re-render the PV's detail.
+async fn vg_reduce(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<VgDeviceForm>,
+) -> Response {
+    let device_scope = form.device.trim().to_owned();
     let (Ok(vg), Ok(device)) = (
         VgName::new(form.vg.trim()),
         DevicePath::new(form.device.trim()),
     ) else {
-        return form_failed(&state, "invalid volume group or device").await;
+        return pv_detail_failed(&state, &device_scope, "invalid volume group or device").await;
     };
+    let title = format!("remove {device} from {vg}");
     let req = Request::VgReduce {
         vg: vg.clone(),
         device: device.clone(),
     };
-    run(
-        &state,
-        req,
-        "vg-reduce",
-        &format!("remove {device} from {vg}"),
-        format!("removed {device} from {vg}"),
-    )
-    .await
+    match crate::task_runner::run(&state, req, "vg-reduce", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, "/lvm"),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "remove from VG failed".into());
+            pv_detail_failed(&state, &device_scope, msg).await
+        }
+        Err(e) => pv_detail_failed(&state, &device_scope, format!("{e:#}")).await,
+    }
 }
 
 #[derive(Deserialize)]
@@ -588,19 +773,27 @@ struct VgRemoveForm {
     vg: String,
 }
 
-async fn vg_remove(State(state): State<Arc<AppState>>, Form(form): Form<VgRemoveForm>) -> Response {
+/// Remove-VG lives on the VG's detail page; on success that page no longer
+/// applies so go back to the LVM index, otherwise re-render the VG's detail.
+async fn vg_remove(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<VgRemoveForm>,
+) -> Response {
+    let scope = form.vg.trim().to_owned();
     let Ok(vg) = VgName::new(form.vg.trim()) else {
-        return form_failed(&state, "invalid volume group").await;
+        return lv_failed(&state, &scope, "invalid volume group").await;
     };
+    let title = format!("remove volume group {vg}");
     let req = Request::VgRemove { vg: vg.clone() };
-    run(
-        &state,
-        req,
-        "vg-remove",
-        &format!("remove volume group {vg}"),
-        format!("removed volume group {vg}"),
-    )
-    .await
+    match crate::task_runner::run(&state, req, "vg-remove", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, "/lvm"),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "VG removal failed".into());
+            lv_failed(&state, &scope, msg).await
+        }
+        Err(e) => lv_failed(&state, &scope, format!("{e:#}")).await,
+    }
 }
 
 // ---- Dedicated VG creation form ----
@@ -776,8 +969,9 @@ mod tests {
         assert!(body.contains("Volume groups"), "{body}");
         assert!(body.contains("/lvm/vg/vg0"), "{body}");
 
-        // The per-VG page hosts the LV listing and both create forms. The fake
-        // helper reports vg0 with a linear LV `data` and a thin pool `pool0`.
+        // The per-VG page hosts the LV listing, both create forms, and the VG's
+        // own Extend/Remove actions. The fake helper reports vg0 with a linear
+        // LV `data` and a thin pool `pool0`; each LV row links to its own page.
         let req = HttpRequest::get("/lvm/vg/vg0")
             .header(header::COOKIE, &cookie)
             .body(Body::empty())
@@ -785,11 +979,18 @@ mod tests {
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            body.contains("Logical volumes") && body.contains("data"),
+            body.contains("Logical volumes") && body.contains("/lvm/vg/vg0/lv/data"),
             "{body}"
         );
         assert!(
             body.contains("Create logical volume") && body.contains("Create thin pool"),
+            "{body}"
+        );
+        // The VG's own Extend/Remove actions moved onto this page. The Extend
+        // form only renders when free devices exist (the fake helper reports
+        // none), so assert on the always-present Extend heading and Remove VG.
+        assert!(
+            body.contains("<h2>Extend</h2>") && body.contains("Remove VG"),
             "{body}"
         );
 
@@ -860,9 +1061,104 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
         assert_eq!(headers[header::LOCATION], "/lvm");
 
-        // Remove VG reaches the helper.
+        // Remove VG is a remove-op: success redirects back to the LVM index.
         let req = auth(&cookie, &csrf, form_post("/lvm/vg/delete", "vg=vg0"));
-        let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("removed volume group vg0"), "{body}");
+        let (status, headers, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/lvm");
+    }
+
+    #[tokio::test]
+    async fn lv_detail_stay_and_delete_flow() {
+        let app = test_app();
+        let (cookie, csrf) = login(&app).await;
+
+        // The LV's own page renders with its grow/shrink/rename/delete forms; an
+        // unknown LV renders gracefully (200 + not-found), never a 500.
+        let req = HttpRequest::get("/lvm/vg/vg0/lv/data")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Grow") && body.contains("Delete"), "{body}");
+
+        let req = HttpRequest::get("/lvm/vg/vg0/lv/missing")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not found"), "{body}");
+
+        // Resize is a stay-op: it re-renders the LV's detail partial.
+        let req = auth(
+            &cookie,
+            &csrf,
+            form_post("/lvm/lv/resize", "vg=vg0&name=data&size=20&unit=GiB"),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("resized vg0/data") && body.contains(r#"id="lv-detail-content""#),
+            "{body}"
+        );
+
+        // Delete is a remove-op: success redirects to the owning VG's page.
+        let req = auth(
+            &cookie,
+            &csrf,
+            form_post("/lvm/lv/delete", "vg=vg0&name=data"),
+        );
+        let (status, headers, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/lvm/vg/vg0");
+    }
+
+    #[tokio::test]
+    async fn pv_detail_and_vg_extend_reduce_flow() {
+        let app = test_app();
+        let (cookie, csrf) = login(&app).await;
+
+        // The PV page renders its Remove-from-VG action; an unknown PV is a
+        // graceful not-found, not a 500. The fake helper reports /dev/sdb in vg0.
+        let req = HttpRequest::get("/lvm/pv/dev/sdb")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Remove from VG") && body.contains("/dev/sdb"),
+            "{body}"
+        );
+
+        let req = HttpRequest::get("/lvm/pv/dev/nope")
+            .header(header::COOKIE, &cookie)
+            .body(Body::empty())
+            .unwrap();
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not found"), "{body}");
+
+        // VG extend is a stay-op on the VG page: it re-renders that detail.
+        let req = auth(
+            &cookie,
+            &csrf,
+            form_post("/lvm/vg/extend", "vg=vg0&device=%2Fdev%2Fsdc"),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("added /dev/sdc to vg0"), "{body}");
+
+        // Remove-from-VG is a remove-op: success redirects to the LVM index.
+        let req = auth(
+            &cookie,
+            &csrf,
+            form_post("/lvm/vg/reduce", "vg=vg0&device=%2Fdev%2Fsdb"),
+        );
+        let (status, headers, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/lvm");
     }
 }

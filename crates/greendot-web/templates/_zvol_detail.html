@@ -1,0 +1,39 @@
+<div id="zvol-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.not_installed %}
+  <p class="empty">ZFS is not installed on this host.</p>
+  {% else if view.zvol.is_none() %}
+  <p class="empty">Zvol {{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(zvol) = view.zvol %}
+  <table>
+    <thead><tr><th>Name</th><th>Used</th><th>Volsize</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ zvol.name }}</td>
+        <td>{{ zvol.used }}</td>
+        <td>{{ zvol.volsize }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Resize</h2>
+  <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#zvol-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="dataset" value="{{ zvol.name }}">
+    <input name="size" size="5" placeholder="new" required>
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <button>Resize</button>
+  </form>
+
+  <h2>Delete</h2>
+  <form class="inline" hx-post="/zfs/zvol/delete"
+        hx-confirm="Delete {{ zvol.name }}? This destroys the volume's data.">
+    <input type="hidden" name="dataset" value="{{ zvol.name }}">
+    <button class="danger">Delete</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

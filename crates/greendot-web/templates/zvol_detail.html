@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — ZFS — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Zvol {{ view.name }}</h1>
+<p><a href="/zfs/pool/{{ view.pool }}">← Back to pool {{ view.pool }}</a></p>
+{% include "_zvol_detail.html" %}
+{% endblock %}

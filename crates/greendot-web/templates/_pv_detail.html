@@ -1,0 +1,35 @@
+<div id="pv-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.not_installed %}
+  <p class="empty">LVM is not installed on this host.</p>
+  {% else if view.pv.is_none() %}
+  <p class="empty">Physical volume not found.</p>
+  {% else %}
+  {% if let Some(pv) = view.pv %}
+  <table>
+    <thead><tr><th>PV</th><th>VG</th><th>Size</th><th>Free</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ pv.name }}</td>
+        <td>{{ pv.vg }}</td>
+        <td>{{ pv.size }}</td>
+        <td>{{ pv.free }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  {% if pv.in_vg %}
+  <h2>Remove from VG</h2>
+  <form class="inline" hx-post="/lvm/vg/reduce"
+        hx-confirm="Remove {{ pv.name }} from {{ pv.vg }}? Fails if it still holds data.">
+    <input type="hidden" name="vg" value="{{ pv.vg }}">
+    <input type="hidden" name="device" value="{{ pv.name }}">
+    <button class="danger">Remove from VG</button>
+  </form>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</div>

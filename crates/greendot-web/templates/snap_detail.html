@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — Snapshots — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Snapshot {{ view.name }}</h1>
+<p><a href="/snapshots">← Back to Snapshots</a></p>
+{% include "_snap_detail.html" %}
+{% endblock %}

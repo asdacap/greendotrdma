@@ -17,17 +17,7 @@
         <td>{{ p.prefix }}</td>
         <td>{{ p.keep }}</td>
         <td>{{ p.last_run }}</td>
-        <td>
-          <form class="inline" hx-post="/snapshots/policy/toggle" hx-target="#snapshots-content" hx-swap="outerHTML">
-            <input type="hidden" name="id" value="{{ p.id }}">
-            <input type="hidden" name="enable" value="{{ !p.enabled }}">
-            <button>{% if p.enabled %}Disable{% else %}Enable{% endif %}</button>
-          </form>
-          <form class="inline" hx-post="/snapshots/policy/delete" hx-target="#snapshots-content" hx-swap="outerHTML">
-            <input type="hidden" name="id" value="{{ p.id }}">
-            <button class="danger">Delete</button>
-          </form>
-        </td>
+        <td><a href="/snapshots/policy/{{ p.id }}">Manage</a></td>
       </tr>
       {% endfor %}
     </tbody>
@@ -80,13 +70,7 @@
         <td>{{ s.name }}</td>
         <td>{{ s.used }}</td>
         <td>{{ s.created }}</td>
-        <td>
-          <form class="inline" hx-post="/snapshots/delete" hx-target="#snapshots-content" hx-swap="outerHTML"
-                hx-confirm="Destroy snapshot {{ s.name }}?">
-            <input type="hidden" name="name" value="{{ s.name }}">
-            <button class="danger">Destroy</button>
-          </form>
-        </td>
+        <td><a href="/snapshots/snap/{{ s.name }}">Manage</a></td>
       </tr>
       {% endfor %}
     </tbody>

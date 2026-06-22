@@ -1,5 +1,5 @@
 use super::{AppState, page};
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentUser, nav_redirect};
 use crate::dot::{
     Criterion, external_iscsi_dot, external_nvme_dot, iscsi_diagnostics, iscsi_dot,
     nvme_diagnostics, nvme_dot,
@@ -9,6 +9,7 @@ use crate::state::{Export, ExportKind, NewExport};
 use crate::{actual, reconcile};
 use askama::Template;
 use axum::extract::{Form, Path, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -21,6 +22,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/exports", get(exports_page))
         .route("/exports/create", post(create))
+        .route("/exports/{id}", get(export_detail_page))
         .route("/exports/toggle", post(toggle))
         .route("/exports/delete", post(delete))
         .route("/exports/{id}/diagnose", get(diagnose_page))
@@ -430,6 +432,62 @@ struct DotsPartial {
     view: ExportsView,
 }
 
+// ---- Per-export page (client instructions + enable/disable/delete) ----
+
+pub struct ExportDetailView {
+    pub name: String,
+    /// `None` when the export id is unknown (or belongs to a foreign export).
+    pub row: Option<ExportRow>,
+    pub banner: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "export_detail.html")]
+struct ExportDetailTemplate {
+    user: CurrentUser,
+    view: ExportDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_export_detail.html")]
+struct ExportDetailPartial {
+    view: ExportDetailView,
+}
+
+/// Re-reads live state via [`gather`] and picks out the one managed export, so
+/// the detail page shows the same dot/transports/client commands as the list.
+async fn gather_export_detail(
+    state: &AppState,
+    id: i64,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> ExportDetailView {
+    let view = gather(state, flash, form_error).await;
+    let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
+    ExportDetailView {
+        name: row
+            .as_ref()
+            .map_or_else(|| id.to_string(), |r| r.name.clone()),
+        row,
+        banner: view.banner,
+        flash: view.flash,
+        form_error: view.form_error,
+    }
+}
+
+async fn export_detail_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    page(ExportDetailTemplate {
+        user,
+        view: gather_export_detail(&state, id, None, None).await,
+    })
+}
+
 pub struct DiagnoseView {
     pub name: String,
     pub protocol: &'static str,
@@ -615,26 +673,39 @@ struct IdForm {
     enable: Option<bool>,
 }
 
+/// Enable/disable stays on the export's own page, re-rendering its detail partial.
 async fn toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) -> Response {
     let enable = form.enable.unwrap_or(false);
-    let result = match state.db.set_export_enabled(form.id, enable) {
-        Ok(()) => reconcile_state(&state).await,
-        Err(e) => Err(e),
+    let success = format!("export {}", if enable { "enabled" } else { "disabled" });
+    let (flash, error) = match state.db.set_export_enabled(form.id, enable) {
+        Ok(()) => match reconcile_state(&state).await {
+            Ok(()) => (Some(success), None),
+            Err(e) => (None, Some(format!("{e:#}"))),
+        },
+        Err(e) => (None, Some(format!("{e:#}"))),
     };
-    finish(
-        &state,
-        result,
-        format!("export {}", if enable { "enabled" } else { "disabled" }),
-    )
-    .await
+    page(ExportDetailPartial {
+        view: gather_export_detail(&state, form.id, flash, error).await,
+    })
 }
 
-async fn delete(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) -> Response {
-    let result = match state.db.delete_export(form.id) {
-        Ok(()) => reconcile_state(&state).await,
-        Err(e) => Err(e),
-    };
-    finish(&state, result, "export deleted".into()).await
+/// Deleting an export removes its page, so on success redirect back to the list;
+/// a failed DB delete leaves the row in place and re-renders the detail partial.
+async fn delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<IdForm>,
+) -> Response {
+    match state.db.delete_export(form.id) {
+        Ok(()) => {
+            // A reconcile failure surfaces on the /exports banner, not here.
+            let _ = reconcile_state(&state).await;
+            nav_redirect(&headers, "/exports")
+        }
+        Err(e) => page(ExportDetailPartial {
+            view: gather_export_detail(&state, form.id, None, Some(format!("{e:#}"))).await,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -761,14 +832,9 @@ mod tests {
             "nothing actually configured yet: {body}"
         );
         assert!(body.contains("RDMA + TCP"), "{body}");
-        // RDMA requested but not yet served → a Diagnose link is offered.
-        assert!(body.contains("/exports/1/diagnose"), "{body}");
-        // Each export carries a copy-paste client connect command.
-        assert!(body.contains("Client instruction"), "{body}");
-        assert!(
-            body.contains("nvme connect -t rdma") && body.contains("nqn.2026-06.io.greendot:vm1"),
-            "{body}"
-        );
+        // The list's action cell is now just a Manage link to the row's page —
+        // the diagnose link and client commands live on that detail page.
+        assert!(body.contains("/exports/1\">Manage"), "{body}");
 
         // iSCSI export with an IQN initiator works and shows its protocol.
         let req = auth(form_post(
@@ -804,20 +870,75 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("vm1"), "{body}");
 
-        // Toggle off → gray dot; delete → gone.
-        let (_, _, body) = send(
+        // Toggle off stays on the export's page → its detail partial with a
+        // gray dot and an "Enable" button to turn it back on.
+        let (status, _, body) = send(
             &app,
             auth(form_post("/exports/toggle", "id=1&enable=false")),
         )
         .await;
+        assert_eq!(status, StatusCode::OK);
         assert!(body.contains("dot-gray"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/exports/delete", "id=1"))).await;
+        assert!(body.contains("Enable"), "{body}");
+
+        // Delete is a remove-op: a plain (non-htmx) POST redirects to the list.
+        let (status, headers, _) = send(&app, auth(form_post("/exports/delete", "id=1"))).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "/exports");
+        // The other export survives; deleting it too empties the list.
+        let req = auth(HttpRequest::get("/exports").body(Body::empty()).unwrap());
+        let (_, _, body) = send(&app, req).await;
         assert!(
             body.contains("tape"),
             "iSCSI export must survive deleting the other: {body}"
         );
-        let (_, _, body) = send(&app, auth(form_post("/exports/delete", "id=2"))).await;
+        let (status, headers, _) = send(&app, auth(form_post("/exports/delete", "id=2"))).await;
+        assert_eq!(status, StatusCode::SEE_OTHER);
+        assert_eq!(headers[header::LOCATION], "/exports");
+        let req = auth(HttpRequest::get("/exports").body(Body::empty()).unwrap());
+        let (_, _, body) = send(&app, req).await;
         assert!(body.contains("No exports yet"), "{body}");
+    }
+
+    #[tokio::test]
+    async fn export_detail_page_shows_management_controls() {
+        let app = test_app();
+        let (cookie, csrf) = login(&app).await;
+        let auth = |mut req: HttpRequest<Body>| {
+            req.headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            req.headers_mut()
+                .insert("x-greendot-csrf", csrf.parse().unwrap());
+            req
+        };
+        send(
+            &app,
+            auth(form_post(
+                "/exports/create",
+                "name=vm1&device=%2Fdev%2Fzvol%2Ftank%2Fvm1&want_rdma=1&want_tcp=1",
+            )),
+        )
+        .await;
+
+        // The row page carries the moved controls: client instructions, the
+        // connect command, the enable/disable toggle and the delete button.
+        let req = auth(HttpRequest::get("/exports/1").body(Body::empty()).unwrap());
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Client instruction"), "{body}");
+        assert!(body.contains("nvme connect"), "{body}");
+        assert!(body.contains("Disable"), "{body}");
+        assert!(body.contains("Delete"), "{body}");
+
+        // An unknown id is a graceful not-found, not a 500.
+        let req = auth(
+            HttpRequest::get("/exports/999")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not found"), "{body}");
     }
 
     #[tokio::test]

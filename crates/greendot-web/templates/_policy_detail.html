@@ -1,0 +1,39 @@
+<div id="policy-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.policy.is_none() %}
+  <p class="empty">Policy not found.</p>
+  {% else %}
+  {% if let Some(policy) = view.policy %}
+  <table>
+    <thead><tr><th>Dataset</th><th>Schedule</th><th>Prefix</th><th>Keep</th><th>Last run</th><th>Enabled</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ policy.dataset }}</td>
+        <td><code>{{ policy.cron }}</code></td>
+        <td>{{ policy.prefix }}</td>
+        <td>{{ policy.keep }}</td>
+        <td>{{ policy.last_run }}</td>
+        <td>{% if policy.enabled %}yes{% else %}no{% endif %}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>{% if policy.enabled %}Disable{% else %}Enable{% endif %} policy</h2>
+  <form class="inline" hx-post="/snapshots/policy/toggle" hx-target="#policy-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{ policy.id }}">
+    <input type="hidden" name="enable" value="{{ !policy.enabled }}">
+    <button>{% if policy.enabled %}Disable{% else %}Enable{% endif %}</button>
+  </form>
+
+  <h2>Delete policy</h2>
+  <form class="inline" hx-post="/snapshots/policy/delete"
+        hx-confirm="Delete this policy?">
+    <input type="hidden" name="id" value="{{ policy.id }}">
+    <button class="danger">Delete</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

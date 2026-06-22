@@ -13,7 +13,7 @@
   <p class="empty">No volume groups found.</p>
   {% else %}
   <table>
-    <thead><tr><th>VG</th><th>Size</th><th>Used</th><th>Free</th><th>PVs</th><th>LVs</th><th></th></tr></thead>
+    <thead><tr><th>VG</th><th>Size</th><th>Used</th><th>Free</th><th>PVs</th><th>LVs</th></tr></thead>
     <tbody>
       {% for v in view.vgs %}
       <tr>
@@ -26,32 +26,6 @@
         <td>{{ v.free }}</td>
         <td>{{ v.pv_count }}</td>
         <td>{{ v.lv_count }}</td>
-        <td>
-          <div class="rowactions">
-            <details>
-              <summary>Extend</summary>
-              {% if view.extend_devices.is_empty() %}
-              <p class="muted small">No free devices to extend this group.</p>
-              {% else %}
-              <form class="inline" hx-post="/lvm/vg/extend" hx-target="#lvm-content" hx-swap="outerHTML">
-                <input type="hidden" name="vg" value="{{ v.name }}">
-                <select name="device">
-                  {% for d in view.extend_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
-                </select>
-                <button>Extend</button>
-              </form>
-              {% endif %}
-            </details>
-            <details>
-              <summary>Remove VG</summary>
-              <form class="inline" hx-post="/lvm/vg/delete" hx-target="#lvm-content" hx-swap="outerHTML"
-                    hx-confirm="Remove volume group {{ v.name }}? Only an empty group can be removed.">
-                <input type="hidden" name="vg" value="{{ v.name }}">
-                <button class="danger">Remove VG</button>
-              </form>
-            </details>
-          </div>
-        </td>
       </tr>
       {% endfor %}
     </tbody>
@@ -72,14 +46,7 @@
         <td>{{ p.size }}</td>
         <td>{{ p.free }}</td>
         <td>
-          {% if p.in_vg %}
-          <form class="inline" hx-post="/lvm/vg/reduce" hx-target="#lvm-content" hx-swap="outerHTML"
-                hx-confirm="Remove {{ p.name }} from {{ p.vg }}? Fails if it still holds data.">
-            <input type="hidden" name="vg" value="{{ p.vg }}">
-            <input type="hidden" name="device" value="{{ p.name }}">
-            <button class="danger">Remove from VG</button>
-          </form>
-          {% endif %}
+          {% if p.in_vg %}<a href="/lvm/pv/{{ p.path_id }}">Manage</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

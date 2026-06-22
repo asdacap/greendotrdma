@@ -1,10 +1,11 @@
 use super::{AppState, page};
 use crate::actual;
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
 use crate::state::SnapshotPolicy;
 use askama::Template;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -16,8 +17,10 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/snapshots", get(snapshots_page))
         .route("/snapshots/policy/create", post(policy_create))
+        .route("/snapshots/policy/{id}", get(policy_detail_page))
         .route("/snapshots/policy/toggle", post(policy_toggle))
         .route("/snapshots/policy/delete", post(policy_delete))
+        .route("/snapshots/snap/{*name}", get(snap_detail_page))
         .route("/snapshots/manual", post(manual_snapshot))
         .route("/snapshots/delete", post(snapshot_delete))
 }
@@ -32,10 +35,44 @@ pub struct PolicyRow {
     pub last_run: String,
 }
 
+impl PolicyRow {
+    fn new(p: SnapshotPolicy) -> Self {
+        PolicyRow {
+            keep: match (p.keep_last, p.keep_days) {
+                (None, None) => "everything".into(),
+                (last, days) => [
+                    last.map(|n| format!("last {n}")),
+                    days.map(|d| format!("{d} days")),
+                ]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join(", "),
+            },
+            last_run: fmt_time(p.last_run),
+            id: p.id,
+            dataset: p.dataset,
+            cron: p.cron,
+            prefix: p.prefix,
+            enabled: p.enabled,
+        }
+    }
+}
+
 pub struct SnapRow {
     pub name: String,
     pub used: String,
     pub created: String,
+}
+
+impl SnapRow {
+    fn new(s: actual::zfs::Snapshot) -> Self {
+        SnapRow {
+            used: human_bytes(s.used),
+            created: fmt_time(s.creation),
+            name: s.name,
+        }
+    }
 }
 
 pub struct SnapshotsView {
@@ -83,43 +120,11 @@ async fn gather(
         form_error,
     };
     match state.db.list_policies() {
-        Ok(policies) => {
-            view.policies = policies
-                .into_iter()
-                .map(|p| PolicyRow {
-                    keep: match (p.keep_last, p.keep_days) {
-                        (None, None) => "everything".into(),
-                        (last, days) => [
-                            last.map(|n| format!("last {n}")),
-                            days.map(|d| format!("{d} days")),
-                        ]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                    },
-                    last_run: fmt_time(p.last_run),
-                    id: p.id,
-                    dataset: p.dataset,
-                    cron: p.cron,
-                    prefix: p.prefix,
-                    enabled: p.enabled,
-                })
-                .collect();
-        }
+        Ok(policies) => view.policies = policies.into_iter().map(PolicyRow::new).collect(),
         Err(e) => view.error = Some(format!("could not read policies: {e:#}")),
     }
     match actual::zfs::snapshots().await {
-        Ok(Some(snaps)) => {
-            view.snapshots = snaps
-                .into_iter()
-                .map(|s| SnapRow {
-                    used: human_bytes(s.used),
-                    created: fmt_time(s.creation),
-                    name: s.name,
-                })
-                .collect();
-        }
+        Ok(Some(snaps)) => view.snapshots = snaps.into_iter().map(SnapRow::new).collect(),
         // ZFS not installed — leave the snapshot list empty.
         Ok(None) => {}
         Err(e) => {
@@ -152,6 +157,139 @@ async fn snapshots_page(
 async fn render(state: &AppState, flash: Option<String>, error: Option<String>) -> Response {
     page(SnapshotsPartial {
         view: gather(state, flash, error).await,
+    })
+}
+
+// ---- Per-policy page (toggle + delete) ----
+
+#[derive(Default)]
+pub struct PolicyDetailView {
+    /// `None` when the policy id doesn't exist.
+    pub policy: Option<PolicyRow>,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "policy_detail.html")]
+struct PolicyDetailTemplate {
+    user: CurrentUser,
+    view: PolicyDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_policy_detail.html")]
+struct PolicyDetailPartial {
+    view: PolicyDetailView,
+}
+
+async fn gather_policy_detail(
+    state: &AppState,
+    id: i64,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> PolicyDetailView {
+    let mut view = PolicyDetailView {
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match state.db.list_policies() {
+        Ok(policies) => {
+            view.policy = policies
+                .into_iter()
+                .find(|p| p.id == id)
+                .map(PolicyRow::new);
+        }
+        Err(e) => view.error = Some(format!("could not read policies: {e:#}")),
+    }
+    view
+}
+
+async fn policy_detail_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(id): Path<i64>,
+) -> Response {
+    page(PolicyDetailTemplate {
+        user,
+        view: gather_policy_detail(&state, id, None, None).await,
+    })
+}
+
+async fn policy_detail(
+    state: &AppState,
+    id: i64,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> Response {
+    page(PolicyDetailPartial {
+        view: gather_policy_detail(state, id, flash, form_error).await,
+    })
+}
+
+// ---- Per-snapshot page (destroy) ----
+
+#[derive(Default)]
+pub struct SnapDetailView {
+    /// `None` when no snapshot by this name exists on the host.
+    pub snap: Option<SnapRow>,
+    pub name: String,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "snap_detail.html")]
+struct SnapDetailTemplate {
+    user: CurrentUser,
+    view: SnapDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_snap_detail.html")]
+struct SnapDetailPartial {
+    view: SnapDetailView,
+}
+
+async fn gather_snap_detail(
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> SnapDetailView {
+    let mut view = SnapDetailView {
+        name: name.to_owned(),
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match actual::zfs::snapshots().await {
+        Ok(Some(snaps)) => {
+            view.snap = snaps.into_iter().find(|s| s.name == name).map(SnapRow::new);
+        }
+        // ZFS not installed — leave the snapshot unset (renders as not found).
+        Ok(None) => {}
+        Err(e) => view.error = Some(format!("could not list snapshots: {e:#}")),
+    }
+    view
+}
+
+async fn snap_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(name): Path<String>,
+) -> Response {
+    page(SnapDetailTemplate {
+        user,
+        view: gather_snap_detail(&name, None, None).await,
+    })
+}
+
+async fn snap_detail(name: &str, flash: Option<String>, form_error: Option<String>) -> Response {
+    page(SnapDetailPartial {
+        view: gather_snap_detail(name, flash, form_error).await,
     })
 }
 
@@ -245,24 +383,21 @@ async fn policy_toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdFo
     let enable = form.enable.unwrap_or(false);
     match state.db.set_policy_enabled(form.id, enable) {
         Ok(()) => {
-            render(
-                &state,
-                Some(format!(
-                    "policy {}",
-                    if enable { "enabled" } else { "disabled" }
-                )),
-                None,
-            )
-            .await
+            let flash = format!("policy {}", if enable { "enabled" } else { "disabled" });
+            policy_detail(&state, form.id, Some(flash), None).await
         }
-        Err(e) => render(&state, None, Some(format!("{e:#}"))).await,
+        Err(e) => policy_detail(&state, form.id, None, Some(format!("{e:#}"))).await,
     }
 }
 
-async fn policy_delete(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) -> Response {
+async fn policy_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<IdForm>,
+) -> Response {
     match state.db.delete_policy(form.id) {
-        Ok(()) => render(&state, Some("policy deleted".into()), None).await,
-        Err(e) => render(&state, None, Some(format!("{e:#}"))).await,
+        Ok(()) => nav_redirect(&headers, "/snapshots"),
+        Err(e) => policy_detail(&state, form.id, None, Some(format!("{e:#}"))).await,
     }
 }
 
@@ -307,23 +442,26 @@ struct SnapDeleteForm {
 
 async fn snapshot_delete(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<SnapDeleteForm>,
 ) -> Response {
     let parts = form.name.split_once('@');
     let Some((dataset, snap)) = parts else {
-        return render(&state, None, Some("invalid snapshot name".into())).await;
+        return snap_detail(&form.name, None, Some("invalid snapshot name".into())).await;
     };
     let (Ok(dataset), Ok(snap)) = (DatasetName::new(dataset), SnapName::new(snap)) else {
-        return render(&state, None, Some("invalid snapshot name".into())).await;
+        return snap_detail(&form.name, None, Some("invalid snapshot name".into())).await;
     };
     let req = Request::SnapshotDestroy { dataset, snap };
     let title = format!("destroy {}", form.name);
-    let (flash, error) =
-        match crate::task_runner::run(&state, req, "snapshot-destroy", &title).await {
-            Ok(o) => o.message(&format!("destroyed {}", form.name)),
-            Err(e) => (None, Some(format!("{e:#}"))),
-        };
-    render(&state, flash, error).await
+    match crate::task_runner::run(&state, req, "snapshot-destroy", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, "/snapshots"),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "snapshot destroy failed".into());
+            snap_detail(&form.name, None, Some(msg)).await
+        }
+        Err(e) => snap_detail(&form.name, None, Some(format!("{e:#}"))).await,
+    }
 }
 
 #[cfg(test)]
@@ -343,13 +481,13 @@ mod tests {
                 .insert("x-greendot-csrf", csrf.parse().unwrap());
             req
         };
+        let get = |path: &str| auth(HttpRequest::get(path).body(Body::empty()).unwrap());
 
-        let req = auth(HttpRequest::get("/snapshots").body(Body::empty()).unwrap());
-        let (status, _, body) = send(&app, req).await;
+        let (status, _, body) = send(&app, get("/snapshots")).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Snapshot policies"), "{body}");
 
-        // Bad cron rejected; good policy created and listed.
+        // Bad cron rejected; good policy created, listed, and linked to its page.
         let req = auth(form_post(
             "/snapshots/policy/create",
             "dataset=tank%2Fvm1&cron=not+a+cron&prefix=greendot-auto&keep_last=&keep_days=",
@@ -364,29 +502,48 @@ mod tests {
         assert!(body.contains("policy created for tank/vm1"), "{body}");
         assert!(body.contains("last 7, 30 days"), "{body}");
         assert!(body.contains("never"), "{body}");
+        assert!(body.contains("/snapshots/policy/1"), "{body}");
 
-        // Toggle and delete.
+        // The policy page renders, and an unknown id is a graceful not-found.
+        let (status, _, body) = send(&app, get("/snapshots/policy/1")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("tank/vm1"), "{body}");
+        let (status, _, body) = send(&app, get("/snapshots/policy/999")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Policy not found"), "{body}");
+
+        // Toggle stays on the policy page; delete redirects back to the list.
         let (_, _, body) = send(
             &app,
             auth(form_post("/snapshots/policy/toggle", "id=1&enable=false")),
         )
         .await;
         assert!(body.contains("policy disabled"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/snapshots/policy/delete", "id=1"))).await;
-        assert!(body.contains("policy deleted"), "{body}");
+        let (status, headers, _) =
+            send(&app, auth(form_post("/snapshots/policy/delete", "id=1"))).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/snapshots");
 
-        // Manual snapshot via the fake helper.
+        // Manual snapshot via the fake helper stays on the index.
         let req = auth(form_post(
             "/snapshots/manual",
             "dataset=tank%2Fvm1&name=before-upgrade",
         ));
         let (_, _, body) = send(&app, req).await;
         assert!(body.contains("created tank/vm1@before-upgrade"), "{body}");
+
+        // An unknown snapshot name renders gracefully (never 500).
+        let (status, _, body) = send(&app, get("/snapshots/snap/tank%2Fvm1%40nope")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not found"), "{body}");
+
+        // Destroy redirects back to the list.
         let req = auth(form_post(
             "/snapshots/delete",
             "name=tank%2Fvm1%40before-upgrade",
         ));
-        let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("destroyed tank/vm1@before-upgrade"), "{body}");
+        let (status, headers, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/snapshots");
     }
 }

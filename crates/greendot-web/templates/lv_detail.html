@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.vg }}/{{ view.name }} — LVM — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Logical volume {{ view.vg }}/{{ view.name }}</h1>
+<p><a href="/lvm/vg/{{ view.vg }}">← Back to {{ view.vg }}</a></p>
+{% include "_lv_detail.html" %}
+{% endblock %}

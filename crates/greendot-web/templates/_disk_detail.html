@@ -1,0 +1,64 @@
+<div id="disk-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.disk.is_none() %}
+  <p class="empty">Disk /dev/{{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(disk) = view.disk %}
+  <table>
+    <thead><tr><th>Size</th><th>Model</th><th>Serial</th><th>Free</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ disk.size }}</td>
+        <td>{{ disk.model }}</td>
+        <td>{{ disk.serial }}</td>
+        <td>{% if disk.no_space %}No space left{% else %}{{ disk.free }} (approx.){% endif %}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Partitions</h2>
+  {% if disk.partitions.is_empty() %}
+  <p class="empty">No partitions.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
+    <tbody>
+      {% for p in disk.partitions %}
+      <tr>
+        <td>{{ p.name }}</td>
+        <td>{{ p.size }}</td>
+        <td>{{ p.fstype }}</td>
+        <td>{{ p.label }}</td>
+        <td>{{ p.mountpoint }}</td>
+        <td>
+          {% if let Some(number) = p.number %}
+          <a href="/disks/{{ view.name }}/part/{{ number }}">Manage</a>
+          {% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Add partition</h2>
+  <form class="inline" hx-post="/disks/part/create" hx-target="#disk-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="disk" value="{{ view.name }}">
+    <input name="size" size="9" placeholder="fill space">
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <input name="label" size="10" placeholder="label" required>
+    <button>Add</button>
+  </form>
+
+  <h2>Reset disk</h2>
+  <form class="inline" hx-post="/disks/table" hx-target="#disk-detail-content" hx-swap="outerHTML"
+        hx-confirm="Write a brand-new empty GPT to /dev/{{ view.name }}? ALL existing partitions and data are lost.">
+    <input type="hidden" name="disk" value="{{ view.name }}">
+    <button class="danger">New GPT (wipe)</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

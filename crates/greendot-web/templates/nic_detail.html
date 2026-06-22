@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.netdev }} — Settings — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Interface {{ view.netdev }}</h1>
+<p><a href="/settings">← Back to Settings</a></p>
+{% include "_nic_detail.html" %}
+{% endblock %}

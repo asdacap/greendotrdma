@@ -20,6 +20,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/pool", post(pool_create))
         .route("/zfs/pool/{name}", axum::routing::get(pool_detail_page))
         .route("/zfs/pool/{name}/add-device", post(pool_add_device))
+        .route(
+            "/zfs/pool/{pool}/zvol/{*rest}",
+            axum::routing::get(zvol_detail_page),
+        )
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
         .route("/zfs/zvol/delete", post(zvol_delete))
@@ -51,6 +55,8 @@ impl PoolRow {
 
 pub struct ZvolRow {
     pub name: String,
+    /// `name` with the `"{pool}/"` prefix stripped, for the per-zvol page link.
+    pub rel: String,
     pub used: String,
     pub volsize: String,
 }
@@ -157,6 +163,7 @@ async fn gather_pool_detail(
                 .into_iter()
                 .filter(|d| d.kind == DsKind::Volume && d.name.starts_with(&prefix))
                 .map(|d| ZvolRow {
+                    rel: d.name.strip_prefix(&prefix).unwrap_or(&d.name).to_owned(),
                     used: human_bytes(d.used),
                     volsize: d.volsize.map_or(String::new(), human_bytes),
                     name: d.name,
@@ -224,6 +231,112 @@ async fn pool_op_failed(state: &AppState, pool: &str, message: impl Into<String>
     })
 }
 
+// ---- Per-zvol page (resize + delete) ----
+
+#[derive(Default)]
+pub struct ZvolDetailView {
+    pub pool: String,
+    /// The zvol's full dataset name (`pool/…`).
+    pub name: String,
+    /// `None` when the named zvol doesn't exist on this host.
+    pub zvol: Option<ZvolRow>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "zvol_detail.html")]
+struct ZvolDetailTemplate {
+    user: CurrentUser,
+    view: ZvolDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_zvol_detail.html")]
+struct ZvolDetailPartial {
+    view: ZvolDetailView,
+}
+
+async fn gather_zvol_detail(
+    pool: &str,
+    rest: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> ZvolDetailView {
+    let dataset = format!("{pool}/{rest}");
+    let mut view = ZvolDetailView {
+        pool: pool.to_owned(),
+        name: dataset.clone(),
+        flash,
+        form_error,
+        ..Default::default()
+    };
+    match zfs::datasets().await {
+        Ok(Some(datasets)) => {
+            view.zvol = datasets
+                .into_iter()
+                .find(|d| d.kind == DsKind::Volume && d.name == dataset)
+                .map(|d| ZvolRow {
+                    rel: rest.to_owned(),
+                    used: human_bytes(d.used),
+                    volsize: d.volsize.map_or(String::new(), human_bytes),
+                    name: d.name,
+                });
+        }
+        // Absent `zfs` ⇒ ZFS isn't installed on this host.
+        Ok(None) => view.not_installed = true,
+        Err(e) => view.error = Some(format!("could not read ZFS state: {e:#}")),
+    }
+    view
+}
+
+async fn zvol_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path((pool, rest)): Path<(String, String)>,
+) -> Response {
+    page(ZvolDetailTemplate {
+        user,
+        view: gather_zvol_detail(&pool, &rest, None, None).await,
+    })
+}
+
+/// Runs a zvol request as a recorded task and re-renders the owning zvol's
+/// detail partial with the outcome.
+async fn run_zvol_op(
+    state: &AppState,
+    req: Request,
+    kind: &str,
+    title: &str,
+    success: String,
+    pool: &str,
+    rest: &str,
+) -> Response {
+    let view = match crate::task_runner::run(state, req, kind, title).await {
+        Ok(outcome) => {
+            let (flash, error) = outcome.message(&success);
+            gather_zvol_detail(pool, rest, flash, error).await
+        }
+        Err(e) => gather_zvol_detail(pool, rest, None, Some(format!("{e:#}"))).await,
+    };
+    page(ZvolDetailPartial { view })
+}
+
+async fn zvol_detail_failed(pool: &str, rest: &str, message: impl Into<String>) -> Response {
+    page(ZvolDetailPartial {
+        view: gather_zvol_detail(pool, rest, None, Some(message.into())).await,
+    })
+}
+
+/// The zvol's name within its pool (full dataset minus the `"{pool}/"` prefix).
+fn zvol_rel<'a>(pool: &str, dataset: &'a str) -> &'a str {
+    dataset
+        .strip_prefix(pool)
+        .map_or(dataset, |s| s.trim_start_matches('/'))
+}
+
 #[derive(Deserialize)]
 struct CreateForm {
     parent: String,
@@ -277,23 +390,25 @@ struct ResizeForm {
 
 async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<ResizeForm>) -> Response {
     let pool = pool_of(&form.dataset).to_owned();
+    let rest = zvol_rel(&pool, &form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+        return zvol_detail_failed(&pool, &rest, "invalid dataset name").await;
     };
     let Some(new_size) = parse_size(&form.size, &form.unit) else {
-        return pool_op_failed(&state, &pool, "invalid size").await;
+        return zvol_detail_failed(&pool, &rest, "invalid size").await;
     };
     let req = Request::ZvolResize {
         dataset: dataset.clone(),
         new_size,
     };
-    run_pool_op(
+    run_zvol_op(
         &state,
         req,
         "zvol-resize",
         &format!("resize {dataset}"),
         format!("resized {dataset}"),
         &pool,
+        &rest,
     )
     .await
 }
@@ -303,23 +418,28 @@ struct DeleteForm {
     dataset: String,
 }
 
-async fn zvol_delete(State(state): State<Arc<AppState>>, Form(form): Form<DeleteForm>) -> Response {
+async fn zvol_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<DeleteForm>,
+) -> Response {
     let pool = pool_of(&form.dataset).to_owned();
+    let rest = zvol_rel(&pool, &form.dataset).to_owned();
     let Ok(dataset) = DatasetName::new(form.dataset) else {
-        return pool_op_failed(&state, &pool, "invalid dataset name").await;
+        return zvol_detail_failed(&pool, &rest, "invalid dataset name").await;
     };
     let req = Request::ZvolDelete {
         dataset: dataset.clone(),
     };
-    run_pool_op(
-        &state,
-        req,
-        "zvol-delete",
-        &format!("delete {dataset}"),
-        format!("deleted {dataset}"),
-        &pool,
-    )
-    .await
+    // Removing the zvol means its page no longer applies — go back to the pool.
+    match crate::task_runner::run(&state, req, "zvol-delete", &format!("delete {dataset}")).await {
+        Ok(o) if o.ok => nav_redirect(&headers, &format!("/zfs/pool/{pool}")),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| "delete failed".into());
+            zvol_detail_failed(&pool, &rest, msg).await
+        }
+        Err(e) => zvol_detail_failed(&pool, &rest, format!("{e:#}")).await,
+    }
 }
 
 #[derive(Deserialize)]
@@ -608,6 +728,44 @@ mod tests {
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
             assert!(body.contains("invalid zvol name"), "{body}");
+
+            // The per-zvol page renders (graceful "not found" in the test env).
+            let req = HttpRequest::get("/zfs/pool/tank/zvol/vm1")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap();
+            let (status, _, body) = send(&app, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.contains("Zvol tank/vm1")
+                    && (body.contains("Resize")
+                        || body.contains("ZFS is not installed")
+                        || body.contains("not found")),
+                "{body}"
+            );
+
+            // Resize is a stay-op: it re-renders the zvol's detail partial.
+            let mut req = form_post("/zfs/zvol/resize", "dataset=tank/vm1&size=20&unit=GiB");
+            req.headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            req.headers_mut()
+                .insert("x-greendot-csrf", csrf.parse().unwrap());
+            let (status, _, body) = send(&app, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(
+                body.contains("zvol-detail-content") && body.contains("resized tank/vm1"),
+                "{body}"
+            );
+
+            // Delete is a remove-op: a non-htmx POST redirects back to the pool.
+            let mut req = form_post("/zfs/zvol/delete", "dataset=tank/vm1");
+            req.headers_mut()
+                .insert(header::COOKIE, cookie.parse().unwrap());
+            req.headers_mut()
+                .insert("x-greendot-csrf", csrf.parse().unwrap());
+            let (status, headers, _) = send(&app, req).await;
+            assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+            assert_eq!(headers[header::LOCATION], "/zfs/pool/tank");
         }
 
         #[tokio::test]

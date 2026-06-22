@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — Disks — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Disk /dev/{{ view.name }}</h1>
+<p><a href="/disks">← Back to Disks</a></p>
+{% include "_disk_detail.html" %}
+{% endblock %}

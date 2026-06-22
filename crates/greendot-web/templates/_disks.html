@@ -5,80 +5,21 @@
 
   {% if view.disks.is_empty() %}
   <p class="empty">No disks found.</p>
-  {% endif %}
-
-  {% for d in view.disks %}
-  <h2>/dev/{{ d.name }}
-    <span class="muted">{{ d.size }} {{ d.model }} {{ d.serial }}</span>
-    {% if d.no_space %}<span class="muted small">· No space left</span>{% else %}<span class="muted small">· {{ d.free }} free (approx.)</span>{% endif %}
-  </h2>
-  {% if d.partitions.is_empty() %}
-  <p class="empty">No partitions.</p>
   {% else %}
   <table>
-    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
+    <thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Serial</th><th>Free</th><th></th></tr></thead>
     <tbody>
-      {% for p in d.partitions %}
+      {% for d in view.disks %}
       <tr>
-        <td>{{ p.name }}</td>
-        <td>{{ p.size }}</td>
-        <td>{{ p.fstype }}</td>
-        <td>{{ p.label }}</td>
-        <td>{{ p.mountpoint }}</td>
-        <td>
-          {% if let Some(number) = p.number %}
-          <div class="rowactions">
-            <details>
-              <summary>Shrink</summary>
-              {% if p.shrinkable %}
-              <form class="inline" hx-post="/disks/part/shrink" hx-target="#disks-content" hx-swap="outerHTML"
-                    hx-confirm="Shrink {{ p.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first.">
-                <input type="hidden" name="disk" value="{{ d.name }}">
-                <input type="hidden" name="number" value="{{ number }}">
-                <input name="size" size="6" placeholder="new size" required>
-                <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-                <button>Shrink</button>
-              </form>
-              {% else %}
-              <p class="muted small">Shrink unavailable: {{ p.shrink_reason }}</p>
-              {% endif %}
-            </details>
-            <details>
-              <summary>Delete</summary>
-              <form class="inline" hx-post="/disks/part/delete" hx-target="#disks-content" hx-swap="outerHTML"
-                    hx-confirm="Delete {{ p.name }}? Data on it becomes unreachable.">
-                <input type="hidden" name="disk" value="{{ d.name }}">
-                <input type="hidden" name="number" value="{{ number }}">
-                <button class="danger">Delete</button>
-              </form>
-            </details>
-          </div>
-          {% endif %}
-        </td>
+        <td><a href="/disks/{{ d.name }}">/dev/{{ d.name }}</a></td>
+        <td>{{ d.size }}</td>
+        <td>{{ d.model }}</td>
+        <td>{{ d.serial }}</td>
+        <td>{% if d.no_space %}No space left{% else %}{{ d.free }} (approx.){% endif %}</td>
+        <td><a href="/disks/{{ d.name }}">Manage</a></td>
       </tr>
       {% endfor %}
     </tbody>
   </table>
   {% endif %}
-  <div class="rowactions">
-    <details>
-      <summary>Add partition</summary>
-      <form class="inline" hx-post="/disks/part/create" hx-target="#disks-content" hx-swap="outerHTML">
-        <input type="hidden" name="disk" value="{{ d.name }}">
-        <input name="size" size="9" placeholder="fill space">
-        <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
-        <input name="label" size="10" placeholder="label" required>
-        <button>Add</button>
-      </form>
-    </details>
-    <details>
-      <summary>Reset disk</summary>
-      <form class="inline" hx-post="/disks/table" hx-target="#disks-content" hx-swap="outerHTML"
-            hx-confirm="Write a brand-new empty GPT to /dev/{{ d.name }}? ALL existing partitions and data are lost.">
-        <input type="hidden" name="disk" value="{{ d.name }}">
-        <button class="danger">New GPT (wipe)</button>
-      </form>
-    </details>
-  </div>
-  {% endfor %}
 </div>

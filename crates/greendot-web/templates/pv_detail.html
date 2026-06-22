@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}Physical volume — LVM — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Physical volume{% if let Some(pv) = view.pv %} {{ pv.name }}{% endif %}</h1>
+<p><a href="/lvm">← Back to LVM</a></p>
+{% include "_pv_detail.html" %}
+{% endblock %}

@@ -1,0 +1,48 @@
+<div id="part-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.part.is_none() %}
+  <p class="empty">Partition not found.</p>
+  {% else %}
+  {% if let Some(part) = view.part %}
+  <table>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ part.name }}</td>
+        <td>{{ part.size }}</td>
+        <td>{{ part.fstype }}</td>
+        <td>{{ part.label }}</td>
+        <td>{{ part.mountpoint }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  {% if let Some(number) = part.number %}
+  <h2>Shrink</h2>
+  {% if part.shrinkable %}
+  <form class="inline" hx-post="/disks/part/shrink" hx-target="#part-detail-content" hx-swap="outerHTML"
+        hx-confirm="Shrink {{ part.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first.">
+    <input type="hidden" name="disk" value="{{ view.disk }}">
+    <input type="hidden" name="number" value="{{ number }}">
+    <input name="size" size="6" placeholder="new size" required>
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <button>Shrink</button>
+  </form>
+  {% else %}
+  <p class="muted small">Shrink unavailable: {{ part.shrink_reason }}</p>
+  {% endif %}
+
+  <h2>Delete</h2>
+  <form class="inline" hx-post="/disks/part/delete"
+        hx-confirm="Delete {{ part.name }}? Data on it becomes unreachable.">
+    <input type="hidden" name="disk" value="{{ view.disk }}">
+    <input type="hidden" name="number" value="{{ number }}">
+    <button class="danger">Delete</button>
+  </form>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</div>

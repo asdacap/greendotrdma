@@ -1,0 +1,61 @@
+<div id="lv-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.not_installed %}
+  <p class="empty">LVM is not installed on this host.</p>
+  {% else if view.lv.is_none() %}
+  <p class="empty">Logical volume {{ view.vg }}/{{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(lv) = view.lv %}
+  <table>
+    <thead><tr><th>Name</th><th>Type</th><th>Size</th><th>Pool</th><th>Data</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ lv.name }}</td>
+        <td>{{ lv.type_label }}</td>
+        <td>{{ lv.size }}</td>
+        <td>{{ lv.pool }}</td>
+        <td>{{ lv.data_percent }}</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>Grow</h2>
+  <form class="inline" hx-post="/lvm/lv/resize" hx-target="#lv-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="vg" value="{{ lv.vg }}">
+    <input type="hidden" name="name" value="{{ lv.name }}">
+    <input name="size" size="5" placeholder="grow to" required>
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <button>Grow</button>
+  </form>
+
+  <h2>Shrink</h2>
+  <form class="inline" hx-post="/lvm/lv/shrink" hx-target="#lv-detail-content" hx-swap="outerHTML"
+        hx-confirm="Shrink {{ lv.full_name }}? Data beyond the new size is lost — back up first.">
+    <input type="hidden" name="vg" value="{{ lv.vg }}">
+    <input type="hidden" name="name" value="{{ lv.name }}">
+    <input name="size" size="5" placeholder="shrink to" required>
+    <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
+    <button class="danger">Shrink</button>
+  </form>
+
+  <h2>Rename</h2>
+  <form class="inline" hx-post="/lvm/lv/rename" hx-target="#lv-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="vg" value="{{ lv.vg }}">
+    <input type="hidden" name="name" value="{{ lv.name }}">
+    <input name="new_name" size="8" placeholder="new name" required>
+    <button>Rename</button>
+  </form>
+
+  <h2>Delete</h2>
+  <form class="inline" hx-post="/lvm/lv/delete"
+        hx-confirm="Delete {{ lv.full_name }}? This destroys the volume's data.">
+    <input type="hidden" name="vg" value="{{ lv.vg }}">
+    <input type="hidden" name="name" value="{{ lv.name }}">
+    <button class="danger">Delete</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

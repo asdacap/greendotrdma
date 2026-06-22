@@ -22,29 +22,7 @@
           {% else %}<span class="muted" title="NVMe-oF peers can't be tied to a specific export on this kernel — see Connections">—</span>{% endif %}
         </td>
         <td>
-          {% if !r.client.is_empty() %}
-          <details class="clientinst">
-          <summary>Client instruction</summary>
-          {% for c in r.client %}
-          <p class="muted small">Connect over {{ c.label }}:</p>
-          <pre class="log">{{ c.cmd }}</pre>
-          {% endfor %}
-          <p class="muted small">Run as root, on a client with a matching transport (an RDMA NIC for RDMA/iSER). Not persistent across reboot — for NVMe-oF add the target to <code>/etc/nvme/discovery.conf</code> and <code>systemctl enable nvmf-autoconnect</code>; for iSCSI set <code>node.startup=automatic</code>.</p>
-          </details>
-          {% endif %}
-          {% if !r.external %}
-          {% if r.diagnose %}<a role="button" href="/exports/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
-          <form class="inline" hx-post="/exports/toggle" hx-target="#exports-content" hx-swap="outerHTML">
-            <input type="hidden" name="id" value="{{ r.id }}">
-            <input type="hidden" name="enable" value="{{ !r.enabled }}">
-            <button>{% if r.enabled %}Disable{% else %}Enable{% endif %}</button>
-          </form>
-          <form class="inline" hx-post="/exports/delete" hx-target="#exports-content" hx-swap="outerHTML"
-                hx-confirm="Delete export {{ r.name }}? Initiators will lose access.">
-            <input type="hidden" name="id" value="{{ r.id }}">
-            <button class="danger">Delete</button>
-          </form>
-          {% endif %}
+          {% if !r.external %}<a href="/exports/{{ r.id }}">Manage</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

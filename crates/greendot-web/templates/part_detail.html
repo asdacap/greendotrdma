@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}Partition — {{ view.disk }} — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Partition on /dev/{{ view.disk }}</h1>
+<p><a href="/disks/{{ view.disk }}">← Back to disk</a></p>
+{% include "_part_detail.html" %}
+{% endblock %}

@@ -1,9 +1,10 @@
 use super::{AppState, page};
 use crate::actual::block;
-use crate::auth::CurrentUser;
+use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
 use askama::Template;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
+use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -14,6 +15,8 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/disks", get(disks_page))
+        .route("/disks/{disk}", get(disk_detail_page))
+        .route("/disks/{disk}/part/{number}", get(part_detail_page))
         .route("/disks/table", post(table_create))
         .route("/disks/part/create", post(part_create))
         .route("/disks/part/delete", post(part_delete))
@@ -87,12 +90,6 @@ struct DisksTemplate {
     view: DisksView,
 }
 
-#[derive(Template)]
-#[template(path = "_disks.html")]
-struct DisksPartial {
-    view: DisksView,
-}
-
 async fn gather(flash: Option<String>, form_error: Option<String>) -> DisksView {
     let mut view = DisksView {
         disks: vec![],
@@ -101,27 +98,24 @@ async fn gather(flash: Option<String>, form_error: Option<String>) -> DisksView 
         form_error,
     };
     match block::disks().await {
-        Ok(disks) => {
-            view.disks = disks
-                .into_iter()
-                .map(|d| {
-                    let used: u64 = d.partitions.iter().map(|p| p.size).sum();
-                    let unallocated = d.size.saturating_sub(used);
-                    DiskRow {
-                        size: human_bytes(d.size),
-                        model: d.model.unwrap_or_default(),
-                        serial: d.serial.unwrap_or_default(),
-                        free: human_bytes(unallocated),
-                        no_space: unallocated < (1 << 20),
-                        partitions: d.partitions.into_iter().map(part_row).collect(),
-                        name: d.name,
-                    }
-                })
-                .collect();
-        }
+        Ok(disks) => view.disks = disks.into_iter().map(disk_row).collect(),
         Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
     }
     view
+}
+
+fn disk_row(d: block::Disk) -> DiskRow {
+    let used: u64 = d.partitions.iter().map(|p| p.size).sum();
+    let unallocated = d.size.saturating_sub(used);
+    DiskRow {
+        size: human_bytes(d.size),
+        model: d.model.unwrap_or_default(),
+        serial: d.serial.unwrap_or_default(),
+        free: human_bytes(unallocated),
+        no_space: unallocated < (1 << 20),
+        partitions: d.partitions.into_iter().map(part_row).collect(),
+        name: d.name,
+    }
 }
 
 fn part_row(p: block::Partition) -> PartRow {
@@ -154,20 +148,150 @@ async fn disks_page(
     })
 }
 
-async fn run(state: &AppState, req: Request, kind: &str, title: &str, success: String) -> Response {
+// ---- Per-disk page (partition listing + disk-level forms) ----
+
+pub struct DiskDetailView {
+    pub name: String,
+    /// `None` when the named disk doesn't exist on this host.
+    pub disk: Option<DiskRow>,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "disk_detail.html")]
+struct DiskDetailTemplate {
+    user: CurrentUser,
+    view: DiskDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_disk_detail.html")]
+struct DiskDetailPartial {
+    view: DiskDetailView,
+}
+
+async fn gather_disk_detail(
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> DiskDetailView {
+    let mut view = DiskDetailView {
+        name: name.to_owned(),
+        disk: None,
+        error: None,
+        flash,
+        form_error,
+    };
+    match block::disks().await {
+        Ok(disks) => view.disk = disks.into_iter().find(|d| d.name == name).map(disk_row),
+        Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
+    }
+    view
+}
+
+async fn disk_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(disk): Path<String>,
+) -> Response {
+    page(DiskDetailTemplate {
+        user,
+        view: gather_disk_detail(&disk, None, None).await,
+    })
+}
+
+/// Runs a disk-level request as a recorded task and re-renders the owning disk's
+/// detail partial with the outcome.
+async fn run(
+    state: &AppState,
+    req: Request,
+    kind: &str,
+    title: &str,
+    success: String,
+    disk: &str,
+) -> Response {
     let view = match crate::task_runner::run(state, req, kind, title).await {
         Ok(outcome) => {
             let (flash, error) = outcome.message(&success);
-            gather(flash, error).await
+            gather_disk_detail(disk, flash, error).await
         }
-        Err(e) => gather(None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_disk_detail(disk, None, Some(format!("{e:#}"))).await,
     };
-    page(DisksPartial { view })
+    page(DiskDetailPartial { view })
 }
 
-async fn form_failed(message: String) -> Response {
-    page(DisksPartial {
-        view: gather(None, Some(message)).await,
+async fn disk_detail_failed(disk: &str, message: impl Into<String>) -> Response {
+    page(DiskDetailPartial {
+        view: gather_disk_detail(disk, None, Some(message.into())).await,
+    })
+}
+
+// ---- Per-partition page (shrink + delete) ----
+
+pub struct PartDetailView {
+    pub disk: String,
+    /// `None` when the partition no longer exists on its disk.
+    pub part: Option<PartRow>,
+    pub error: Option<String>,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "part_detail.html")]
+struct PartDetailTemplate {
+    user: CurrentUser,
+    view: PartDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_part_detail.html")]
+struct PartDetailPartial {
+    view: PartDetailView,
+}
+
+async fn gather_part_detail(
+    disk: &str,
+    number: u32,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> PartDetailView {
+    let mut view = PartDetailView {
+        disk: disk.to_owned(),
+        part: None,
+        error: None,
+        flash,
+        form_error,
+    };
+    match block::disks().await {
+        Ok(disks) => {
+            view.part = disks
+                .into_iter()
+                .find(|d| d.name == disk)
+                .and_then(|d| d.partitions.into_iter().find(|p| p.number == Some(number)))
+                .map(part_row);
+        }
+        Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
+    }
+    view
+}
+
+async fn part_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path((disk, number)): Path<(String, u32)>,
+) -> Response {
+    page(PartDetailTemplate {
+        user,
+        view: gather_part_detail(&disk, number, None, None).await,
+    })
+}
+
+async fn part_detail_failed(disk: &str, number: u32, message: impl Into<String>) -> Response {
+    page(PartDetailPartial {
+        view: gather_part_detail(disk, number, None, Some(message.into())).await,
     })
 }
 
@@ -177,8 +301,9 @@ struct TableForm {
 }
 
 async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<TableForm>) -> Response {
+    let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return form_failed(format!("invalid disk name {:?}", form.disk)).await;
+        return disk_detail_failed(&scope, format!("invalid disk name {:?}", form.disk)).await;
     };
     let req = Request::PartitionTableCreate { disk: disk.clone() };
     run(
@@ -187,6 +312,7 @@ async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<Table
         "gpt-create",
         &format!("new GPT on {disk}"),
         format!("created new GPT on {disk}"),
+        &scope,
     )
     .await
 }
@@ -205,18 +331,20 @@ async fn part_create(
     State(state): State<Arc<AppState>>,
     Form(form): Form<PartCreateForm>,
 ) -> Response {
+    let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return form_failed(format!("invalid disk name {:?}", form.disk)).await;
+        return disk_detail_failed(&scope, format!("invalid disk name {:?}", form.disk)).await;
     };
     let Ok(label) = PartLabel::new(form.label.trim()) else {
-        return form_failed(format!("invalid partition label {:?}", form.label)).await;
+        return disk_detail_failed(&scope, format!("invalid partition label {:?}", form.label))
+            .await;
     };
     // Empty size means "rest of the disk"; sfdisk works in 512-byte sectors.
     let size_sectors = match form.size.trim() {
         "" => None,
         size => match super::zfs::parse_size(size, &form.unit) {
             Some(bytes) => Some(bytes / 512),
-            None => return form_failed("invalid size".into()).await,
+            None => return disk_detail_failed(&scope, "invalid size").await,
         },
     };
     let req = Request::PartitionCreate {
@@ -231,6 +359,7 @@ async fn part_create(
         "partition-create",
         &format!("create partition on {disk}"),
         format!("created partition on {disk}"),
+        &scope,
     )
     .await
 }
@@ -241,25 +370,36 @@ struct PartDeleteForm {
     number: u32,
 }
 
+/// Deletes a partition (a remove-op): on success the partition's page no longer
+/// applies, so redirect back to the owning disk; on failure (still present)
+/// re-render the partition detail with the error.
 async fn part_delete(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Form(form): Form<PartDeleteForm>,
 ) -> Response {
+    let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return form_failed(format!("invalid disk name {:?}", form.disk)).await;
+        return part_detail_failed(
+            &scope,
+            form.number,
+            format!("invalid disk name {:?}", form.disk),
+        )
+        .await;
     };
     let req = Request::PartitionDelete {
         disk: disk.clone(),
         number: form.number,
     };
-    run(
-        &state,
-        req,
-        "partition-delete",
-        &format!("delete partition {} on {disk}", form.number),
-        format!("deleted partition {} on {disk}", form.number),
-    )
-    .await
+    let title = format!("delete partition {} on {disk}", form.number);
+    match crate::task_runner::run(&state, req, "partition-delete", &title).await {
+        Ok(o) if o.ok => nav_redirect(&headers, &format!("/disks/{scope}")),
+        Ok(o) => {
+            let msg = o.error.unwrap_or_else(|| format!("{title} failed"));
+            part_detail_failed(&scope, form.number, msg).await
+        }
+        Err(e) => part_detail_failed(&scope, form.number, format!("{e:#}")).await,
+    }
 }
 
 #[derive(Deserialize)]
@@ -286,12 +426,12 @@ async fn run_step(
     }
 }
 
-async fn finish_shrink(result: Result<(), String>) -> Response {
+async fn finish_shrink(disk: &str, number: u32, result: Result<(), String>) -> Response {
     let view = match result {
-        Ok(()) => gather(Some("partition shrunk".into()), None).await,
-        Err(e) => gather(None, Some(e)).await,
+        Ok(()) => gather_part_detail(disk, number, Some("partition shrunk".into()), None).await,
+        Err(e) => gather_part_detail(disk, number, None, Some(e)).await,
     };
-    page(DisksPartial { view })
+    page(PartDetailPartial { view })
 }
 
 /// Shrinks a partition: the filesystem is always resized *before* the partition
@@ -302,40 +442,55 @@ async fn part_shrink(
     State(state): State<Arc<AppState>>,
     Form(form): Form<PartShrinkForm>,
 ) -> Response {
+    let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return form_failed(format!("invalid disk name {:?}", form.disk)).await;
+        return part_detail_failed(
+            &scope,
+            form.number,
+            format!("invalid disk name {:?}", form.disk),
+        )
+        .await;
     };
     let Some(bytes) = super::zfs::parse_size(&form.size, &form.unit) else {
-        return form_failed("invalid size".into()).await;
+        return part_detail_failed(&scope, form.number, "invalid size").await;
     };
     // 1 MiB alignment removes any sfdisk start/size rounding ambiguity.
     if !bytes.is_multiple_of(1 << 20) {
-        return form_failed("size must be a whole number of MiB".into()).await;
+        return part_detail_failed(&scope, form.number, "size must be a whole number of MiB").await;
     }
     let disks = match block::disks().await {
         Ok(d) => d,
-        Err(e) => return form_failed(format!("could not read disks: {e:#}")).await,
+        Err(e) => {
+            return part_detail_failed(&scope, form.number, format!("could not read disks: {e:#}"))
+                .await;
+        }
     };
     let Some(part) = disks
         .iter()
         .find(|d| d.name == disk.as_str())
         .and_then(|d| d.partitions.iter().find(|p| p.number == Some(form.number)))
     else {
-        return form_failed(format!(
-            "partition {} on {disk} no longer exists",
-            form.number
-        ))
+        return part_detail_failed(
+            &scope,
+            form.number,
+            format!("partition {} on {disk} no longer exists", form.number),
+        )
         .await;
     };
     if bytes / 512 >= part.size / 512 {
-        return form_failed("new size must be smaller than the current size".into()).await;
+        return part_detail_failed(
+            &scope,
+            form.number,
+            "new size must be smaller than the current size",
+        )
+        .await;
     }
     // Capture owned values so the `disks`/`part` borrow doesn't span the awaits.
     let mounted = part.mountpoint.is_some();
     let fstype = part.fstype.clone();
     let part_name = part.name.clone();
     let Ok(device) = DevicePath::new(format!("/dev/{part_name}")) else {
-        return form_failed("invalid device path".into()).await;
+        return part_detail_failed(&scope, form.number, "invalid device path").await;
     };
     let new_sectors = bytes / 512;
     // Shrink the filesystem 1 MiB short of the new partition end for slack.
@@ -346,7 +501,14 @@ async fn part_shrink(
         size_sectors: new_sectors,
     };
     match shrinkability(fstype.as_deref(), mounted) {
-        Shrink::No(reason) => form_failed(format!("cannot shrink {device}: {reason}")).await,
+        Shrink::No(reason) => {
+            part_detail_failed(
+                &scope,
+                form.number,
+                format!("cannot shrink {device}: {reason}"),
+            )
+            .await
+        }
         Shrink::Raw => {
             let r = run_step(
                 &state,
@@ -355,7 +517,7 @@ async fn part_shrink(
                 format!("resize {device}"),
             )
             .await;
-            finish_shrink(r).await
+            finish_shrink(&scope, form.number, r).await
         }
         Shrink::Ext => {
             let mut r = run_step(
@@ -388,12 +550,12 @@ async fn part_shrink(
                 )
                 .await;
             }
-            finish_shrink(r).await
+            finish_shrink(&scope, form.number, r).await
         }
         Shrink::Btrfs => {
             let Ok(mp) = MountPath::new(format!("/run/greendotrdma/btrfs-resize-{part_name}"))
             else {
-                return form_failed("invalid temp mount path".into()).await;
+                return part_detail_failed(&scope, form.number, "invalid temp mount path").await;
             };
             if let Err(e) = run_step(
                 &state,
@@ -406,7 +568,7 @@ async fn part_shrink(
             )
             .await
             {
-                return finish_shrink(Err(e)).await;
+                return finish_shrink(&scope, form.number, Err(e)).await;
             }
             if let Err(e) = run_step(
                 &state,
@@ -429,7 +591,7 @@ async fn part_shrink(
                     "unmount".into(),
                 )
                 .await;
-                return finish_shrink(Err(e)).await;
+                return finish_shrink(&scope, form.number, Err(e)).await;
             }
             // Hard gate: never resize the partition while the fs is still mounted.
             if let Err(e) = run_step(
@@ -442,9 +604,13 @@ async fn part_shrink(
             )
             .await
             {
-                return finish_shrink(Err(format!(
-                    "filesystem still mounted, partition not resized: {e}"
-                )))
+                return finish_shrink(
+                    &scope,
+                    form.number,
+                    Err(format!(
+                        "filesystem still mounted, partition not resized: {e}"
+                    )),
+                )
                 .await;
             }
             let r = run_step(
@@ -454,7 +620,7 @@ async fn part_shrink(
                 format!("resize {device}"),
             )
             .await;
-            finish_shrink(r).await
+            finish_shrink(&scope, form.number, r).await
         }
     }
 }
@@ -500,12 +666,29 @@ mod tests {
             req
         };
 
+        // The index is a disk list; the per-disk and per-partition pages render
+        // gracefully even when the named disk/partition is absent on this host.
         let req = auth(HttpRequest::get("/disks").body(Body::empty()).unwrap());
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Disks"), "{body}");
+        let req = auth(HttpRequest::get("/disks/sdb").body(Body::empty()).unwrap());
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("sdb") || body.contains("not found"), "{body}");
+        let req = auth(
+            HttpRequest::get("/disks/sdb/part/1")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            body.contains("Partition") || body.contains("not found"),
+            "{body}"
+        );
 
-        // Valid create goes through the fake helper; bad input is rejected.
+        // Add-partition is a stay-op: it re-renders the disk detail partial.
         let req = auth(form_post(
             "/disks/part/create",
             "disk=sdb&size=100&unit=GiB&label=data",
@@ -518,9 +701,12 @@ mod tests {
         ));
         let (_, _, body) = send(&app, req).await;
         assert!(body.contains("invalid disk name"), "{body}");
+
+        // Delete is a remove-op: a non-htmx POST redirects back to the disk page.
         let req = auth(form_post("/disks/part/delete", "disk=sdb&number=2"));
-        let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("deleted partition 2 on sdb"), "{body}");
+        let (status, headers, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
+        assert_eq!(headers[header::LOCATION], "/disks/sdb");
 
         // Shrink: form validation rejects bad input before touching the helper.
         let req = auth(form_post(

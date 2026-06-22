@@ -4,7 +4,7 @@ use crate::actual::rdma;
 use crate::auth::CurrentUser;
 use crate::routes::exports::reconcile_state;
 use askama::Template;
-use axum::extract::{Form, State};
+use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
@@ -15,6 +15,7 @@ use std::sync::Arc;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings", get(settings_page))
+        .route("/settings/nic/{netdev}", get(nic_detail_page))
         .route("/settings/reconcile", post(reconcile_now))
         .route("/settings/listen", post(set_listen))
         .route("/settings/rxe", post(enable_rxe))
@@ -202,6 +203,55 @@ async fn settings_page(
     })
 }
 
+// ---- Per-NIC page (Enable RoCE / Soft-RoCE) ----
+
+pub struct NicDetailView {
+    /// `None` when no such RDMA-candidate interface exists on this host.
+    pub nic: Option<NicRow>,
+    pub netdev: String,
+    pub flash: Option<String>,
+    pub form_error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "nic_detail.html")]
+struct NicDetailTemplate {
+    user: CurrentUser,
+    view: NicDetailView,
+}
+
+#[derive(Template)]
+#[template(path = "_nic_detail.html")]
+struct NicDetailPartial {
+    view: NicDetailView,
+}
+
+fn gather_nic_detail(
+    netdev: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+) -> NicDetailView {
+    NicDetailView {
+        nic: nic::interfaces()
+            .into_iter()
+            .filter_map(nic_row)
+            .find(|n| n.netdev == netdev),
+        netdev: netdev.to_owned(),
+        flash,
+        form_error,
+    }
+}
+
+async fn nic_detail_page(
+    Extension(user): Extension<CurrentUser>,
+    Path(netdev): Path<String>,
+) -> Response {
+    page(NicDetailTemplate {
+        user,
+        view: gather_nic_detail(&netdev, None, None),
+    })
+}
+
 async fn reconcile_now(State(state): State<Arc<AppState>>) -> Response {
     let (flash, error) = match reconcile_state(&state).await {
         Ok(()) => (Some("reconciled".into()), None),
@@ -247,13 +297,12 @@ struct RxeForm {
 
 async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm>) -> Response {
     let Ok(netdev) = NetdevName::new(form.netdev.trim()) else {
-        return page(SettingsPartial {
-            view: gather(
-                &state,
+        return page(NicDetailPartial {
+            view: gather_nic_detail(
+                &form.netdev,
                 None,
                 Some(format!("invalid interface name {:?}", form.netdev)),
-            )
-            .await,
+            ),
         });
     };
     let steps = [
@@ -277,40 +326,45 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
             Ok(o) if o.ok => {}
             Ok(o) => {
                 let msg = o.error.unwrap_or_else(|| "task failed".into());
-                return page(SettingsPartial {
-                    view: gather(&state, None, Some(msg)).await,
+                return page(NicDetailPartial {
+                    view: gather_nic_detail(netdev.as_str(), None, Some(msg)),
                 });
             }
             Err(e) => {
-                return page(SettingsPartial {
-                    view: gather(&state, None, Some(format!("{e:#}"))).await,
+                return page(NicDetailPartial {
+                    view: gather_nic_detail(netdev.as_str(), None, Some(format!("{e:#}"))),
                 });
             }
         }
     }
     let _ = reconcile_state(&state).await;
-    page(SettingsPartial {
-        view: gather(&state, Some(format!("Soft-RoCE enabled on {netdev}")), None).await,
+    page(NicDetailPartial {
+        view: gather_nic_detail(
+            netdev.as_str(),
+            Some(format!("Soft-RoCE enabled on {netdev}")),
+            None,
+        ),
     })
 }
 
 #[derive(Deserialize)]
 struct RoceForm {
     pci: String,
+    netdev: String,
 }
 
 /// Turn on hardware RoCE for a Mellanox NIC: confirm `enable_roce` is actually
 /// present and off (a VF may be PF-gated and can't self-enable), then set the
 /// param and reload the device. The reload briefly drops the NIC.
 async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>) -> Response {
+    let netdev = form.netdev.as_str();
     let Ok(pci) = PciAddress::new(form.pci.trim()) else {
-        return page(SettingsPartial {
-            view: gather(
-                &state,
+        return page(NicDetailPartial {
+            view: gather_nic_detail(
+                netdev,
                 None,
                 Some(format!("invalid PCI address {:?}", form.pci)),
-            )
-            .await,
+            ),
         });
     };
     // Confirm enable_roce is present and currently false before reloading.
@@ -321,13 +375,12 @@ async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>
     match nic::enable_roce_from_json(&probe.stdout) {
         Some(false) => {}
         Some(true) => {
-            return page(SettingsPartial {
-                view: gather(
-                    &state,
+            return page(NicDetailPartial {
+                view: gather_nic_detail(
+                    netdev,
                     Some(format!("RoCE is already enabled on {pci}")),
                     None,
-                )
-                .await,
+                ),
             });
         }
         None => {
@@ -340,8 +393,8 @@ async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>
                     .error
                     .unwrap_or_else(|| format!("could not read devlink params for {pci}"))
             };
-            return page(SettingsPartial {
-                view: gather(&state, None, Some(why)).await,
+            return page(NicDetailPartial {
+                view: gather_nic_detail(netdev, None, Some(why)),
             });
         }
     }
@@ -362,27 +415,26 @@ async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>
             Ok(o) if o.ok => {}
             Ok(o) => {
                 let msg = o.error.unwrap_or_else(|| "task failed".into());
-                return page(SettingsPartial {
-                    view: gather(&state, None, Some(msg)).await,
+                return page(NicDetailPartial {
+                    view: gather_nic_detail(netdev, None, Some(msg)),
                 });
             }
             Err(e) => {
-                return page(SettingsPartial {
-                    view: gather(&state, None, Some(format!("{e:#}"))).await,
+                return page(NicDetailPartial {
+                    view: gather_nic_detail(netdev, None, Some(format!("{e:#}"))),
                 });
             }
         }
     }
     let _ = reconcile_state(&state).await;
-    page(SettingsPartial {
-        view: gather(
-            &state,
+    page(NicDetailPartial {
+        view: gather_nic_detail(
+            netdev,
             Some(format!(
                 "RoCE enabled on {pci}; reconnect if your session dropped"
             )),
             None,
-        )
-        .await,
+        ),
     })
 }
 
@@ -459,6 +511,15 @@ mod tests {
         assert!(body.contains("Listen address"), "{body}");
         assert!(body.contains("Network interfaces"), "{body}");
 
+        // The per-NIC page renders (a graceful not-found is fine in the test env).
+        let req = auth(
+            HttpRequest::get("/settings/nic/eth0")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, _) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+
         // Valid listen address persists; invalid is rejected.
         let (_, _, body) = send(
             &app,
@@ -480,10 +541,19 @@ mod tests {
         assert!(body.contains("invalid interface name"), "{body}");
 
         // Enable-RoCE: the fake helper reports enable_roce=false, so set+reload
-        // run and report success; a malformed PCI address is rejected.
-        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "pci=0000:00:10.0"))).await;
+        // run and report success; a malformed PCI address is rejected. The form
+        // carries the netdev so the NIC's detail page can be re-gathered.
+        let (_, _, body) = send(
+            &app,
+            auth(form_post("/settings/roce", "pci=0000:00:10.0&netdev=eth0")),
+        )
+        .await;
         assert!(body.contains("RoCE enabled on 0000:00:10.0"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "pci=junk"))).await;
+        let (_, _, body) = send(
+            &app,
+            auth(form_post("/settings/roce", "pci=junk&netdev=eth0")),
+        )
+        .await;
         assert!(body.contains("invalid PCI address"), "{body}");
     }
 }
