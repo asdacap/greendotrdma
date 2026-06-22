@@ -116,6 +116,16 @@ validated_string!(
 validated_string!(
     /// The helper's private btrfs temp-mount path (fixed shape, no traversal).
     MountPath, validate::mount_path, "mount path");
+validated_string!(
+    /// Absolute directory path to export over NFS, e.g. `/tank/share`.
+    NfsExportPath, validate::nfs_export_path, "NFS export path");
+validated_string!(
+    /// A ZFS filesystem dataset's mountpoint (an absolute path); shares the
+    /// export-path validator but is a distinct type from [`NfsExportPath`].
+    MountPoint, validate::nfs_export_path, "mount point");
+validated_string!(
+    /// An NFS client access spec: host / IP / CIDR / `*`.
+    NfsClient, validate::nfs_client, "NFS client");
 
 /// A string whose Debug/Display output must never leak (passwords).
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -213,6 +223,9 @@ pub enum KernelModule {
     Iscsi,
     Iser,
     Rxe,
+    /// The kernel's NFS-over-RDMA transport. The real module is `rpcrdma`;
+    /// `svcrdma` (server) and `xprtrdma` (client) are aliases for it.
+    Rpcrdma,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +320,42 @@ pub struct LioPortalSpec {
     pub iser: bool,
 }
 
+// ---- NFS desired state (the helper writes our exports file directly and
+// applies it surgically with `exportfs -o`/`-u`, leaving foreign exports and
+// ZFS's own `/etc/exports.d/zfs.exports` untouched — no global `exportfs -ra`) ----
+
+/// The standard NFS-over-RDMA service port (`nfsrdma`).
+pub const NFS_RDMA_PORT: u16 = 20049;
+
+/// Separates the three sections of an `NfsReport`'s streamed stdout — the live
+/// `exportfs -s` dump, the `/proc/fs/nfsd/portlist` dump, and greendot's own
+/// managed exports file (what it last applied, used for drift detection) — so
+/// the web can parse one payload.
+pub const NFS_PORTLIST_SENTINEL: &str = "--greendot-portlist--";
+pub const NFS_MANAGED_SENTINEL: &str = "--greendot-managed--";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NfsDesired {
+    pub exports: Vec<NfsExportSpec>,
+    /// The RDMA listener port to assert on nfsd (normally [`NFS_RDMA_PORT`]).
+    pub rdma_port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NfsExportSpec {
+    pub path: NfsExportPath,
+    /// Stable per-export filesystem id, required for non-block-backed exports
+    /// (the web derives it from the export id, offset into a reserved range).
+    pub fsid: u32,
+    pub clients: Vec<NfsClientSpec>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NfsClientSpec {
+    pub client: NfsClient,
+    pub rw: bool,
+}
+
 // ---- Task streaming ----
 
 /// Frames the helper streams back while running a task (one CLI command).
@@ -349,6 +398,7 @@ pub fn package_for_cli(cli: &str) -> Option<&'static str> {
         "rdma" | "devlink" => "iproute2",
         "nvme" => "nvme-cli",
         "targetcli" | "targetctl" => "targetcli-fb",
+        "exportfs" => "nfs-kernel-server",
         "apt-get" => "apt",
         _ => return None,
     })
@@ -370,6 +420,7 @@ pub const REQUIRED_CLIS: &[&str] = &[
     "devlink",
     "nvme",
     "targetctl",
+    "exportfs",
 ];
 
 #[cfg(test)]
@@ -580,6 +631,43 @@ mod tests {
     #[case::path_in_name("/run/greendotrdma/btrfs-resize-/dev/sda", false)]
     fn mount_path(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(MountPath::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::simple("/tank/share", true)]
+    #[case::deep("/mnt/archive/backups-2026", true)]
+    #[case::dotted("/var/nfs.data.0", true)]
+    #[case::root_only("/", false)]
+    #[case::empty("", false)]
+    #[case::relative("tank/share", false)]
+    #[case::trailing_slash("/tank/share/", false)]
+    #[case::double_slash("/tank//share", false)]
+    #[case::traversal("/tank/../etc/shadow", false)]
+    #[case::dot_component("/tank/./share", false)]
+    #[case::space("/tank/a b", false)]
+    #[case::shell_meta("/tank/$(reboot)", false)]
+    fn nfs_export_path(#[case] input: &str, #[case] ok: bool) {
+        // NfsExportPath and MountPoint share the validator.
+        assert_eq!(NfsExportPath::new(input).is_ok(), ok, "{input:?}");
+        assert_eq!(MountPoint::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::wildcard("*", true)]
+    #[case::host("nfs-client.example.com", true)]
+    #[case::ipv4("192.168.1.10", true)]
+    #[case::cidr("192.168.101.0/24", true)]
+    #[case::ipv6_cidr("2001:db8::/32", true)]
+    #[case::empty("", false)]
+    #[case::space("a b", false)]
+    #[case::comma("a,b", false)]
+    #[case::open_paren("host(rw", false)]
+    #[case::close_paren("host)", false)]
+    #[case::leading_dash_r("-r", false)]
+    #[case::leading_dash_a("-a", false)]
+    #[case::leading_dash_word("-foo", false)]
+    fn nfs_client(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(NfsClient::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

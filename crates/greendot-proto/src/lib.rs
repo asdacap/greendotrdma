@@ -47,6 +47,28 @@ pub enum Request {
         snap: SnapName,
     },
 
+    // ZFS filesystem datasets (mount lifecycle). Reads happen unprivileged in
+    // greendot-web; these mutations are imperative one-shots (no desired state).
+    ZfsFsCreate {
+        dataset: DatasetName,
+        /// `None` inherits the default `<pool>/<path>` mountpoint.
+        mountpoint: Option<MountPoint>,
+    },
+    ZfsSetMountpoint {
+        dataset: DatasetName,
+        mountpoint: MountPoint,
+    },
+    ZfsMount {
+        dataset: DatasetName,
+    },
+    ZfsUnmount {
+        dataset: DatasetName,
+    },
+    ZfsDestroy {
+        dataset: DatasetName,
+        recursive: bool,
+    },
+
     // Partitioning (sfdisk)
     PartitionTableCreate {
         disk: BlockDev,
@@ -168,6 +190,14 @@ pub enum Request {
     LioApply {
         desired: LioDesired,
     },
+    // NFS: the helper writes our exports file directly, applies it surgically
+    // with `exportfs -o`/`-u`, and asserts the nfsd RDMA listener.
+    NfsApply {
+        desired: NfsDesired,
+    },
+    /// Privileged read of NFS actual state (`exportfs -s` + `/proc/fs/nfsd/portlist`),
+    /// which the unprivileged web service cannot read directly.
+    NfsReport,
 
     // System
     EnsureModules {
@@ -348,6 +378,35 @@ mod tests {
     #[case::install(Request::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
     })]
+    #[case::zfs_fs_create(Request::ZfsFsCreate {
+        dataset: DatasetName::new("tank/share").unwrap(),
+        mountpoint: Some(MountPoint::new("/tank/share").unwrap()),
+    })]
+    #[case::zfs_fs_create_default(Request::ZfsFsCreate {
+        dataset: DatasetName::new("tank/share").unwrap(),
+        mountpoint: None,
+    })]
+    #[case::zfs_set_mountpoint(Request::ZfsSetMountpoint {
+        dataset: DatasetName::new("tank/share").unwrap(),
+        mountpoint: MountPoint::new("/srv/share").unwrap(),
+    })]
+    #[case::zfs_mount(Request::ZfsMount { dataset: DatasetName::new("tank/share").unwrap() })]
+    #[case::zfs_unmount(Request::ZfsUnmount { dataset: DatasetName::new("tank/share").unwrap() })]
+    #[case::zfs_destroy(Request::ZfsDestroy { dataset: DatasetName::new("tank/share").unwrap(), recursive: true })]
+    #[case::nfs_apply(Request::NfsApply {
+        desired: NfsDesired {
+            rdma_port: NFS_RDMA_PORT,
+            exports: vec![NfsExportSpec {
+                path: NfsExportPath::new("/tank/share").unwrap(),
+                fsid: 0x6700_0001,
+                clients: vec![NfsClientSpec {
+                    client: NfsClient::new("192.168.101.0/24").unwrap(),
+                    rw: true,
+                }],
+            }],
+        },
+    })]
+    #[case::nfs_report(Request::NfsReport)]
     fn request_roundtrips(#[case] req: Request) {
         assert_eq!(roundtrip(&req), req);
     }
@@ -400,6 +459,10 @@ mod tests {
             r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
             r#"{"op":"roce_enable_param","pci":"0000:00:10.G"}"#,
             r#"{"op":"devlink_reload","pci":"0000:00:10.0 ; reboot"}"#,
+            r#"{"op":"zfs_mount","dataset":"../../etc"}"#,
+            r#"{"op":"zfs_set_mountpoint","dataset":"tank/share","mountpoint":"/tank/../etc"}"#,
+            r#"{"op":"nfs_apply","desired":{"rdma_port":20049,"exports":[{"path":"/tank/../etc","fsid":1,"clients":[]}]}}"#,
+            r#"{"op":"nfs_apply","desired":{"rdma_port":20049,"exports":[{"path":"/srv","fsid":1,"clients":[{"client":"h(rw","rw":true}]}]}}"#,
             r#"{"op":"no_such_op"}"#,
         ] {
             assert!(serde_json::from_str::<Request>(bad).is_err(), "{bad}");

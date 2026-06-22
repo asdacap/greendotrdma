@@ -1,7 +1,7 @@
 //! ZFS mutations as `zfs` CLI tasks. Reads happen unprivileged in greendot-web.
 
 use crate::cmd::TaskSpec;
-use greendot_proto::{DatasetName, DevicePath, PoolName, SnapName, VdevLayout};
+use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, SnapName, VdevLayout};
 
 fn spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zfs", args)
@@ -76,6 +76,48 @@ pub fn pool_create(
 /// that would reduce the pool's redundancy, which is the desired behaviour.
 pub fn pool_device_add(pool: &PoolName, device: &DevicePath) -> TaskSpec {
     zpool_spec(s(&["add", pool.as_str(), device.as_str()]))
+}
+
+/// `zfs create [-o mountpoint=<p>] <dataset>` — a filesystem dataset (no `-V`,
+/// which is the zvol distinction).
+pub fn zfs_fs_create(dataset: &DatasetName, mountpoint: Option<&MountPoint>) -> TaskSpec {
+    let mut args = s(&["create"]);
+    if let Some(mp) = mountpoint {
+        args.extend(s(&["-o", &format!("mountpoint={mp}")]));
+    }
+    args.push(dataset.to_string());
+    spec(args)
+}
+
+/// `zfs set mountpoint=<p> <dataset>`.
+pub fn zfs_set_mountpoint(dataset: &DatasetName, mountpoint: &MountPoint) -> TaskSpec {
+    spec(s(&[
+        "set",
+        &format!("mountpoint={mountpoint}"),
+        dataset.as_str(),
+    ]))
+}
+
+/// `zfs mount <dataset>`.
+pub fn zfs_mount(dataset: &DatasetName) -> TaskSpec {
+    spec(s(&["mount", dataset.as_str()]))
+}
+
+/// `zfs unmount <dataset>`.
+pub fn zfs_unmount(dataset: &DatasetName) -> TaskSpec {
+    spec(s(&["unmount", dataset.as_str()]))
+}
+
+/// `zfs destroy [-r] <dataset>` — destroys a filesystem dataset (recursively
+/// when it has child datasets/snapshots). Distinct from [`zvol_delete`], which
+/// never recurses.
+pub fn zfs_destroy(dataset: &DatasetName, recursive: bool) -> TaskSpec {
+    let mut args = s(&["destroy"]);
+    if recursive {
+        args.push("-r".into());
+    }
+    args.push(dataset.to_string());
+    spec(args)
 }
 
 #[cfg(test)]
@@ -163,5 +205,46 @@ mod tests {
             snapshot_destroy(&ds("tank/vm1"), &SnapName::new("s1").unwrap()).args,
             s(&["destroy", "tank/vm1@s1"])
         );
+    }
+
+    #[test]
+    fn filesystem_mount_lifecycle_args() {
+        let mp = MountPoint::new("/srv/share").unwrap();
+        assert_eq!(
+            zfs_fs_create(&ds("tank/share"), None).args,
+            s(&["create", "tank/share"]),
+            "no mountpoint = inherit default; no -V"
+        );
+        assert_eq!(
+            zfs_fs_create(&ds("tank/share"), Some(&mp)).args,
+            s(&["create", "-o", "mountpoint=/srv/share", "tank/share"])
+        );
+        assert_eq!(
+            zfs_set_mountpoint(&ds("tank/share"), &mp).args,
+            s(&["set", "mountpoint=/srv/share", "tank/share"])
+        );
+        assert_eq!(
+            zfs_mount(&ds("tank/share")).args,
+            s(&["mount", "tank/share"])
+        );
+        assert_eq!(
+            zfs_unmount(&ds("tank/share")).args,
+            s(&["unmount", "tank/share"])
+        );
+        assert_eq!(
+            zfs_destroy(&ds("tank/share"), false).args,
+            s(&["destroy", "tank/share"])
+        );
+        assert_eq!(
+            zfs_destroy(&ds("tank/share"), true).args,
+            s(&["destroy", "-r", "tank/share"])
+        );
+        for spec in [
+            zfs_fs_create(&ds("tank/share"), Some(&mp)),
+            zfs_mount(&ds("tank/share")),
+            zfs_destroy(&ds("tank/share"), true),
+        ] {
+            assert_eq!(spec.command, "zfs");
+        }
     }
 }

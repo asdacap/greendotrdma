@@ -43,6 +43,7 @@ pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
 
+    let nfs_exports = state.db.list_nfs_exports()?;
     let nvmet_ok = reconcile::nvmet_satisfied(
         &reconcile::render_nvmet(&exports, listen),
         &actual::nvmet::read(&state.nvmet_root),
@@ -51,7 +52,13 @@ pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
         &reconcile::render_lio(&exports, listen),
         &actual::lio::read(&state.lio_root),
     );
-    if nvmet_ok && lio_ok {
+    // NFS actual state needs root, so this pre-check makes one helper round-trip
+    // (only matters when NFS exports exist; the steady state stays silent).
+    let nfs_ok = reconcile::nfs_satisfied(
+        &reconcile::render_nfs(&nfs_exports, greendot_proto::NFS_RDMA_PORT),
+        &actual::nfs::read(&state.helper).await,
+    );
+    if nvmet_ok && lio_ok && nfs_ok {
         return Ok(()); // already realized — emit no task
     }
 
@@ -74,6 +81,11 @@ pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
         state
             .db
             .set_export_error(e.id, drifted.then_some(err.as_deref()).flatten())?;
+    }
+    for e in nfs_exports.iter().filter(|e| e.enabled) {
+        state
+            .db
+            .set_nfs_export_error(e.id, (!nfs_ok).then_some(err.as_deref()).flatten())?;
     }
     state
         .db

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}NFS — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>NFS shares</h1>
+<p class="muted small">File shares served over NFS-over-RDMA (port 20049). NFS is always
+reachable over TCP/2049 as well; the dot is green only when this share is actually
+served over RDMA. Export a mounted directory — e.g. a ZFS filesystem's mountpoint.</p>
+{% include "_nfs.html" %}
+{% endblock %}

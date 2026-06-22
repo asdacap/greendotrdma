@@ -114,6 +114,40 @@ pub(crate) fn mount_path(s: &str) -> bool {
         .is_some_and(block_dev)
 }
 
+/// Absolute directory path to export over NFS (a ZFS mountpoint or any other
+/// mounted directory). It lands in a root-written exports file and as an
+/// `exportfs` argument, so it is validated conservatively: absolute, no `..`/`.`
+/// components, no empty components (`//`), no trailing slash, each component
+/// limited to alphanumerics plus `_ - .`.
+pub(crate) fn nfs_export_path(s: &str) -> bool {
+    s.len() <= 4096
+        && s != "/"
+        && !s.ends_with('/')
+        && s.strip_prefix('/').is_some_and(|rest| {
+            rest.split('/').all(|c| {
+                !c.is_empty()
+                    && c != "."
+                    && c != ".."
+                    && c.chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || "_-.".contains(ch))
+            })
+        })
+}
+
+/// An NFS client access spec: a hostname, IPv4/IPv6 address, CIDR, or `*`. The
+/// charset deliberately excludes `(`/`)`/`,`/whitespace — the delimiters of the
+/// exports-file line — so a client field can never smuggle export options. A
+/// leading `-` is also forbidden: the client is passed to `exportfs` as the
+/// `<client>:<path>` positional, so a `-r`/`-a`-style value could otherwise be
+/// parsed as an option flag (e.g. the global `-r` re-export we must never run).
+pub(crate) fn nfs_client(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 128
+        && !s.starts_with('-')
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || ".:-/_*".contains(c))
+}
+
 pub(crate) fn netdev(s: &str) -> bool {
     (1..=15).contains(&s.len())
         && s != "."

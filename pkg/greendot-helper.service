@@ -11,7 +11,10 @@ Group=greendot
 ExecStart=/usr/libexec/greendotrdma/greendot-helper
 Restart=on-failure
 RestartSec=2
-# Must stay root for configfs/PAM/zfs, but lock down what we can.
+# Must stay root for configfs/PAM/zfs, but lock down what we can. NOTE: the NFS
+# apply path writes /proc/fs/nfsd/portlist and runs `systemctl start nfs-server`,
+# so do NOT add ProtectKernelTunables=/ProtectControlGroups=/RestrictAddressFamilies=
+# here — they would silently break NFS-over-RDMA.
 ProtectHome=yes
 PrivateTmp=yes
 RuntimeDirectory=greendotrdma

@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}Diagnose {{ view.path }} — NFS — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<p><a href="/nfs">← Back to NFS</a></p>
+{% if view.not_found %}
+<p class="error">NFS export not found.</p>
+{% else %}
+<h1><span class="dot {{ view.dot_class }}"></span> Diagnose {{ view.path }}</h1>
+<p class="muted small">NFS-over-RDMA · {{ view.dot_reason }}</p>
+
+<ul class="criteria">
+  {% for c in view.criteria %}
+  <li>
+    <span class="dot {% if c.ok %}dot-green{% else %}dot-red{% endif %}"></span>
+    <span class="crit-label">{{ c.label }}</span>
+    <span class="crit-detail muted small">{{ c.detail }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% endblock %}

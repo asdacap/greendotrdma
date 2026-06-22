@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Router};
-use greendot_proto::Request;
+use greendot_proto::{NFS_RDMA_PORT, Request};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -44,6 +44,9 @@ pub struct ConnectionsView {
     /// True when an NVMe-oF RDMA export exists but the helper's `rdma` read
     /// failed — render "unavailable" rather than a misleading empty table.
     pub nvme_unavailable: bool,
+    /// NFS-over-RDMA peers (port 20049), same shape as NVMe peers.
+    pub nfs: Vec<NvmeRow>,
+    pub nfs_unavailable: bool,
 }
 
 async fn gather_connections(state: &AppState) -> ConnectionsView {
@@ -73,35 +76,57 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
     let has_nvme = exports
         .iter()
         .any(|e| e.enabled && e.kind == ExportKind::Nvme && e.want_rdma);
+    let has_nfs = state
+        .db
+        .list_nfs_exports()
+        .map(|es| es.iter().any(|e| e.enabled))
+        .unwrap_or(false);
     let mut nvme = Vec::new();
     let mut nvme_unavailable = false;
-    if has_nvme {
-        let rdma_ports: HashSet<u16> = actual::nvmet::read(&state.nvmet_root)
-            .ports
-            .iter()
-            .filter(|p| p.trtype == "rdma")
-            .filter_map(|p| p.trsvcid.parse::<u16>().ok())
-            .collect();
+    let mut nfs = Vec::new();
+    let mut nfs_unavailable = false;
+    // One `rdma resource show cm_id` read serves both NVMe-oF and NFS peers.
+    if has_nvme || has_nfs {
         let out = state.helper.collect(Request::RdmaResources).await;
-        nvme = actual::rdma::peers_from_json(&out.stdout)
-            .into_iter()
-            .filter(|p| p.src_port.is_some_and(|port| rdma_ports.contains(&port)))
-            .map(|p| NvmeRow {
-                listen: match p.src_port {
-                    Some(port) => format!("{}:{port}", p.src_addr),
-                    None => p.src_addr.clone(),
-                },
-                peer: p.dst_addr,
-                state: p.state,
-            })
-            .collect();
-        nvme_unavailable = !out.ok && nvme.is_empty();
+        let peers = actual::rdma::peers_from_json(&out.stdout);
+        let row = |p: &actual::rdma::RdmaPeer| NvmeRow {
+            listen: match p.src_port {
+                Some(port) => format!("{}:{port}", p.src_addr),
+                None => p.src_addr.clone(),
+            },
+            peer: p.dst_addr.clone(),
+            state: p.state.clone(),
+        };
+        if has_nvme {
+            let rdma_ports: HashSet<u16> = actual::nvmet::read(&state.nvmet_root)
+                .ports
+                .iter()
+                .filter(|p| p.trtype == "rdma")
+                .filter_map(|p| p.trsvcid.parse::<u16>().ok())
+                .collect();
+            nvme = peers
+                .iter()
+                .filter(|p| p.src_port.is_some_and(|port| rdma_ports.contains(&port)))
+                .map(&row)
+                .collect();
+            nvme_unavailable = !out.ok && nvme.is_empty();
+        }
+        if has_nfs {
+            nfs = peers
+                .iter()
+                .filter(|p| p.src_port == Some(NFS_RDMA_PORT))
+                .map(&row)
+                .collect();
+            nfs_unavailable = !out.ok && nfs.is_empty();
+        }
     }
 
     ConnectionsView {
         iscsi,
         nvme,
         nvme_unavailable,
+        nfs,
+        nfs_unavailable,
     }
 }
 

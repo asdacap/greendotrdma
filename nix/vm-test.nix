@@ -111,5 +111,41 @@ pkgs.testers.runNixOSTest {
         "--data 'id=1&enable=false' http://127.0.0.1:8080/exports/toggle"
     )
     machine.wait_until_fails("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1", timeout=60)
+
+    # --- NFS over RDMA ---
+    # A ZFS filesystem dataset to share (auto-mounts at its mountpoint).
+    machine.succeed("zfs create -o mountpoint=/srv/share tank/share")
+    machine.wait_until_succeeds("mountpoint -q /srv/share")
+
+    # Export it over NFS to anyone on the test LAN (RDMA is server-wide).
+    machine.succeed(
+        f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
+        "--data 'path=/srv/share&clients=*' http://127.0.0.1:8080/nfs/create"
+    )
+
+    # The apply wrote our exports file, registered it with nfsd, and turned on
+    # the RDMA listener (port 20049).
+    machine.wait_until_succeeds("test -f /etc/exports.d/greendot.exports", timeout=120)
+    machine.wait_until_succeeds("exportfs -s | grep -q /srv/share", timeout=60)
+    machine.wait_until_succeeds("grep -q 'rdma 20049' /proc/fs/nfsd/portlist", timeout=60)
+
+    # The NFS page shows the share GREEN (served via NFSoRDMA on the RDMA addr).
+    page = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/nfs")
+    assert "/srv/share" in page, "NFS share not listed"
+    assert "dot-green" in page, f"expected a green NFS dot, page was:\n{page}"
+
+    # Prove it serves: mount our own export over RDMA and round-trip a file.
+    machine.succeed("modprobe rpcrdma")
+    machine.succeed("mkdir -p /mnt/nfs")
+    machine.wait_until_succeeds(f"mount -o rdma,port=20049 {ip}:/srv/share /mnt/nfs", timeout=60)
+    machine.succeed("echo hello > /mnt/nfs/probe && grep -q hello /mnt/nfs/probe")
+    machine.succeed("umount /mnt/nfs")
+
+    # Deleting the share unexports it (reconcile tears it down).
+    machine.succeed(
+        f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
+        "--data 'id=1' http://127.0.0.1:8080/nfs/delete"
+    )
+    machine.wait_until_fails("exportfs -s | grep -q /srv/share", timeout=60)
   '';
 }
