@@ -83,7 +83,7 @@
         <td class="small">{{ n.addrs }}</td>
         <td class="small">{{ n.status }}</td>
         <td>
-          {% if n.roce_pci.is_some() || n.soft_roce %}<a href="/settings/nic/{{ n.netdev }}">Manage</a>{% endif %}
+          {% if n.roce || n.soft_roce %}<a href="/settings/nic/{{ n.netdev }}">Manage</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

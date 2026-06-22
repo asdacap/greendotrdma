@@ -7,10 +7,8 @@
 //! listener is asserted by writing `rdma <port>` to `/proc/fs/nfsd/portlist`
 //! (idempotent, root-only), mirroring how `nvmet::apply` writes configfs.
 
-use crate::cmd::EventSink;
-use greendot_proto::{
-    NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, TaskEvent, package_for_cli,
-};
+use crate::cmd::{EventSink, run_cmd};
+use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, TaskEvent};
 use std::collections::BTreeSet;
 use std::io;
 use std::path::Path;
@@ -121,54 +119,6 @@ fn ensure_portlist_rdma(portlist: &Path, port: u16) -> io::Result<bool> {
 
 fn s(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|p| p.to_string()).collect()
-}
-
-/// Runs one command, echoing the command line + its output to the task stream.
-/// Returns `Ok((success, error_message))`; `Err` only when the sink fails (the
-/// client is gone). A missing binary maps to the same install hint as `run_task`.
-fn run_cmd(command: &str, args: &[String], sink: &mut dyn EventSink) -> io::Result<(bool, String)> {
-    sink.emit(TaskEvent::Stdout {
-        data: format!("$ {command} {}\n", args.join(" ")),
-    })?;
-    let output = match Command::new(command).args(args).output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let msg = match package_for_cli(command) {
-                Some(pkg) => format!(
-                    "{command} is not installed — install the {pkg} package (Tasks → Install dependencies)"
-                ),
-                None => format!("{command} is not installed"),
-            };
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
-            return Ok((false, msg));
-        }
-        Err(e) => {
-            let msg = format!("failed to start {command}: {e}");
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
-            return Ok((false, msg));
-        }
-    };
-    if !output.stdout.is_empty() {
-        sink.emit(TaskEvent::Stdout {
-            data: String::from_utf8_lossy(&output.stdout).into_owned(),
-        })?;
-    }
-    if !output.stderr.is_empty() {
-        sink.emit(TaskEvent::Stderr {
-            data: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })?;
-    }
-    let exit = output.status.code().unwrap_or(-1);
-    let msg = if output.status.success() {
-        String::new()
-    } else {
-        format!("{command} exited with status {exit}")
-    };
-    Ok((output.status.success(), msg))
 }
 
 /// Applies `desired`, streaming progress as task events. Returns `Err` only when

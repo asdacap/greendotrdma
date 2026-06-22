@@ -206,20 +206,16 @@ pub enum Request {
     RxeLinkAdd {
         netdev: NetdevName,
     },
-    /// Read a NIC's devlink params (`devlink dev param show pci/<pci> -j`): a
-    /// privileged *read* used to confirm `enable_roce` before attempting a fix.
-    DevlinkParams {
-        pci: PciAddress,
-    },
-    /// Turn on hardware RoCE: `devlink dev param set pci/<pci> name enable_roce
-    /// value true cmode driverinit`. Takes effect only after a reload.
-    RoceEnableParam {
-        pci: PciAddress,
-    },
-    /// Re-init a device so a driverinit param takes effect (`devlink dev
-    /// reload pci/<pci>`). Resets the device's netdevs.
-    DevlinkReload {
-        pci: PciAddress,
+    /// Inventory of RoCE-capable NIC hardware (a privileged read): the helper
+    /// classifies vendors via its `NetworkHardware` registry and returns
+    /// `[{netdev, vendor}]` JSON. The web overlays this onto its structural NIC
+    /// classification — it carries no vendor knowledge itself.
+    RoceCapableNics,
+    /// Turn on hardware RoCE for `netdev`. The helper detects the vendor, probes
+    /// its enable parameter, and (only if present and off) sets it and reloads
+    /// the device — the whole vendor-specific flow lives behind the helper.
+    EnableRoce {
+        netdev: NetdevName,
     },
     /// Read live RDMA connections (`rdma -j resource show cm_id`): a privileged
     /// *read* used to surface NVMe-oF/iSER peers the kernel exposes no other
@@ -365,14 +361,9 @@ mod tests {
     #[case::modules(Request::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
-    #[case::devlink_params(Request::DevlinkParams {
-        pci: PciAddress::new("0000:00:10.0").unwrap(),
-    })]
-    #[case::roce_enable(Request::RoceEnableParam {
-        pci: PciAddress::new("0000:3b:00.1").unwrap(),
-    })]
-    #[case::devlink_reload(Request::DevlinkReload {
-        pci: PciAddress::new("0000:00:10.0").unwrap(),
+    #[case::roce_capable_nics(Request::RoceCapableNics)]
+    #[case::enable_roce(Request::EnableRoce {
+        netdev: NetdevName::new("ens16").unwrap(),
     })]
     #[case::rdma_resources(Request::RdmaResources)]
     #[case::install(Request::InstallPackages {
@@ -457,8 +448,7 @@ mod tests {
             r#"{"op":"lv_delete","vg":"vg0","name":"../x"}"#,
             r#"{"op":"vg_create","name":"-bad","devices":["/dev/sdb"]}"#,
             r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
-            r#"{"op":"roce_enable_param","pci":"0000:00:10.G"}"#,
-            r#"{"op":"devlink_reload","pci":"0000:00:10.0 ; reboot"}"#,
+            r#"{"op":"enable_roce","netdev":"eth0 ; reboot"}"#,
             r#"{"op":"zfs_mount","dataset":"../../etc"}"#,
             r#"{"op":"zfs_set_mountpoint","dataset":"tank/share","mountpoint":"/tank/../etc"}"#,
             r#"{"op":"nfs_apply","desired":{"rdma_port":20049,"exports":[{"path":"/tank/../etc","fsid":1,"clients":[]}]}}"#,

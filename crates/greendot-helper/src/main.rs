@@ -4,6 +4,7 @@
 mod cmd;
 mod dispatch;
 mod fs;
+mod hardware;
 mod install;
 mod lio;
 mod lvm;
@@ -201,6 +202,31 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                     if nfs::report_into(
                         std::path::Path::new(nfs::NFSD_PORTLIST),
                         std::path::Path::new(nfs::NFS_EXPORTS_FILE),
+                        &mut sink,
+                    )
+                    .is_err()
+                    {
+                        return; // socket write failed; client gone
+                    }
+                }
+                Dispatch::RoceCapableNics => {
+                    // A read: no mutate_lock (mirrors how reads stream).
+                    let mut sink = SocketSink(&mut writer);
+                    if hardware::report_capable_into(
+                        std::path::Path::new(hardware::NET_ROOT),
+                        &mut sink,
+                    )
+                    .is_err()
+                    {
+                        return; // socket write failed; client gone
+                    }
+                }
+                Dispatch::EnableRoce(netdev) => {
+                    let _guard = ctx.mutate_lock.lock().unwrap();
+                    let mut sink = SocketSink(&mut writer);
+                    if hardware::enable_into(
+                        std::path::Path::new(hardware::NET_ROOT),
+                        &netdev,
                         &mut sink,
                     )
                     .is_err()

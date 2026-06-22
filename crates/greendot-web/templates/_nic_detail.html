@@ -19,11 +19,10 @@
     </tbody>
   </table>
 
-  {% if let Some(pci) = nic.roce_pci %}
+  {% if nic.roce %}
   <h2>Enable RoCE</h2>
   <form class="inline" hx-post="/settings/roce" hx-target="#nic-detail-content" hx-swap="outerHTML"
-        hx-confirm="Enabling RoCE reloads {{ pci }} and briefly drops its network. If you reach this UI over this NIC your session will disconnect — reconnect after a few seconds.">
-    <input type="hidden" name="pci" value="{{ pci }}">
+        hx-confirm="Enabling RoCE reloads {{ nic.netdev }} and briefly drops its network. If you reach this UI over this NIC your session will disconnect — reconnect after a few seconds.">
     <input type="hidden" name="netdev" value="{{ nic.netdev }}">
     <button>Enable RoCE</button>
   </form>

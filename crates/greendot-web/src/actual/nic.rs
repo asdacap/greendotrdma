@@ -1,12 +1,13 @@
-//! Per-NIC RDMA capability, classified purely from sysfs (unprivileged).
-//!
-//! For every network interface we decide whether RDMA is already active, could
-//! be turned on (hardware RoCE that's disabled, or Soft-RoCE on a plain NIC),
-//! or isn't applicable. The hardware-RoCE-disabled case is the one the green
-//! dot can't otherwise explain: a Mellanox NIC whose `enable_roce` is off
-//! exposes no `/sys/class/infiniband` device at all.
+//! Per-NIC RDMA capability. The structural classification (is RDMA already
+//! active, down, or absent) is read from sysfs here; the one vendor-aware step —
+//! "is this RoCE-capable hardware whose RoCE is off?" — is answered by the helper
+//! (`Request::RoceCapableNics`) and injected, so this module carries no
+//! vendor knowledge. A NIC whose RoCE is off exposes no `/sys/class/infiniband`
+//! device at all, which is why that case can't be read here structurally.
 
 use super::rdma::{port_active, read_trimmed};
+use crate::helper_client::HelperClient;
+use greendot_proto::Request;
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -26,18 +27,15 @@ pub enum NicRdmaKind {
     Active,
     /// An RDMA device backs this NIC but no port is up.
     Inactive,
-    /// RoCE-capable hardware (Mellanox) with no RDMA device — RoCE is disabled
-    /// and can be turned on via devlink at this PCI address.
-    CapableDisabled { pci: String },
+    /// RoCE-capable hardware with no RDMA device — RoCE is disabled and can be
+    /// turned on (the helper handles the vendor-specific enable). `vendor` is the
+    /// label the helper reported for the UI.
+    CapableDisabled { vendor: String },
     /// A plain Ethernet NIC that can get Soft-RoCE (rxe).
     SoftRoceable,
     /// Not an RDMA candidate (virtual interface, IB-only netdev, …).
     Unsupported,
 }
-
-/// Mellanox PCI vendor id (ConnectX family). RoCE-capable NICs from other
-/// vendors (Broadcom, Intel E810, Chelsio) are not detected yet.
-const MELLANOX_VENDOR: &str = "0x15b3";
 
 /// Every netdev backing an RDMA device — `parent` plus every port's GID-table
 /// netdev — so multi-port cards and port-2 RoCE netdevs are all captured (a
@@ -85,23 +83,15 @@ fn is_ethernet(net_dir: &Path) -> bool {
         && read_trimmed(&net_dir.join("type")).as_deref() == Some("1")
 }
 
-fn is_mellanox(net_dir: &Path) -> bool {
-    read_trimmed(&net_dir.join("device/vendor")).as_deref() == Some(MELLANOX_VENDOR)
-}
-
-/// PCI address from the netdev's `device` symlink, e.g. `0000:00:10.0`.
-fn nic_pci(net_dir: &Path) -> Option<String> {
-    std::fs::read_link(net_dir.join("device"))
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-}
-
-/// Classify every interface under `net_root`, using `ib_root` for RDMA backing
-/// and `netdev_addrs` for the addresses column. Pure over its inputs.
+/// Classify every interface under `net_root`, using `ib_root` for RDMA backing,
+/// `netdev_addrs` for the addresses column, and `roce_hw` (netdev → vendor, from
+/// the helper) to mark a plain Ethernet NIC as RoCE-capable-but-disabled. Pure
+/// over its inputs.
 pub fn classify(
     net_root: &Path,
     ib_root: &Path,
     netdev_addrs: &HashMap<String, Vec<IpAddr>>,
+    roce_hw: &HashMap<String, String>,
 ) -> Vec<NicStatus> {
     let backed = rdma_backed(ib_root);
     let Ok(entries) = std::fs::read_dir(net_root) else {
@@ -123,8 +113,13 @@ pub fn classify(
                 };
                 (Some(dev.clone()), kind)
             } else if is_ethernet(&net_dir) {
-                match is_mellanox(&net_dir).then(|| nic_pci(&net_dir)).flatten() {
-                    Some(pci) => (None, NicRdmaKind::CapableDisabled { pci }),
+                match roce_hw.get(&netdev) {
+                    Some(vendor) => (
+                        None,
+                        NicRdmaKind::CapableDisabled {
+                            vendor: vendor.clone(),
+                        },
+                    ),
                     None => (None, NicRdmaKind::SoftRoceable),
                 }
             } else {
@@ -142,41 +137,36 @@ pub fn classify(
     nics
 }
 
-/// Live NIC classification from `/sys`.
-pub fn interfaces() -> Vec<NicStatus> {
+/// Live NIC classification from `/sys`, with the RoCE-capable-hardware verdict
+/// supplied by the helper (the only vendor-aware step).
+pub async fn interfaces(helper: &HelperClient) -> Vec<NicStatus> {
+    let roce_hw = roce_capable(helper).await;
     classify(
         Path::new("/sys/class/net"),
         Path::new("/sys/class/infiniband"),
         &super::rdma::netdev_addrs(),
+        &roce_hw,
     )
 }
 
-/// Parse `devlink dev param show -j` for the `enable_roce` value: `Some(true)`
-/// / `Some(false)` if the param is present, `None` if absent (e.g. a VF that
-/// can't self-enable RoCE — the fix should not be attempted).
-pub fn enable_roce_from_json(json: &str) -> Option<bool> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let param = v.get("param")?;
-    // `{"param": {"pci/<addr>": [ {name, values:[{value}]}, … ]}}`; some
-    // versions emit `{"param": [ … ]}` directly — handle both.
-    let groups: Vec<&serde_json::Value> = match param {
-        serde_json::Value::Object(map) => map.values().collect(),
-        serde_json::Value::Array(_) => vec![param],
-        _ => return None,
-    };
-    for arr in groups.iter().filter_map(|g| g.as_array()) {
-        for p in arr {
-            if p.get("name").and_then(serde_json::Value::as_str) == Some("enable_roce") {
-                return p
-                    .get("values")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|vs| vs.first())
-                    .and_then(|val| val.get("value"))
-                    .and_then(serde_json::Value::as_bool);
-            }
-        }
+/// The helper's RoCE-capable NIC inventory as `netdev → vendor`. A transport
+/// failure or empty inventory yields no capable NICs (every plain NIC then reads
+/// as a Soft-RoCE candidate), the same graceful degradation as elsewhere.
+async fn roce_capable(helper: &HelperClient) -> HashMap<String, String> {
+    parse_roce_capable(&helper.collect(Request::RoceCapableNics).await.stdout)
+}
+
+fn parse_roce_capable(stdout: &str) -> HashMap<String, String> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        netdev: String,
+        vendor: String,
     }
-    None
+    serde_json::from_str::<Vec<Row>>(stdout)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| (r.netdev, r.vendor))
+        .collect()
 }
 
 #[cfg(test)]
@@ -199,16 +189,15 @@ mod tests {
             Fixture { root }
         }
 
-        /// A netdev with the given ARPHRD `type` and, if `vendor` is set, a PCI
-        /// `device` symlink to a `<root>/pci/<pci>` dir carrying that vendor.
-        fn netdev(&self, name: &str, type_: &str, pci: Option<(&str, &str)>) {
+        /// A netdev with the given ARPHRD `type` and, if `pci` is set, a PCI
+        /// `device` symlink (so it reads as a physical Ethernet NIC).
+        fn netdev(&self, name: &str, type_: &str, pci: Option<&str>) {
             let dir = self.root.join("net").join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("type"), format!("{type_}\n")).unwrap();
-            if let Some((pci, vendor)) = pci {
+            if let Some(pci) = pci {
                 let pci_dir = self.root.join("pci").join(pci);
                 std::fs::create_dir_all(&pci_dir).unwrap();
-                std::fs::write(pci_dir.join("vendor"), format!("{vendor}\n")).unwrap();
                 std::os::unix::fs::symlink(&pci_dir, dir.join("device")).unwrap();
             }
         }
@@ -229,11 +218,12 @@ mod tests {
             std::fs::write(dir.join("ports/1/state"), format!("{state}\n")).unwrap();
         }
 
-        fn classify(&self) -> Vec<NicStatus> {
+        fn classify(&self, roce_hw: &HashMap<String, String>) -> Vec<NicStatus> {
             classify(
                 &self.root.join("net"),
                 &self.root.join("ib"),
                 &HashMap::new(),
+                roce_hw,
             )
         }
 
@@ -255,27 +245,31 @@ mod tests {
     #[test]
     fn classifies_every_interface_kind() {
         let f = Fixture::new("kinds");
-        // (a) Mellanox VF, Ethernet, no IB device → RoCE disabled, fixable.
-        f.netdev("ens16", "1", Some(("0000:00:10.0", "0x15b3")));
+        // (a) physical NIC the helper reports as RoCE-capable, no IB device →
+        // RoCE disabled, fixable, labelled with the helper's vendor.
+        f.netdev("ens16", "1", Some("0000:00:10.0"));
         // (b) plain NIC backed by an active Soft-RoCE device → Active.
-        f.netdev("eth0", "1", Some(("0000:01:00.0", "0x10ec")));
+        f.netdev("eth0", "1", Some("0000:01:00.0"));
         f.rdma_parent("rxe-eth0", "eth0", "4: ACTIVE");
-        // (c) Mellanox IB-link-layer port, down → Inactive, NOT CapableDisabled.
+        // (c) IB-link-layer port, down → Inactive, NOT CapableDisabled.
         f.netdev("ibp1s0", "32", None);
         f.rdma_hca("mlx5_0", "ibp1s0", "1: DOWN");
         // (d) virtual interface (bridge: Ethernet type, no PCI device) → Unsupported.
         f.netdev("br0", "1", None);
-        // (e) plain Realtek Ethernet, no RDMA → Soft-RoCE candidate.
-        f.netdev("eth1", "1", Some(("0000:02:00.0", "0x10ec")));
+        // (e) plain Ethernet, no RDMA, not capable → Soft-RoCE candidate.
+        f.netdev("eth1", "1", Some("0000:02:00.0"));
         // (f) loopback is excluded.
         f.netdev("lo", "772", None);
 
-        let nics = f.classify();
+        // The helper's verdict: only ens16 is RoCE-capable hardware. The vendor
+        // label is opaque to the web (proving it carries no vendor knowledge).
+        let roce_hw = HashMap::from([("ens16".to_string(), "Acme".to_string())]);
+        let nics = f.classify(&roce_hw);
         assert!(!nics.iter().any(|n| n.netdev == "lo"), "lo excluded");
         assert_eq!(
             f.kind(&nics, "ens16"),
             NicRdmaKind::CapableDisabled {
-                pci: "0000:00:10.0".into()
+                vendor: "Acme".into()
             }
         );
         assert_eq!(f.kind(&nics, "eth0"), NicRdmaKind::Active);
@@ -289,20 +283,13 @@ mod tests {
     }
 
     #[test]
-    fn parses_enable_roce_from_devlink_json() {
-        let disabled = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_eth","type":"generic","values":[{"cmode":"driverinit","value":true}]},
-            {"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":false}]}
-        ]}}"#;
-        let enabled = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":true}]}
-        ]}}"#;
-        let absent = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_eth","type":"generic","values":[{"cmode":"driverinit","value":true}]}
-        ]}}"#;
-        assert_eq!(enable_roce_from_json(disabled), Some(false));
-        assert_eq!(enable_roce_from_json(enabled), Some(true));
-        assert_eq!(enable_roce_from_json(absent), None);
-        assert_eq!(enable_roce_from_json("not json"), None);
+    fn parses_roce_capable_inventory() {
+        let json = r#"[{"netdev":"ens16","vendor":"Acme"},{"netdev":"ens17","vendor":"Acme"}]"#;
+        let map = parse_roce_capable(json);
+        assert_eq!(map.get("ens16").map(String::as_str), Some("Acme"));
+        assert_eq!(map.len(), 2);
+        // Garbage / empty degrades to no capable NICs.
+        assert!(parse_roce_capable("not json").is_empty());
+        assert!(parse_roce_capable("[]").is_empty());
     }
 }

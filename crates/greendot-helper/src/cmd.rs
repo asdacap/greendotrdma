@@ -191,6 +191,60 @@ pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
     })
 }
 
+/// Runs one command to completion, echoing its command line + output to the task
+/// stream — for multi-step tasks (NFS apply, RoCE enable) that emit a single
+/// Started/Finished around several commands. Returns `Ok((success, error))`;
+/// `Err` only when the sink fails (the client is gone). A missing binary maps to
+/// the same install hint as `run_task`.
+pub(crate) fn run_cmd(
+    command: &str,
+    args: &[String],
+    sink: &mut dyn EventSink,
+) -> io::Result<(bool, String)> {
+    sink.emit(TaskEvent::Stdout {
+        data: format!("$ {command} {}\n", args.join(" ")),
+    })?;
+    let output = match Command::new(command).args(args).output() {
+        Ok(o) => o,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            let msg = match package_for_cli(command) {
+                Some(pkg) => format!(
+                    "{command} is not installed — install the {pkg} package (Tasks → Install dependencies)"
+                ),
+                None => format!("{command} is not installed"),
+            };
+            sink.emit(TaskEvent::Stderr {
+                data: format!("{msg}\n"),
+            })?;
+            return Ok((false, msg));
+        }
+        Err(e) => {
+            let msg = format!("failed to start {command}: {e}");
+            sink.emit(TaskEvent::Stderr {
+                data: format!("{msg}\n"),
+            })?;
+            return Ok((false, msg));
+        }
+    };
+    if !output.stdout.is_empty() {
+        sink.emit(TaskEvent::Stdout {
+            data: String::from_utf8_lossy(&output.stdout).into_owned(),
+        })?;
+    }
+    if !output.stderr.is_empty() {
+        sink.emit(TaskEvent::Stderr {
+            data: String::from_utf8_lossy(&output.stderr).into_owned(),
+        })?;
+    }
+    let exit = output.status.code().unwrap_or(-1);
+    let msg = if output.status.success() {
+        String::new()
+    } else {
+        format!("{command} exited with status {exit}")
+    };
+    Ok((output.status.success(), msg))
+}
+
 /// Streams a child pipe to the channel in chunks (partial lines included).
 fn pump(mut pipe: impl Read, tx: &std::sync::mpsc::Sender<TaskEvent>, is_stdout: bool) {
     let mut buf = [0u8; 8192];

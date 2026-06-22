@@ -122,12 +122,13 @@ struct DashboardTemplate {
 }
 
 async fn dashboard(
-    axum::extract::State(_state): axum::extract::State<Arc<AppState>>,
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
     // The per-protocol export dot grids load themselves from `/partials/nvme`
     // and `/partials/iscsi` (see dashboard.html), so the page only needs NICs.
-    let nics = crate::actual::nic::interfaces()
+    let nics = crate::actual::nic::interfaces(&state.helper)
+        .await
         .into_iter()
         .filter_map(settings::nic_row)
         .collect();
@@ -216,10 +217,12 @@ pub(crate) mod testutil {
                                 )
                             })
                         }
-                        // Devlink param read: report enable_roce disabled so the
-                        // RoCE fix flow proceeds past its confirmation step.
-                        HelperRequest::DevlinkParams { .. } => {
-                            let json = r#"{"param":{"pci/0000:00:10.0":[{"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":false}]}]}}"#;
+                        // RoCE-capable NIC inventory: report eth0 with a sample
+                        // vendor so the NIC table shows a capable-disabled row.
+                        // The web renders the label opaquely — the real vendor
+                        // set lives in the helper's NetworkHardware registry.
+                        HelperRequest::RoceCapableNics => {
+                            let json = r#"[{"netdev":"eth0","vendor":"Acme"}]"#;
                             wire::write_msg(
                                 w,
                                 &TaskEvent::Started {
@@ -242,8 +245,8 @@ pub(crate) mod testutil {
                                 )
                             })
                         }
-                        // Everything else is a task: stream Started + a
-                        // successful Finished.
+                        // Everything else (incl. EnableRoce) is a task: stream
+                        // Started + a successful Finished.
                         _ => wire::write_msg(
                             w,
                             &TaskEvent::Started {

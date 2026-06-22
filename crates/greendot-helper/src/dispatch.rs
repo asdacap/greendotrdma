@@ -4,7 +4,7 @@
 
 use crate::cmd::TaskSpec;
 use crate::{fs, install, lio, lvm, modules, pam, partition, zfs};
-use greendot_proto::{NfsDesired, NvmetDesired, Request, Response};
+use greendot_proto::{NetdevName, NfsDesired, NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
 pub struct Ctx {
@@ -28,6 +28,12 @@ pub enum Dispatch {
     /// Privileged read of NFS actual state (`exportfs -s` + portlist), streamed
     /// as a task; collected by the web, never recorded.
     NfsReport,
+    /// Privileged read of the RoCE-capable NIC inventory (vendor classification
+    /// via the `NetworkHardware` registry), streamed as JSON like `NfsReport`.
+    RoceCapableNics,
+    /// Turn on hardware RoCE for a NIC: vendor-detect, probe, then set+reload —
+    /// the multi-step vendor-specific flow streamed as one task.
+    EnableRoce(NetdevName),
     /// A refused operation recorded as a failed task carrying this message
     /// (e.g. install on an unsupported distro), so the reason reaches the UI.
     FailedTask(String),
@@ -84,9 +90,8 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             None => Dispatch::OneShot(Response::Ok),
         },
         Request::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
-        Request::DevlinkParams { pci } => Dispatch::Task(modules::devlink_params(&pci)),
-        Request::RoceEnableParam { pci } => Dispatch::Task(modules::devlink_roce_enable(&pci)),
-        Request::DevlinkReload { pci } => Dispatch::Task(modules::devlink_reload(&pci)),
+        Request::RoceCapableNics => Dispatch::RoceCapableNics,
+        Request::EnableRoce { netdev } => Dispatch::EnableRoce(netdev),
         Request::RdmaResources => Dispatch::Task(modules::rdma_resources()),
 
         Request::PartitionTableCreate { disk } => Dispatch::Task(partition::table_create(&disk)),
@@ -220,9 +225,6 @@ mod tests {
     fn mp(s: &str) -> MountPath {
         MountPath::new(s).unwrap()
     }
-    fn pci(s: &str) -> PciAddress {
-        PciAddress::new(s).unwrap()
-    }
 
     /// Each task request must route to exactly the command its dedicated builder
     /// produces; the builder is the oracle, so a mis-wired arm (wrong function or
@@ -273,15 +275,6 @@ mod tests {
     #[case::rxe_link_add(
         Request::RxeLinkAdd { netdev: NetdevName::new("eth0").unwrap() },
         modules::rxe_link_add(&NetdevName::new("eth0").unwrap()))]
-    #[case::devlink_params(
-        Request::DevlinkParams { pci: pci("0000:00:10.0") },
-        modules::devlink_params(&pci("0000:00:10.0")))]
-    #[case::roce_enable_param(
-        Request::RoceEnableParam { pci: pci("0000:00:10.0") },
-        modules::devlink_roce_enable(&pci("0000:00:10.0")))]
-    #[case::devlink_reload(
-        Request::DevlinkReload { pci: pci("0000:00:10.0") },
-        modules::devlink_reload(&pci("0000:00:10.0")))]
     #[case::partition_table_create(
         Request::PartitionTableCreate { disk: disk("sdb") },
         partition::table_create(&disk("sdb")))]
@@ -396,6 +389,16 @@ mod tests {
         assert!(matches!(
             plan(&ctx, Request::NfsReport),
             Dispatch::NfsReport
+        ));
+        // RoCE hardware read + enable route to their special arms (the
+        // vendor-specific work lives in `hardware`, not a single TaskSpec).
+        assert!(matches!(
+            plan(&ctx, Request::RoceCapableNics),
+            Dispatch::RoceCapableNics
+        ));
+        assert!(matches!(
+            plan(&ctx, Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
+            Dispatch::EnableRoce(nd) if nd.as_str() == "ens16"
         ));
     }
 }

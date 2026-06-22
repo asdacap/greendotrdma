@@ -302,7 +302,8 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
         };
     };
     let rdma = actual::rdma::devices();
-    let capable_disabled: Vec<String> = actual::nic::interfaces()
+    let capable_disabled: Vec<String> = actual::nic::interfaces(&state.helper)
+        .await
         .into_iter()
         .filter(|n| matches!(n.kind, actual::nic::NicRdmaKind::CapableDisabled { .. }))
         .map(|n| n.netdev)
