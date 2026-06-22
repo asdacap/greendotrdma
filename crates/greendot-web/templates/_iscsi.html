@@ -1,0 +1,54 @@
+<div id="iscsi-content">
+  {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.rows.is_empty() %}
+  <p class="empty">No iSCSI exports yet — create one below.</p>
+  {% else %}
+  <table>
+    <thead><tr><th></th><th>Name</th><th>Device</th><th>Transports</th><th>Hosts</th><th>Clients</th><th></th></tr></thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr>
+        <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
+        <td>{{ r.name }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}</span></td>
+        <td>{{ r.device }}</td>
+        <td>{{ r.transports }}</td>
+        <td>{{ r.hosts }}</td>
+        <td>
+          {% if let Some(n) = r.clients %}<a href="/connections">{{ n }}</a>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td>
+          {% if !r.external %}<a href="/iscsi/{{ r.id }}">Manage</a>{% endif %}
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <details>
+  <summary>New iSCSI export</summary>
+  <form class="card" hx-post="/iscsi/create" hx-target="#iscsi-content" hx-swap="outerHTML">
+    <label>Name <input name="name" placeholder="tape" required></label>
+    <label>Block device
+      {% if view.devices.is_empty() %}
+      <select name="device" disabled><option>No available block devices</option></select>
+      <span class="muted small">Unmounted, non-pool block devices and zvols appear here.</span>
+      {% else %}
+      <select name="device" required>
+        {% for d in view.devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+      </select>
+      {% endif %}
+    </label>
+    <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> iSER (RDMA; plain TCP moves to port 3261)</label>
+    <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>
+    <label>Allowed initiator IQNs (one per line, empty = allow any host)
+      <textarea name="initiators" rows="3" placeholder="iqn.1993-08.org.debian:01:..."></textarea>
+    </label>
+    <button type="submit">Create export</button>
+  </form>
+  </details>
+</div>

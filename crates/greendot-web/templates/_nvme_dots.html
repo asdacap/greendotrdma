@@ -1,10 +1,10 @@
 {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
 {% if view.rows.is_empty() %}
-<p class="empty">No exports configured yet — head to <a href="/exports">Exports</a>.</p>
+<p class="empty">No NVMe-oF exports yet — head to <a href="/nvme">NVMe-oF</a>.</p>
 {% else %}
 <div class="cards">
   {% for r in view.rows %}
-  <a class="exportcard {% if r.dot_class == "dot-green" %}s-live{% else if r.dot_class == "dot-yellow" %}s-degraded{% else if r.dot_class == "dot-red" %}s-down{% else %}s-off{% endif %}" href="/exports">
+  <a class="exportcard {% if r.dot_class == "dot-green" %}s-live{% else if r.dot_class == "dot-yellow" %}s-degraded{% else if r.dot_class == "dot-red" %}s-down{% else %}s-off{% endif %}" href="/nvme">
     <span class="port-top">
       <span class="dot {{ r.dot_class }}"></span>
       <span class="port-state">{% if r.dot_class == "dot-green" %}Live{% else if r.dot_class == "dot-yellow" %}TCP only{% else if r.dot_class == "dot-red" %}Down{% else %}Off{% endif %}</span>

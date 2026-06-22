@@ -1,10 +1,12 @@
+pub mod block_export;
 pub mod charts;
 pub mod connections;
 pub mod disks;
 pub mod docs;
-pub mod exports;
+pub mod iscsi;
 pub mod lvm;
 pub mod nfs;
+pub mod nvme;
 pub mod settings;
 pub mod snapshots;
 pub mod tasks;
@@ -55,7 +57,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         .route("/logout", post(auth::logout))
         .merge(zfs::router())
         .merge(lvm::router())
-        .merge(exports::router())
+        .merge(nvme::router())
+        .merge(iscsi::router())
         .merge(nfs::router())
         .merge(settings::router())
         .merge(disks::router())
@@ -114,24 +117,21 @@ pub fn page<T: Template>(template: T) -> Response {
 #[template(path = "dashboard.html")]
 struct DashboardTemplate {
     user: CurrentUser,
-    view: exports::ExportsView,
     /// RDMA-capable NICs and their status (empty → "not available").
     nics: Vec<settings::NicRow>,
 }
 
 async fn dashboard(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    axum::extract::State(_state): axum::extract::State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
+    // The per-protocol export dot grids load themselves from `/partials/nvme`
+    // and `/partials/iscsi` (see dashboard.html), so the page only needs NICs.
     let nics = crate::actual::nic::interfaces()
         .into_iter()
         .filter_map(settings::nic_row)
         .collect();
-    page(DashboardTemplate {
-        user,
-        view: exports::gather(&state, None, None).await,
-        nics,
-    })
+    page(DashboardTemplate { user, nics })
 }
 
 /// Shared by the route tests of every page module.

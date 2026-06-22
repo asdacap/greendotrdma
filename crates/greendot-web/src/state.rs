@@ -17,17 +17,11 @@ use std::sync::Mutex;
 /// so the helper scopes its configfs writes to the same prefix.
 pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ExportKind {
-    Nvme,
-    Iscsi,
-}
-
+/// A block-device export served as an NVMe-oF subsystem. RDMA, TCP and the
+/// local loopback are all valid transports.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Export {
+pub struct NvmeExport {
     pub id: i64,
-    pub kind: ExportKind,
     pub name: String,
     pub device_path: String,
     #[serde(default = "default_true")]
@@ -44,20 +38,40 @@ pub struct Export {
     pub last_error: Option<String>,
 }
 
-impl Export {
+impl NvmeExport {
     pub fn nqn(&self) -> Nqn {
         Nqn::new(format!("{OUR_NQN_PREFIX}{}", self.name))
             .expect("validated name forms a valid NQN")
     }
+}
 
+/// A block-device export served as an iSCSI target. RDMA is iSER; there is no
+/// loopback transport (so no `want_loop`), and connected sessions are tracked.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IscsiExport {
+    pub id: i64,
+    pub name: String,
+    pub device_path: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub want_rdma: bool,
+    pub want_tcp: bool,
+    #[serde(default = "default_true")]
+    pub allow_any_host: bool,
+    #[serde(default)]
+    pub initiators: Vec<String>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+}
+
+impl IscsiExport {
     pub fn iqn(&self) -> Iqn {
         Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name))
             .expect("validated name forms a valid IQN")
     }
 }
 
-pub struct NewExport {
-    pub kind: ExportKind,
+pub struct NewNvmeExport {
     pub name: String,
     pub device_path: String,
     pub want_rdma: bool,
@@ -67,8 +81,17 @@ pub struct NewExport {
     pub initiators: Vec<String>,
 }
 
+pub struct NewIscsiExport {
+    pub name: String,
+    pub device_path: String,
+    pub want_rdma: bool,
+    pub want_tcp: bool,
+    pub allow_any_host: bool,
+    pub initiators: Vec<String>,
+}
+
 /// A file-level NFS export of an absolute directory path, served over RDMA.
-/// Unlike [`Export`] (a block device), this has a directory path and a list of
+/// Unlike a block-device export, this has a directory path and a list of
 /// client access specs — different enough to warrant its own type/table.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NfsExport {
@@ -104,18 +127,51 @@ pub struct Db {
 }
 
 /// The TOML document backing the desired-state config; the domain structs
-/// (`Export`, `SnapshotPolicy`) serialize directly into it.
+/// (`NvmeExport`, `IscsiExport`, `SnapshotPolicy`) serialize directly into it.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default)]
 struct ConfigDoc {
     /// Monotonic id counters, never reused, so URLs stay stable across deletes.
-    next_export_id: i64,
+    next_nvme_export_id: i64,
+    next_iscsi_export_id: i64,
     next_policy_id: i64,
     next_nfs_export_id: i64,
     settings: BTreeMap<String, String>,
-    export: Vec<Export>,
+    nvme_export: Vec<NvmeExport>,
+    iscsi_export: Vec<IscsiExport>,
     policy: Vec<SnapshotPolicy>,
     nfs_export: Vec<NfsExport>,
+    /// Pre-split configs stored a single unified `export = [...]` table tagged
+    /// with `kind`, plus `next_export_id`. These read-only fields capture those
+    /// on load; [`migrate_legacy_exports`] splits them into the typed tables.
+    /// Never serialized, so they vanish on the next `persist`. Deletable once
+    /// every deployment has been upgraded.
+    #[serde(default, rename = "export", skip_serializing)]
+    legacy_export: Vec<LegacyExport>,
+    #[serde(default, rename = "next_export_id", skip_serializing)]
+    legacy_next_export_id: i64,
+}
+
+/// The pre-split unified export row, read only to migrate it forward.
+#[derive(Debug, Clone, Deserialize)]
+struct LegacyExport {
+    id: i64,
+    #[serde(default)]
+    kind: String,
+    name: String,
+    device_path: String,
+    #[serde(default = "default_true")]
+    enabled: bool,
+    want_rdma: bool,
+    want_tcp: bool,
+    #[serde(default)]
+    want_loop: bool,
+    #[serde(default = "default_true")]
+    allow_any_host: bool,
+    #[serde(default)]
+    initiators: Vec<String>,
+    #[serde(default)]
+    last_error: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -237,16 +293,15 @@ impl Db {
         Ok(())
     }
 
-    pub fn insert_export(&self, new: &NewExport) -> Result<i64> {
+    pub fn insert_nvme_export(&self, new: &NewNvmeExport) -> Result<i64> {
         let mut doc = self.config.lock().unwrap();
-        if doc.export.iter().any(|e| e.name == new.name) {
+        if doc.nvme_export.iter().any(|e| e.name == new.name) {
             anyhow::bail!("an export named {:?} already exists", new.name);
         }
-        doc.next_export_id += 1;
-        let id = doc.next_export_id;
-        doc.export.push(Export {
+        doc.next_nvme_export_id += 1;
+        let id = doc.next_nvme_export_id;
+        doc.nvme_export.push(NvmeExport {
             id,
-            kind: new.kind,
             name: new.name.clone(),
             device_path: new.device_path.clone(),
             enabled: true,
@@ -261,8 +316,8 @@ impl Db {
         Ok(id)
     }
 
-    pub fn list_exports(&self) -> Result<Vec<Export>> {
-        let mut exports = self.config.lock().unwrap().export.clone();
+    pub fn list_nvme_exports(&self) -> Result<Vec<NvmeExport>> {
+        let mut exports = self.config.lock().unwrap().nvme_export.clone();
         exports.sort_by(|a, b| a.name.cmp(&b.name));
         for e in &mut exports {
             e.initiators.sort();
@@ -270,26 +325,90 @@ impl Db {
         Ok(exports)
     }
 
-    pub fn set_export_enabled(&self, id: i64, enabled: bool) -> Result<()> {
+    pub fn set_nvme_export_enabled(&self, id: i64, enabled: bool) -> Result<()> {
         let mut doc = self.config.lock().unwrap();
-        if let Some(e) = doc.export.iter_mut().find(|e| e.id == id) {
+        if let Some(e) = doc.nvme_export.iter_mut().find(|e| e.id == id) {
             e.enabled = enabled;
         }
         self.persist(&doc)
     }
 
-    pub fn set_export_error(&self, id: i64, error: Option<&str>) -> Result<()> {
+    pub fn set_nvme_export_error(&self, id: i64, error: Option<&str>) -> Result<()> {
         let mut doc = self.config.lock().unwrap();
-        if let Some(e) = doc.export.iter_mut().find(|e| e.id == id) {
+        if let Some(e) = doc.nvme_export.iter_mut().find(|e| e.id == id) {
             e.last_error = error.map(str::to_owned);
         }
         self.persist(&doc)
     }
 
-    pub fn delete_export(&self, id: i64) -> Result<()> {
+    pub fn delete_nvme_export(&self, id: i64) -> Result<()> {
         let mut doc = self.config.lock().unwrap();
-        doc.export.retain(|e| e.id != id);
+        doc.nvme_export.retain(|e| e.id != id);
         self.persist(&doc)
+    }
+
+    pub fn insert_iscsi_export(&self, new: &NewIscsiExport) -> Result<i64> {
+        let mut doc = self.config.lock().unwrap();
+        if doc.iscsi_export.iter().any(|e| e.name == new.name) {
+            anyhow::bail!("an export named {:?} already exists", new.name);
+        }
+        doc.next_iscsi_export_id += 1;
+        let id = doc.next_iscsi_export_id;
+        doc.iscsi_export.push(IscsiExport {
+            id,
+            name: new.name.clone(),
+            device_path: new.device_path.clone(),
+            enabled: true,
+            want_rdma: new.want_rdma,
+            want_tcp: new.want_tcp,
+            allow_any_host: new.allow_any_host,
+            initiators: dedup_preserve(&new.initiators),
+            last_error: None,
+        });
+        self.persist(&doc)?;
+        Ok(id)
+    }
+
+    pub fn list_iscsi_exports(&self) -> Result<Vec<IscsiExport>> {
+        let mut exports = self.config.lock().unwrap().iscsi_export.clone();
+        exports.sort_by(|a, b| a.name.cmp(&b.name));
+        for e in &mut exports {
+            e.initiators.sort();
+        }
+        Ok(exports)
+    }
+
+    pub fn set_iscsi_export_enabled(&self, id: i64, enabled: bool) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.iscsi_export.iter_mut().find(|e| e.id == id) {
+            e.enabled = enabled;
+        }
+        self.persist(&doc)
+    }
+
+    pub fn set_iscsi_export_error(&self, id: i64, error: Option<&str>) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.iscsi_export.iter_mut().find(|e| e.id == id) {
+            e.last_error = error.map(str::to_owned);
+        }
+        self.persist(&doc)
+    }
+
+    pub fn delete_iscsi_export(&self, id: i64) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        doc.iscsi_export.retain(|e| e.id != id);
+        self.persist(&doc)
+    }
+
+    /// Device paths backing every managed block export (NVMe-oF + iSCSI), used
+    /// to exclude in-use devices from the pool/VG/export creation pickers.
+    pub fn export_device_paths(&self) -> Vec<String> {
+        let doc = self.config.lock().unwrap();
+        doc.nvme_export
+            .iter()
+            .map(|e| e.device_path.clone())
+            .chain(doc.iscsi_export.iter().map(|e| e.device_path.clone()))
+            .collect()
     }
 
     pub fn insert_nfs_export(&self, new: &NewNfsExport) -> Result<i64> {
@@ -492,7 +611,8 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
 
 /// The desired state needed to reconcile, read straight from the config TOML.
 pub struct Desired {
-    pub exports: Vec<Export>,
+    pub nvme_exports: Vec<NvmeExport>,
+    pub iscsi_exports: Vec<IscsiExport>,
     pub nfs_exports: Vec<NfsExport>,
     pub listen: IpAddr,
 }
@@ -500,12 +620,17 @@ pub struct Desired {
 /// Reads the desired state from `state_path` with no side effects (no SQLite,
 /// no first-boot write), so `greendot-cli reconcile` only ever *reads* config —
 /// the web service stays the sole writer. Exports are normalized exactly as
-/// [`Db::list_exports`] returns them.
+/// [`Db::list_nvme_exports`]/[`Db::list_iscsi_exports`] return them.
 pub fn read_desired(state_path: &Path) -> Result<Desired> {
     let doc = load_config(state_path)?;
-    let mut exports = doc.export;
-    exports.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in &mut exports {
+    let mut nvme_exports = doc.nvme_export;
+    nvme_exports.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &mut nvme_exports {
+        e.initiators.sort();
+    }
+    let mut iscsi_exports = doc.iscsi_export;
+    iscsi_exports.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in &mut iscsi_exports {
         e.initiators.sort();
     }
     let mut nfs_exports = doc.nfs_export;
@@ -516,20 +641,75 @@ pub fn read_desired(state_path: &Path) -> Result<Desired> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
     Ok(Desired {
-        exports,
+        nvme_exports,
+        iscsi_exports,
         nfs_exports,
         listen,
     })
 }
 
 /// Reads the desired-state config from `path`, or the default document if the
-/// file does not exist yet (first boot / hand-deleted).
+/// file does not exist yet (first boot / hand-deleted). A pre-split unified
+/// `export` table is migrated forward in place (see [`migrate_legacy_exports`]),
+/// so both `Db::open` and `read_desired` observe the typed tables.
 fn load_config(path: &Path) -> Result<ConfigDoc> {
-    match std::fs::read_to_string(path) {
-        Ok(text) => toml::from_str(&text).with_context(|| format!("parsing {}", path.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(ConfigDoc::default()),
-        Err(e) => Err(e).with_context(|| format!("reading {}", path.display())),
+    let mut doc = match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str::<ConfigDoc>(&text)
+            .with_context(|| format!("parsing {}", path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ConfigDoc::default(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    migrate_legacy_exports(&mut doc);
+    Ok(doc)
+}
+
+/// One-shot upgrade of a pre-split config: partition the unified `export` rows
+/// into the typed `nvme_export`/`iscsi_export` tables (ids preserved), seed both
+/// id counters past every id that ever existed so none is reused, and clear the
+/// legacy fields. A no-op once migrated. Idempotent.
+fn migrate_legacy_exports(doc: &mut ConfigDoc) {
+    if doc.legacy_export.is_empty() {
+        return;
     }
+    for e in std::mem::take(&mut doc.legacy_export) {
+        if e.kind == "iscsi" {
+            doc.iscsi_export.push(IscsiExport {
+                id: e.id,
+                name: e.name,
+                device_path: e.device_path,
+                enabled: e.enabled,
+                want_rdma: e.want_rdma,
+                want_tcp: e.want_tcp,
+                allow_any_host: e.allow_any_host,
+                initiators: e.initiators,
+                last_error: e.last_error,
+            });
+        } else {
+            doc.nvme_export.push(NvmeExport {
+                id: e.id,
+                name: e.name,
+                device_path: e.device_path,
+                enabled: e.enabled,
+                want_rdma: e.want_rdma,
+                want_tcp: e.want_tcp,
+                want_loop: e.want_loop,
+                allow_any_host: e.allow_any_host,
+                initiators: e.initiators,
+                last_error: e.last_error,
+            });
+        }
+    }
+    let max_id = doc
+        .nvme_export
+        .iter()
+        .map(|e| e.id)
+        .chain(doc.iscsi_export.iter().map(|e| e.id))
+        .max()
+        .unwrap_or(0)
+        .max(doc.legacy_next_export_id);
+    doc.next_nvme_export_id = doc.next_nvme_export_id.max(max_id);
+    doc.next_iscsi_export_id = doc.next_iscsi_export_id.max(max_id);
+    doc.legacy_next_export_id = 0;
 }
 
 /// Deduplicates initiators while preserving order (replaces the old
@@ -547,9 +727,8 @@ fn dedup_preserve(items: &[String]) -> Vec<String> {
 mod tests {
     use super::*;
 
-    fn new(name: &str) -> NewExport {
-        NewExport {
-            kind: ExportKind::Nvme,
+    fn new(name: &str) -> NewNvmeExport {
+        NewNvmeExport {
             name: name.into(),
             device_path: "/dev/zvol/tank/vm1".into(),
             want_rdma: true,
@@ -620,14 +799,14 @@ mod tests {
     #[test]
     fn export_crud_settings_and_nqn_derivation() {
         let db = Db::in_memory().unwrap();
-        let id = db.insert_export(&new("vm1")).unwrap();
-        db.insert_export(&new("alpha")).unwrap();
+        let id = db.insert_nvme_export(&new("vm1")).unwrap();
+        db.insert_nvme_export(&new("alpha")).unwrap();
         assert!(
-            db.insert_export(&new("vm1")).is_err(),
+            db.insert_nvme_export(&new("vm1")).is_err(),
             "duplicate name must fail"
         );
 
-        let exports = db.list_exports().unwrap();
+        let exports = db.list_nvme_exports().unwrap();
         assert_eq!(
             exports.iter().map(|e| e.name.as_str()).collect::<Vec<_>>(),
             ["alpha", "vm1"],
@@ -639,20 +818,21 @@ mod tests {
         assert!(vm1.enabled && vm1.want_rdma && vm1.want_tcp && !vm1.want_loop);
         assert_eq!(vm1.last_error, None);
 
-        db.set_export_enabled(id, false).unwrap();
-        db.set_export_error(id, Some("rdma bind failed")).unwrap();
+        db.set_nvme_export_enabled(id, false).unwrap();
+        db.set_nvme_export_error(id, Some("rdma bind failed"))
+            .unwrap();
         let vm1 = db
-            .list_exports()
+            .list_nvme_exports()
             .unwrap()
             .into_iter()
             .find(|e| e.id == id)
             .unwrap();
         assert!(!vm1.enabled);
         assert_eq!(vm1.last_error.as_deref(), Some("rdma bind failed"));
-        db.set_export_error(id, None).unwrap();
+        db.set_nvme_export_error(id, None).unwrap();
 
-        db.delete_export(id).unwrap();
-        assert_eq!(db.list_exports().unwrap().len(), 1);
+        db.delete_nvme_export(id).unwrap();
+        assert_eq!(db.list_nvme_exports().unwrap().len(), 1);
 
         assert_eq!(db.get_setting("listen_addr").unwrap(), None);
         db.set_setting("listen_addr", "10.0.0.5").unwrap();
@@ -661,6 +841,40 @@ mod tests {
             db.get_setting("listen_addr").unwrap().as_deref(),
             Some("10.0.0.6")
         );
+    }
+
+    #[test]
+    fn iscsi_export_crud_and_iqn_derivation() {
+        let db = Db::in_memory().unwrap();
+        let new = |name: &str| NewIscsiExport {
+            name: name.into(),
+            device_path: "/dev/zvol/tank/tape".into(),
+            want_rdma: true,
+            want_tcp: false,
+            allow_any_host: false,
+            initiators: vec!["iqn.1993-08.org.debian:01:abc".into()],
+        };
+        let id = db.insert_iscsi_export(&new("tape")).unwrap();
+        assert!(
+            db.insert_iscsi_export(&new("tape")).is_err(),
+            "duplicate name must fail"
+        );
+        // iSCSI ids are their own sequence, independent of the NVMe one.
+        assert_eq!(id, 1);
+
+        let tape = db.list_iscsi_exports().unwrap();
+        let tape = tape.iter().find(|e| e.id == id).unwrap();
+        assert_eq!(tape.iqn().as_str(), "iqn.2026-06.io.greendot:tape");
+        assert_eq!(tape.initiators, ["iqn.1993-08.org.debian:01:abc"]);
+
+        db.set_iscsi_export_error(id, Some("targetctl failed"))
+            .unwrap();
+        assert_eq!(
+            db.list_iscsi_exports().unwrap()[0].last_error.as_deref(),
+            Some("targetctl failed")
+        );
+        db.delete_iscsi_export(id).unwrap();
+        assert!(db.list_iscsi_exports().unwrap().is_empty());
     }
 
     #[test]
@@ -716,20 +930,20 @@ mod tests {
         let (a, b);
         {
             let db = Db::open(&tasks_db, &state).unwrap();
-            a = db.insert_export(&new("alpha")).unwrap();
-            b = db.insert_export(&new("beta")).unwrap();
+            a = db.insert_nvme_export(&new("alpha")).unwrap();
+            b = db.insert_nvme_export(&new("beta")).unwrap();
             assert!(
-                db.insert_export(&new("alpha")).is_err(),
+                db.insert_nvme_export(&new("alpha")).is_err(),
                 "duplicate name must fail"
             );
-            db.delete_export(a).unwrap();
+            db.delete_nvme_export(a).unwrap();
             db.set_setting("listen_addr", "10.0.0.5").unwrap();
         }
         // Reopen from disk: config survived, ids are not reused after delete.
         {
             let db = Db::open(&tasks_db, &state).unwrap();
             let names: Vec<_> = db
-                .list_exports()
+                .list_nvme_exports()
                 .unwrap()
                 .into_iter()
                 .map(|e| e.name)
@@ -739,11 +953,92 @@ mod tests {
                 db.get_setting("listen_addr").unwrap().as_deref(),
                 Some("10.0.0.5")
             );
-            let c = db.insert_export(&new("gamma")).unwrap();
+            let c = db.insert_nvme_export(&new("gamma")).unwrap();
             assert_eq!((a, b, c), (1, 2, 3), "ids never reused across restart");
         }
         for ext in ["db", "db-wal", "db-shm"] {
             std::fs::remove_file(dir.join(format!("gd-tasks{tag}.{ext}"))).ok();
+        }
+        std::fs::remove_file(&state).ok();
+    }
+
+    #[test]
+    fn legacy_unified_export_table_migrates_to_typed_tables() {
+        let dir = std::env::temp_dir();
+        let tag = rand::random::<u32>();
+        let tasks_db = dir.join(format!("gd-mig-tasks{tag}.db"));
+        let state = dir.join(format!("gd-mig-state{tag}.toml"));
+
+        // A pre-split config: one unified table tagged with `kind`, plus the old
+        // single `next_export_id` counter.
+        std::fs::write(
+            &state,
+            r#"next_export_id = 2
+
+[[export]]
+id = 1
+kind = "nvme"
+name = "vm1"
+device_path = "/dev/zvol/tank/vm1"
+enabled = true
+want_rdma = true
+want_tcp = true
+
+[[export]]
+id = 2
+kind = "iscsi"
+name = "tape"
+device_path = "/dev/zvol/tank/tape"
+enabled = true
+want_rdma = true
+want_tcp = false
+"#,
+        )
+        .unwrap();
+
+        // Open splits the legacy rows into the typed tables, ids preserved.
+        let new_id = {
+            let db = Db::open(&tasks_db, &state).unwrap();
+            assert_eq!(
+                db.list_nvme_exports()
+                    .unwrap()
+                    .iter()
+                    .map(|e| (e.id, e.name.clone()))
+                    .collect::<Vec<_>>(),
+                [(1, "vm1".to_owned())]
+            );
+            assert_eq!(
+                db.list_iscsi_exports()
+                    .unwrap()
+                    .iter()
+                    .map(|e| (e.id, e.name.clone()))
+                    .collect::<Vec<_>>(),
+                [(2, "tape".to_owned())]
+            );
+            // Both counters seeded past the global max (2): no id is reused.
+            db.insert_nvme_export(&new("vm2")).unwrap()
+        };
+        assert_eq!(new_id, 3, "next nvme id continues past the legacy max");
+
+        // The rewritten file is in the two-table shape; the legacy fields are gone.
+        let text = std::fs::read_to_string(&state).unwrap();
+        assert!(
+            !text.contains("[[export]]") && !text.contains("kind ="),
+            "legacy table must be rewritten away: {text}"
+        );
+        assert!(
+            text.contains("[[nvme_export]]") && text.contains("[[iscsi_export]]"),
+            "{text}"
+        );
+        // Re-open is a no-op migration: data is stable.
+        {
+            let db = Db::open(&tasks_db, &state).unwrap();
+            assert_eq!(db.list_nvme_exports().unwrap().len(), 2);
+            assert_eq!(db.list_iscsi_exports().unwrap().len(), 1);
+        }
+
+        for ext in ["db", "db-wal", "db-shm"] {
+            std::fs::remove_file(dir.join(format!("gd-mig-tasks{tag}.{ext}"))).ok();
         }
         std::fs::remove_file(&state).ok();
     }

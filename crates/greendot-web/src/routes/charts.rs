@@ -1,7 +1,6 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
 use crate::metrics::{PromSample, chart_svg, render_prometheus};
-use crate::state::ExportKind;
 use crate::{actual, dot};
 use askama::Template;
 use axum::extract::{Query, State};
@@ -123,25 +122,34 @@ pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
             }
         }
     }
-    if let Ok(exports) = state.db.list_exports() {
+    {
         let nvmet = actual::nvmet::read(&state.nvmet_root);
         let lio = actual::lio::read(&state.lio_root);
         let rdma = actual::rdma::devices();
-        for e in exports.iter().filter(|e| e.enabled) {
-            let d = match e.kind {
-                ExportKind::Nvme => dot::nvme_dot(e, &nvmet, &rdma),
-                ExportKind::Iscsi => dot::iscsi_dot(e, &lio, &rdma),
-            };
-            let value = match d.state {
-                DotState::Green => 2.0,
-                DotState::Yellow => 1.0,
-                DotState::Red => 0.0,
-            };
+        let status_value = |d: dot::Dot| match d.state {
+            DotState::Green => 2.0,
+            DotState::Yellow => 1.0,
+            DotState::Red => 0.0,
+        };
+        let mut push = |name: String, value: f64| {
             samples.push(PromSample {
                 name: "greendot_export_status",
-                labels: vec![("export", e.name.clone())],
+                labels: vec![("export", name)],
                 value,
             });
+        };
+        if let Ok(exports) = state.db.list_nvme_exports() {
+            for e in exports.iter().filter(|e| e.enabled) {
+                push(
+                    e.name.clone(),
+                    status_value(dot::nvme_dot(e, &nvmet, &rdma)),
+                );
+            }
+        }
+        if let Ok(exports) = state.db.list_iscsi_exports() {
+            for e in exports.iter().filter(|e| e.enabled) {
+                push(e.name.clone(), status_value(dot::iscsi_dot(e, &lio, &rdma)));
+            }
         }
     }
     samples.sort_by(|a, b| (a.name, &a.labels).cmp(&(b.name, &b.labels)));

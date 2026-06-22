@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — iSCSI — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>iSCSI export {{ view.name }}</h1>
+<p><a href="/iscsi">← Back to iSCSI</a></p>
+{% include "_iscsi_detail.html" %}
+{% endblock %}

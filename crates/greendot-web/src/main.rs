@@ -60,7 +60,7 @@ async fn main() -> Result<()> {
         let mut tick = tokio::time::interval(Duration::from_secs(60));
         loop {
             tick.tick().await;
-            if let Err(e) = routes::exports::reconcile_state(&reconcile_state).await {
+            if let Err(e) = routes::block_export::reconcile_state(&reconcile_state).await {
                 tracing::error!(error = %e, "periodic reconcile failed");
             }
         }

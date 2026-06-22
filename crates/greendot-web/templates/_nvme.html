@@ -1,19 +1,18 @@
-<div id="exports-content">
+<div id="nvme-content">
   {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
 
   {% if view.rows.is_empty() %}
-  <p class="empty">No exports yet — create one below.</p>
+  <p class="empty">No NVMe-oF exports yet — create one below.</p>
   {% else %}
   <table>
-    <thead><tr><th></th><th>Name</th><th>Protocol</th><th>Device</th><th>Transports</th><th>Hosts</th><th>Clients</th><th></th></tr></thead>
+    <thead><tr><th></th><th>Name</th><th>Device</th><th>Transports</th><th>Hosts</th><th>Clients</th><th></th></tr></thead>
     <tbody>
       {% for r in view.rows %}
       <tr>
         <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
         <td>{{ r.name }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}</span></td>
-        <td>{{ r.protocol }}</td>
         <td>{{ r.device }}</td>
         <td>{{ r.transports }}</td>
         <td>{{ r.hosts }}</td>
@@ -22,7 +21,7 @@
           {% else %}<span class="muted" title="NVMe-oF peers can't be tied to a specific export on this kernel — see Connections">—</span>{% endif %}
         </td>
         <td>
-          {% if !r.external %}<a href="/exports/{{ r.id }}">Manage</a>{% endif %}
+          {% if !r.external %}<a href="/nvme/{{ r.id }}">Manage</a>{% endif %}
         </td>
       </tr>
       {% endfor %}
@@ -31,10 +30,8 @@
   {% endif %}
 
   <details>
-  <summary>New export</summary>
-  <form class="card" hx-post="/exports/create" hx-target="#exports-content" hx-swap="outerHTML">
-    <label class="checkbox"><input type="radio" name="kind" value="nvme" checked> NVMe-oF</label>
-    <label class="checkbox"><input type="radio" name="kind" value="iscsi"> iSCSI</label>
+  <summary>New NVMe-oF export</summary>
+  <form class="card" hx-post="/nvme/create" hx-target="#nvme-content" hx-swap="outerHTML">
     <label>Name <input name="name" placeholder="vm1" required></label>
     <label>Block device
       {% if view.devices.is_empty() %}
@@ -46,10 +43,10 @@
       </select>
       {% endif %}
     </label>
-    <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> RDMA (iSER for iSCSI; plain TCP moves to port 3261)</label>
+    <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> RDMA</label>
     <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>
-    <label class="checkbox"><input type="checkbox" name="want_loop" value="1"> Loop (NVMe only, local testing)</label>
-    <label>Allowed initiator NQNs/IQNs (one per line, empty = allow any host)
+    <label class="checkbox"><input type="checkbox" name="want_loop" value="1"> Loop (local testing)</label>
+    <label>Allowed initiator NQNs (one per line, empty = allow any host)
       <textarea name="initiators" rows="3" placeholder="nqn.2014-08.org.nvmexpress:..."></textarea>
     </label>
     <button type="submit">Create export</button>

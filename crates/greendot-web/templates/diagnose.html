@@ -1,9 +1,9 @@
 {% extends "base.html" %}
 
-{% block title %}Diagnose {{ view.name }} — Exports — GreenDotRDMA{% endblock %}
+{% block title %}Diagnose {{ view.name }} — {{ view.protocol }} — GreenDotRDMA{% endblock %}
 
 {% block content %}
-<p><a href="/exports">← Back to Exports</a></p>
+<p><a href="{{ view.back_href }}">← Back</a></p>
 {% if view.not_found %}
 <p class="error">Export not found.</p>
 {% else %}

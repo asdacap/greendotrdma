@@ -5,7 +5,7 @@ use crate::actual::lio::{ActualLio, Portal, Target};
 use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::{ActualNvmet, Port};
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
-use crate::state::{Export, NfsExport};
+use crate::state::{IscsiExport, NfsExport, NvmeExport};
 use greendot_proto::DotState;
 use std::net::IpAddr;
 
@@ -22,7 +22,7 @@ fn red(reason: impl Into<String>) -> Dot {
     }
 }
 
-pub fn nvme_dot(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Dot {
+pub fn nvme_dot(export: &NvmeExport, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Dot {
     if let Some(error) = &export.last_error {
         return red(format!("reconcile failed: {error}"));
     }
@@ -89,7 +89,7 @@ pub fn nvme_dot(export: &Export, actual: &ActualNvmet, rdma: &[RdmaDev]) -> Dot 
     }
 }
 
-pub fn iscsi_dot(export: &Export, actual: &ActualLio, rdma: &[RdmaDev]) -> Dot {
+pub fn iscsi_dot(export: &IscsiExport, actual: &ActualLio, rdma: &[RdmaDev]) -> Dot {
     if let Some(error) = &export.last_error {
         return red(format!("reconcile failed: {error}"));
     }
@@ -352,7 +352,7 @@ fn rdma_device_criteria(rdma: &[RdmaDev], capable_disabled: &[String]) -> Vec<Cr
 /// Ordered RDMA-readiness checklist for an NVMe-oF export, decomposing the same
 /// state `nvme_dot` consults into per-condition pass/fail rows.
 pub fn nvme_diagnostics(
-    export: &Export,
+    export: &NvmeExport,
     actual: &ActualNvmet,
     rdma: &[RdmaDev],
     capable_disabled: &[String],
@@ -428,7 +428,7 @@ pub fn nvme_diagnostics(
 /// Ordered RDMA-readiness checklist for an iSCSI export (iSER), mirroring
 /// `iscsi_dot`.
 pub fn iscsi_diagnostics(
-    export: &Export,
+    export: &IscsiExport,
     actual: &ActualLio,
     rdma: &[RdmaDev],
     capable_disabled: &[String],
@@ -557,23 +557,35 @@ pub fn nfs_diagnostics(
 mod tests {
     use super::*;
     use crate::actual::nvmet::{Namespace, Port, Subsys};
-    use crate::state::ExportKind;
     use rstest::rstest;
     use std::net::IpAddr;
 
     const NQN: &str = "nqn.2026-06.io.greendot:vm1";
     const DEV: &str = "/dev/zvol/tank/vm1";
 
-    fn export(want_rdma: bool, want_tcp: bool, last_error: Option<&str>) -> Export {
-        Export {
+    fn export(want_rdma: bool, want_tcp: bool, last_error: Option<&str>) -> NvmeExport {
+        NvmeExport {
             id: 1,
-            kind: ExportKind::Nvme,
             name: "vm1".into(),
             device_path: DEV.into(),
             enabled: true,
             want_rdma,
             want_tcp,
             want_loop: false,
+            allow_any_host: true,
+            initiators: vec![],
+            last_error: last_error.map(Into::into),
+        }
+    }
+
+    fn iscsi_export(want_rdma: bool, want_tcp: bool, last_error: Option<&str>) -> IscsiExport {
+        IscsiExport {
+            id: 1,
+            name: "vm1".into(),
+            device_path: DEV.into(),
+            enabled: true,
+            want_rdma,
+            want_tcp,
             allow_any_host: true,
             initiators: vec![],
             last_error: last_error.map(Into::into),
@@ -708,7 +720,7 @@ mod tests {
         DotState::Red, "rdma bind failed"
     )]
     fn nvme_dot_truth_table(
-        #[case] export: Export,
+        #[case] export: NvmeExport,
         #[case] actual: ActualNvmet,
         #[case] rdma: Vec<RdmaDev>,
         #[case] want_state: DotState,
@@ -770,55 +782,54 @@ mod tests {
 
     #[rstest]
     #[case::green_iser(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true)]),
         vec![rdma_dev("10.0.0.5")],
         DotState::Green, "iser"
     )]
     #[case::yellow_plain_tcp(
-        export(false, true, None),
+        iscsi_export(false, true, None),
         lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", false)]),
         vec![],
         DotState::Yellow, "not requested"
     )]
     #[case::yellow_iser_unbacked(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true), portal("10.0.0.5:3261", false)]),
         vec![],
         DotState::Yellow, "no RDMA device"
     )]
     #[case::red_no_backstore(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(None, true, true, vec![portal("10.0.0.5:3260", true)]),
         vec![rdma_dev("10.0.0.5")],
         DotState::Red, "backstore"
     )]
     #[case::red_tpg_disabled(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(Some(DEV), false, true, vec![portal("10.0.0.5:3260", true)]),
         vec![rdma_dev("10.0.0.5")],
         DotState::Red, "disabled"
     )]
     #[case::red_lun_unmapped(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(Some(DEV), true, false, vec![portal("10.0.0.5:3260", true)]),
         vec![rdma_dev("10.0.0.5")],
         DotState::Red, "LUN"
     )]
     #[case::red_no_portals(
-        export(true, true, None),
+        iscsi_export(true, true, None),
         lio(Some(DEV), true, true, vec![]),
         vec![rdma_dev("10.0.0.5")],
         DotState::Red, "portal"
     )]
     fn iscsi_dot_truth_table(
-        #[case] mut export: Export,
+        #[case] export: IscsiExport,
         #[case] actual: ActualLio,
         #[case] rdma: Vec<RdmaDev>,
         #[case] want_state: DotState,
         #[case] reason_contains: &str,
     ) {
-        export.kind = crate::state::ExportKind::Iscsi;
         let dot = iscsi_dot(&export, &actual, &rdma);
         assert_eq!(dot.state, want_state, "reason: {}", dot.reason);
         assert!(
@@ -970,8 +981,7 @@ mod tests {
     #[test]
     fn iscsi_diagnostics_pinpoints_the_broken_link() {
         let dev = vec![rdma_dev("10.0.0.5")];
-        let mut exp = export(true, false, None);
-        exp.kind = crate::state::ExportKind::Iscsi;
+        let exp = iscsi_export(true, false, None);
         let good = lio(Some(DEV), true, true, vec![portal("10.0.0.5:3260", true)]);
         let crits = iscsi_diagnostics(&exp, &good, &dev, &[]);
         assert!(crits.iter().all(|c| c.ok), "{crits:#?}");

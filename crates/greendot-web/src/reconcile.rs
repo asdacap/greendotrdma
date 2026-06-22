@@ -5,7 +5,7 @@
 //!
 //! The apply itself runs out-of-process: `greendot-cli reconcile` calls
 //! [`cli_run`], which streams its progress to stdout/stderr. The web service
-//! wraps that command in a recorded task (see `routes::exports::reconcile_state`),
+//! wraps that command in a recorded task (see `routes::block_export::reconcile_state`),
 //! so the render/satisfied predicates here are shared by the web's drift
 //! pre-check and the CLI.
 
@@ -14,7 +14,7 @@ use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::ActualNvmet;
 use crate::config::Config;
 use crate::helper_client::HelperClient;
-use crate::state::{Export, ExportKind, NfsExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+use crate::state::{IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
     NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec,
@@ -34,16 +34,13 @@ const PORT_TCP: u16 = 2;
 const PORT_LOOP: u16 = 3;
 const TRSVCID: u16 = 4420;
 
-fn enabled(exports: &[Export], kind: ExportKind) -> impl Iterator<Item = &Export> {
-    exports.iter().filter(move |e| e.enabled && e.kind == kind)
-}
-
-/// Predicate over an export (which transport it wants).
-type Wants = fn(&Export) -> bool;
+/// Predicate over an NVMe-oF export (which transport it wants).
+type Wants = fn(&NvmeExport) -> bool;
 
 /// Renders the desired nvmet state from the enabled NVMe-oF exports.
-pub fn render_nvmet(exports: &[Export], listen: IpAddr) -> NvmetDesired {
-    let subsystems: Vec<NvmetSubsysSpec> = enabled(exports, ExportKind::Nvme)
+pub fn render_nvmet(nvme: &[NvmeExport], listen: IpAddr) -> NvmetDesired {
+    let enabled = || nvme.iter().filter(|e| e.enabled);
+    let subsystems: Vec<NvmetSubsysSpec> = enabled()
         .filter_map(|e| {
             Some(NvmetSubsysSpec {
                 nqn: e.nqn(),
@@ -68,7 +65,7 @@ pub fn render_nvmet(exports: &[Export], listen: IpAddr) -> NvmetDesired {
         (PORT_LOOP, Transport::Loop, |e| e.want_loop),
     ];
     for (id, trtype, want) in wants {
-        let subs: Vec<_> = enabled(exports, ExportKind::Nvme)
+        let subs: Vec<_> = enabled()
             .filter(|e| want(e) && greendot_proto::DevicePath::new(&e.device_path).is_ok())
             .map(|e| e.nqn())
             .collect();
@@ -86,10 +83,10 @@ pub fn render_nvmet(exports: &[Export], listen: IpAddr) -> NvmetDesired {
 }
 
 /// Renders the desired LIO state from the enabled iSCSI exports.
-pub fn render_lio(exports: &[Export], listen: IpAddr) -> LioDesired {
+pub fn render_lio(iscsi: &[IscsiExport], listen: IpAddr) -> LioDesired {
     let mut backstores = Vec::new();
     let mut targets = Vec::new();
-    for e in enabled(exports, ExportKind::Iscsi) {
+    for e in iscsi.iter().filter(|e| e.enabled) {
         let (Ok(name), Ok(device_path)) = (
             greendot_proto::BackstoreName::new(&e.name),
             greendot_proto::DevicePath::new(&e.device_path),
@@ -332,21 +329,30 @@ fn fmt_addr(addr: IpAddr, port: u16) -> String {
     }
 }
 
-fn modules_for(exports: &[Export]) -> Vec<KernelModule> {
+/// The nvmet transport modules to load for the enabled NVMe-oF exports.
+fn nvme_modules(nvme: &[NvmeExport]) -> Vec<KernelModule> {
     let mut m = Vec::new();
-    let nvme = |f: fn(&Export) -> bool| enabled(exports, ExportKind::Nvme).any(f);
-    if nvme(|e| e.want_rdma) {
+    let any = |f: fn(&NvmeExport) -> bool| nvme.iter().filter(|e| e.enabled).any(f);
+    if any(|e| e.want_rdma) {
         m.push(KernelModule::NvmetRdma);
     }
-    if nvme(|e| e.want_tcp) {
+    if any(|e| e.want_tcp) {
         m.push(KernelModule::NvmetTcp);
     }
-    if nvme(|e| e.want_loop) {
+    if any(|e| e.want_loop) {
         m.push(KernelModule::NvmetLoop);
     }
-    if enabled(exports, ExportKind::Iscsi).next().is_some() {
+    m
+}
+
+/// The LIO modules to load for the enabled iSCSI exports (iSER only when any
+/// requests RDMA).
+fn iscsi_modules(iscsi: &[IscsiExport]) -> Vec<KernelModule> {
+    let mut m = Vec::new();
+    let enabled: Vec<&IscsiExport> = iscsi.iter().filter(|e| e.enabled).collect();
+    if !enabled.is_empty() {
         m.push(KernelModule::Iscsi);
-        if enabled(exports, ExportKind::Iscsi).any(|e| e.want_rdma) {
+        if enabled.iter().any(|e| e.want_rdma) {
             m.push(KernelModule::Iser);
         }
     }
@@ -361,12 +367,13 @@ fn modules_for(exports: &[Export]) -> Vec<KernelModule> {
 /// apply failed.
 pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
     let desired = crate::state::read_desired(&cfg.state_path)?;
-    let exports = desired.exports;
+    let nvme_exports = desired.nvme_exports;
+    let iscsi_exports = desired.iscsi_exports;
     let helper = HelperClient::new(cfg.helper_socket.clone());
 
     let nfs_exports = desired.nfs_exports;
-    let nvmet_desired = render_nvmet(&exports, desired.listen);
-    let lio_desired = render_lio(&exports, desired.listen);
+    let nvmet_desired = render_nvmet(&nvme_exports, desired.listen);
+    let lio_desired = render_lio(&iscsi_exports, desired.listen);
     let nfs_desired = render_nfs(&nfs_exports, NFS_RDMA_PORT);
     let nvmet_ok = nvmet_satisfied(&nvmet_desired, &crate::actual::nvmet::read(&cfg.nvmet_root));
     let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
@@ -377,7 +384,8 @@ pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
     }
 
     let mut ok = true;
-    let mut modules = modules_for(&exports);
+    let mut modules = nvme_modules(&nvme_exports);
+    modules.extend(iscsi_modules(&iscsi_exports));
     modules.extend(nfs_modules(&nfs_exports));
     if !modules.is_empty() {
         ok &= run_step(
@@ -432,10 +440,9 @@ mod tests {
 
     const DEV: &str = "/dev/zvol/tank/vm1";
 
-    fn nvme_export() -> Export {
-        Export {
+    fn nvme_export() -> NvmeExport {
+        NvmeExport {
             id: 1,
-            kind: ExportKind::Nvme,
             name: "vm1".into(),
             device_path: DEV.into(),
             enabled: true,
@@ -517,13 +524,18 @@ mod tests {
         assert!(nvmet_satisfied(&d, &foreign));
     }
 
-    fn iscsi_export() -> Export {
-        Export {
-            kind: ExportKind::Iscsi,
+    fn iscsi_export() -> IscsiExport {
+        IscsiExport {
+            id: 1,
             name: "tape".into(),
+            device_path: DEV.into(),
+            enabled: true,
+            want_rdma: true,
+            want_tcp: true,
+            allow_any_host: false,
             // iSCSI initiators are IQNs, not NQNs.
             initiators: vec!["iqn.1993-08.org.debian:01:abc".into()],
-            ..nvme_export()
+            last_error: None,
         }
     }
 
@@ -569,14 +581,15 @@ mod tests {
     #[test]
     fn modules_follow_enabled_transports() {
         assert_eq!(
-            modules_for(&[nvme_export()]),
+            nvme_modules(&[nvme_export()]),
             vec![KernelModule::NvmetRdma, KernelModule::NvmetTcp]
         );
         assert_eq!(
-            modules_for(&[iscsi_export()]),
+            iscsi_modules(&[iscsi_export()]),
             vec![KernelModule::Iscsi, KernelModule::Iser]
         );
-        assert!(modules_for(&[]).is_empty());
+        assert!(nvme_modules(&[]).is_empty());
+        assert!(iscsi_modules(&[]).is_empty());
     }
 
     #[test]

@@ -1,0 +1,50 @@
+<div id="export-detail-content">
+  {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+
+  {% if view.row.is_none() %}
+  <p class="empty">Export {{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(row) = view.row %}
+  <table>
+    <thead><tr><th></th><th>Name</th><th>Device</th><th>Transports</th><th>Hosts</th><th>Clients</th></tr></thead>
+    <tbody>
+      <tr>
+        <td><span class="dot {{ row.dot_class }}" title="{{ row.dot_reason }}"></span></td>
+        <td>{{ row.name }}<br><span class="muted small">{{ row.dot_reason }}</span></td>
+        <td>{{ row.device }}</td>
+        <td>{{ row.transports }}</td>
+        <td>{{ row.hosts }}</td>
+        <td>
+          {% if let Some(n) = row.clients %}<a href="/connections">{{ n }}</a>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+
+  {% if !row.client.is_empty() %}
+  <h2>Client instructions</h2>
+  {% for c in row.client %}
+  <p class="muted small">Connect over {{ c.label }}:</p>
+  <pre class="log">{{ c.cmd }}</pre>
+  {% endfor %}
+  <p class="muted small">Run as root, on a client with a matching transport (an RDMA NIC for iSER). Not persistent across reboot — set <code>node.startup=automatic</code> for the target.</p>
+  {% endif %}
+
+  <h2>Manage</h2>
+  {% if row.diagnose %}<p><a role="button" href="/iscsi/{{ row.id }}/diagnose">Diagnose</a></p>{% endif %}
+  <form class="inline" hx-post="/iscsi/toggle" hx-target="#export-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <input type="hidden" name="enable" value="{{ !row.enabled }}">
+    <button>{% if row.enabled %}Disable{% else %}Enable{% endif %}</button>
+  </form>
+  <form class="inline" hx-post="/iscsi/delete"
+        hx-confirm="Delete export {{ row.name }}? Initiators will lose access.">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <button class="danger">Delete</button>
+  </form>
+  {% endif %}
+  {% endif %}
+</div>

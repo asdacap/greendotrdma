@@ -7,7 +7,6 @@
 use super::{AppState, page};
 use crate::actual;
 use crate::auth::CurrentUser;
-use crate::state::ExportKind;
 use askama::Template;
 use axum::extract::State;
 use axum::response::Response;
@@ -50,16 +49,17 @@ pub struct ConnectionsView {
 }
 
 async fn gather_connections(state: &AppState) -> ConnectionsView {
-    let exports = state.db.list_exports().unwrap_or_default();
+    let nvme_exports = state.db.list_nvme_exports().unwrap_or_default();
+    let iscsi_exports = state.db.list_iscsi_exports().unwrap_or_default();
 
     // iSCSI sessions: configfs, unprivileged. Map each target IQN back to its
     // friendly export name when it's one of ours.
     let iscsi = actual::lio::sessions(&state.lio_root)
         .into_iter()
         .map(|s| {
-            let export = exports
+            let export = iscsi_exports
                 .iter()
-                .find(|e| e.kind == ExportKind::Iscsi && e.iqn().as_str() == s.target_iqn)
+                .find(|e| e.iqn().as_str() == s.target_iqn)
                 .map_or_else(|| s.target_iqn.clone(), |e| e.name.clone());
             IscsiRow {
                 export,
@@ -73,9 +73,7 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
     // enabled NVMe-oF RDMA export exists. A peer can't be tied to a subsystem,
     // only to a listen port, so we keep peers whose local port is one of the
     // nvmet RDMA ports (which also excludes iSER peers on 3260).
-    let has_nvme = exports
-        .iter()
-        .any(|e| e.enabled && e.kind == ExportKind::Nvme && e.want_rdma);
+    let has_nvme = nvme_exports.iter().any(|e| e.enabled && e.want_rdma);
     let has_nfs = state
         .db
         .list_nfs_exports()
@@ -181,7 +179,7 @@ mod tests {
         send(
             &app,
             auth(form_post(
-                "/exports/create",
+                "/nvme/create",
                 "name=vm1&device=%2Fdev%2Fzvol%2Ftank%2Fvm1&want_rdma=1",
             )),
         )

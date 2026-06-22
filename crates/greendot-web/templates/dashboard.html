@@ -2,9 +2,10 @@
 
 {% block content %}
 <h1>Dashboard</h1>
-<div hx-get="/partials/exports" hx-trigger="every 5s" hx-swap="innerHTML">
-  {% include "_dots.html" %}
-</div>
+<h2>NVMe-oF</h2>
+<div hx-get="/partials/nvme" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
+<h2>iSCSI</h2>
+<div hx-get="/partials/iscsi" hx-trigger="load, every 5s" hx-swap="innerHTML"></div>
 
 <h2>RDMA-capable NICs</h2>
 {% if nics.is_empty() %}

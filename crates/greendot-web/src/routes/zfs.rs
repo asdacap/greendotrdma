@@ -702,11 +702,7 @@ async fn gather_pool_create(
             ..Default::default()
         };
     }
-    let in_use: HashSet<String> = state
-        .db
-        .list_exports()
-        .map(|es| es.into_iter().map(|e| e.device_path).collect())
-        .unwrap_or_default();
+    let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
     let devices = block::available_block_devices(&state.helper, &in_use)
         .await
         .into_iter()

@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+
+{% block title %}{{ view.name }} — NVMe-oF — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>NVMe-oF export {{ view.name }}</h1>
+<p><a href="/nvme">← Back to NVMe-oF</a></p>
+{% include "_nvme_detail.html" %}
+{% endblock %}

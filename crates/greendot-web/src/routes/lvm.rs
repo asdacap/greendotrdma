@@ -235,11 +235,7 @@ async fn gather_vg_detail(
     // A device added to the VG must be an empty raw device, so offer the same
     // candidates as VG creation (no formatted partitions or existing PVs).
     if view.vg.is_some() {
-        let in_use: HashSet<String> = state
-            .db
-            .list_exports()
-            .map(|es| es.into_iter().map(|e| e.device_path).collect())
-            .unwrap_or_default();
+        let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
         view.extend_devices = block::available_block_devices(&state.helper, &in_use)
             .await
             .into_iter()
@@ -833,11 +829,7 @@ async fn gather_vg_create(
             ..Default::default()
         };
     }
-    let in_use: HashSet<String> = state
-        .db
-        .list_exports()
-        .map(|es| es.into_iter().map(|e| e.device_path).collect())
-        .unwrap_or_default();
+    let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
     let devices = block::available_block_devices(&state.helper, &in_use)
         .await
         .into_iter()

@@ -10,7 +10,7 @@
   PersistentVolumes. Its <code>zfs-generic-nvmeof</code> driver provisions a zvol per
   PVC and exports it over NVMe-oF — which is exactly what this appliance serves. Point
   it at this host and greendot stays the dashboard: every CSI-created subsystem shows up
-  on <a href="/exports">Exports</a> badged <span class="badge">External</span> with a
+  on <a href="/nvme">NVMe-oF</a> badged <span class="badge">External</span> with a
   live RDMA dot, so you can see at a glance whether a volume is honestly on RDMA or has
   fallen back to TCP.
 </p>
