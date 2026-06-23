@@ -399,6 +399,7 @@ pub fn package_for_cli(cli: &str) -> Option<&'static str> {
         "nvme" => "nvme-cli",
         "targetcli" | "targetctl" => "targetcli-fb",
         "exportfs" => "nfs-kernel-server",
+        "smartctl" => "smartmontools",
         "apt-get" => "apt",
         _ => return None,
     })
@@ -421,6 +422,7 @@ pub const REQUIRED_CLIS: &[&str] = &[
     "nvme",
     "targetctl",
     "exportfs",
+    "smartctl",
 ];
 
 #[cfg(test)]
@@ -690,6 +692,7 @@ mod tests {
         assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
         assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
         assert_eq!(package_for_cli("devlink"), Some("iproute2"));
+        assert_eq!(package_for_cli("smartctl"), Some("smartmontools"));
         assert_eq!(package_for_cli("nonesuch"), None);
         // every required CLI maps to a valid package name
         for cli in REQUIRED_CLIS {

@@ -9,4 +9,5 @@ pub mod nfs;
 pub mod nic;
 pub mod nvmet;
 pub mod rdma;
+pub mod smart;
 pub mod zfs;

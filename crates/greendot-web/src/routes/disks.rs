@@ -1,7 +1,8 @@
 use super::{AppState, page};
-use crate::actual::block;
+use crate::actual::{block, smart, zfs};
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
+use crate::metrics::{ChartUnit, chart_svg};
 use askama::Template;
 use axum::extract::{Form, Path, State};
 use axum::http::HeaderMap;
@@ -10,7 +11,79 @@ use axum::routing::{get, post};
 use axum::{Extension, Router};
 use greendot_proto::{BlockDev, DevicePath, MountPath, PartLabel, Request};
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+
+/// Cross-device context gathered once per page: SMART health (per whole disk),
+/// the ZFS device→pool map, the export-backing device set, and the set of
+/// devices a new pool may be built from. Threaded into [`disk_row`]/[`part_row`]
+/// so those stay pure (and unit-testable) over fixture maps.
+#[derive(Default)]
+struct DeviceContext {
+    /// Bare disk name → SMART health/temp (whole disks only; partitions have none).
+    health: HashMap<String, smart::SmartHealth>,
+    /// `/dev/...` path → ZFS pool name.
+    members: HashMap<String, String>,
+    /// `/dev/...` paths already backing an NVMe-oF/iSCSI export.
+    in_use: HashSet<String>,
+    /// `/dev/...` paths a new ZFS pool may be created from (same predicate as the
+    /// pool-create page), so the "Create ZFS pool" link only appears where the
+    /// pool page would actually accept the device.
+    poolable: HashSet<String>,
+}
+
+async fn device_context(state: &AppState, disks: &[block::Disk]) -> DeviceContext {
+    // SMART is per physical device, so only whole disks are probed (not partitions).
+    let devs: Vec<BlockDev> = disks
+        .iter()
+        .filter_map(|d| BlockDev::new(&d.name).ok())
+        .collect();
+    let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
+    let poolable: HashSet<String> = block::available_block_devices(&state.helper, &in_use)
+        .await
+        .into_iter()
+        .filter(|d| {
+            d.kind != block::AvailKind::Zvol && d.kind != block::AvailKind::Lv && d.fstype.is_none()
+        })
+        .map(|d| d.path)
+        .collect();
+    DeviceContext {
+        health: smart::health(&state.helper, &devs).await,
+        members: zfs::pool_members().await.ok().flatten().unwrap_or_default(),
+        in_use,
+        poolable,
+    }
+}
+
+/// Best-effort "what is this used for" summary, in priority order: mounted →
+/// ZFS pool member → LVM PV → export backing → other filesystem → partitioned /
+/// available. Pure over the [`DeviceContext`] maps.
+fn usage_for(
+    device_path: &str,
+    mountpoint: Option<&str>,
+    fstype: Option<&str>,
+    partitions: usize,
+    ctx: &DeviceContext,
+) -> String {
+    if let Some(mp) = mountpoint.filter(|m| !m.is_empty()) {
+        return match fstype.filter(|f| !f.is_empty()) {
+            Some(fs) => format!("mounted at {mp} ({fs})"),
+            None => format!("mounted at {mp}"),
+        };
+    }
+    match fstype {
+        Some("zfs_member") => match ctx.members.get(device_path) {
+            Some(pool) => format!("ZFS pool: {pool}"),
+            None => "ZFS pool member".to_string(),
+        },
+        Some("LVM2_member") => "LVM physical volume".to_string(),
+        Some(fs) if ctx.in_use.contains(device_path) => format!("exported ({fs})"),
+        Some(fs) => fs.to_string(),
+        None if ctx.in_use.contains(device_path) => "exported (NVMe-oF/iSCSI)".to_string(),
+        None if partitions > 0 => format!("partitioned ({partitions} partitions)"),
+        None => "available".to_string(),
+    }
+}
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -33,6 +106,12 @@ pub struct PartRow {
     pub shrinkable: bool,
     /// Why shrink is unavailable (empty when `shrinkable`).
     pub shrink_reason: String,
+    /// `/dev/<name>` — the create-pool link target.
+    pub device_path: String,
+    /// What the partition is used for (ZFS/LVM/mount/export/available).
+    pub usage: String,
+    /// Whether a new ZFS pool may be built from this partition.
+    pub poolable: bool,
 }
 
 pub struct DiskRow {
@@ -44,6 +123,16 @@ pub struct DiskRow {
     pub free: String,
     pub no_space: bool,
     pub partitions: Vec<PartRow>,
+    /// `/dev/<name>` — the create-pool link target.
+    pub device_path: String,
+    /// SMART status dot class (`dot-green`/`dot-red`/`dot-gray`).
+    pub dot_class: &'static str,
+    /// Current temperature (`"38 °C"` or `"—"`).
+    pub temp: String,
+    /// What the disk is used for (ZFS/LVM/mount/partitioned/available).
+    pub usage: String,
+    /// Whether a new ZFS pool may be built from the whole disk.
+    pub poolable: bool,
 }
 
 pub struct DisksView {
@@ -93,6 +182,7 @@ struct DisksTemplate {
 }
 
 async fn gather(
+    state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
     task_id: Option<i64>,
@@ -105,27 +195,53 @@ async fn gather(
         form_error,
     };
     match block::disks().await {
-        Ok(disks) => view.disks = disks.into_iter().map(disk_row).collect(),
+        Ok(disks) => {
+            let ctx = device_context(state, &disks).await;
+            view.disks = disks.into_iter().map(|d| disk_row(d, &ctx)).collect();
+        }
         Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
     }
     view
 }
 
-fn disk_row(d: block::Disk) -> DiskRow {
+fn disk_row(d: block::Disk, ctx: &DeviceContext) -> DiskRow {
     let used: u64 = d.partitions.iter().map(|p| p.size).sum();
     let unallocated = d.size.saturating_sub(used);
+    let device_path = format!("/dev/{}", d.name);
+    let health = ctx.health.get(&d.name);
+    let usage = usage_for(
+        &device_path,
+        d.mountpoint.as_deref(),
+        d.fstype.as_deref(),
+        d.partitions.len(),
+        ctx,
+    );
     DiskRow {
         size: human_bytes(d.size),
         model: d.model.unwrap_or_default(),
         serial: d.serial.unwrap_or_default(),
         free: human_bytes(unallocated),
         no_space: unallocated < (1 << 20),
-        partitions: d.partitions.into_iter().map(part_row).collect(),
+        dot_class: smart::dot_class(health),
+        temp: smart::temp_display(health),
+        poolable: ctx.poolable.contains(&device_path),
+        usage,
+        partitions: d.partitions.into_iter().map(|p| part_row(p, ctx)).collect(),
+        device_path,
         name: d.name,
     }
 }
 
-fn part_row(p: block::Partition) -> PartRow {
+fn part_row(p: block::Partition, ctx: &DeviceContext) -> PartRow {
+    let device_path = format!("/dev/{}", p.name);
+    let usage = usage_for(
+        &device_path,
+        p.mountpoint.as_deref(),
+        p.fstype.as_deref(),
+        0,
+        ctx,
+    );
+    let poolable = ctx.poolable.contains(&device_path);
     let mountpoint = p.mountpoint.unwrap_or_default();
     let mounted = !mountpoint.is_empty();
     let fstype = fs_display(p.fstype.as_deref());
@@ -141,17 +257,20 @@ fn part_row(p: block::Partition) -> PartRow {
         fstype,
         shrinkable,
         shrink_reason,
+        poolable,
+        usage,
+        device_path,
         name: p.name,
     }
 }
 
 async fn disks_page(
-    State(_): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
 ) -> Response {
     page(DisksTemplate {
         user,
-        view: gather(None, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
@@ -161,6 +280,14 @@ pub struct DiskDetailView {
     pub name: String,
     /// `None` when the named disk doesn't exist on this host.
     pub disk: Option<DiskRow>,
+    /// Live read/write/temperature charts (inline SVG; rendered unescaped).
+    pub traffic_read_svg: String,
+    pub traffic_write_svg: String,
+    pub temp_svg: String,
+    /// Full `smartctl -x` dump, shown verbatim.
+    pub smart_report: String,
+    /// False when smartctl isn't installed (show the dependency hint instead).
+    pub smart_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
     /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
@@ -182,6 +309,7 @@ struct DiskDetailPartial {
 }
 
 async fn gather_disk_detail(
+    state: &AppState,
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
@@ -190,26 +318,50 @@ async fn gather_disk_detail(
     let mut view = DiskDetailView {
         name: name.to_owned(),
         disk: None,
+        traffic_read_svg: String::new(),
+        traffic_write_svg: String::new(),
+        temp_svg: String::new(),
+        smart_report: String::new(),
+        smart_installed: true,
         error: None,
         flash,
         task_id,
         form_error,
     };
     match block::disks().await {
-        Ok(disks) => view.disk = disks.into_iter().find(|d| d.name == name).map(disk_row),
+        Ok(disks) => {
+            if let Some(d) = disks.into_iter().find(|d| d.name == name) {
+                let ctx = device_context(state, std::slice::from_ref(&d)).await;
+                let series = |suffix| state.metrics.ring_series(&format!("disk:{name}:{suffix}"));
+                view.traffic_read_svg = chart_svg(&series("read_bps"), 600, 120, ChartUnit::Bytes);
+                view.traffic_write_svg =
+                    chart_svg(&series("write_bps"), 600, 120, ChartUnit::Bytes);
+                view.temp_svg = chart_svg(&series("temp_c"), 600, 120, ChartUnit::Celsius);
+                if let Ok(dev) = BlockDev::new(name) {
+                    let rep = smart::report(&state.helper, &dev).await;
+                    view.smart_installed = rep.installed;
+                    view.smart_report = if rep.stderr.trim().is_empty() {
+                        rep.stdout
+                    } else {
+                        format!("{}\n{}", rep.stdout, rep.stderr)
+                    };
+                }
+                view.disk = Some(disk_row(d, &ctx));
+            }
+        }
         Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
     }
     view
 }
 
 async fn disk_detail_page(
-    State(_): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
     Path(disk): Path<String>,
 ) -> Response {
     page(DiskDetailTemplate {
         user,
-        view: gather_disk_detail(&disk, None, None, None).await,
+        view: gather_disk_detail(&state, &disk, None, None, None).await,
     })
 }
 
@@ -217,15 +369,24 @@ async fn disk_detail_page(
 /// detail partial with the outcome.
 async fn run(state: &Arc<AppState>, req: Request, kind: &str, title: &str, disk: &str) -> Response {
     let view = match crate::task_runner::start(state, req, kind, title) {
-        Ok(id) => gather_disk_detail(disk, Some(format!("started {title}")), None, Some(id)).await,
-        Err(e) => gather_disk_detail(disk, None, Some(format!("{e:#}")), None).await,
+        Ok(id) => {
+            gather_disk_detail(
+                state,
+                disk,
+                Some(format!("started {title}")),
+                None,
+                Some(id),
+            )
+            .await
+        }
+        Err(e) => gather_disk_detail(state, disk, None, Some(format!("{e:#}")), None).await,
     };
     page(DiskDetailPartial { view })
 }
 
-async fn disk_detail_failed(disk: &str, message: impl Into<String>) -> Response {
+async fn disk_detail_failed(state: &AppState, disk: &str, message: impl Into<String>) -> Response {
     page(DiskDetailPartial {
-        view: gather_disk_detail(disk, None, Some(message.into()), None).await,
+        view: gather_disk_detail(state, disk, None, Some(message.into()), None).await,
     })
 }
 
@@ -256,6 +417,7 @@ struct PartDetailPartial {
 }
 
 async fn gather_part_detail(
+    state: &AppState,
     disk: &str,
     number: u32,
     flash: Option<String>,
@@ -272,11 +434,14 @@ async fn gather_part_detail(
     };
     match block::disks().await {
         Ok(disks) => {
-            view.part = disks
-                .into_iter()
-                .find(|d| d.name == disk)
-                .and_then(|d| d.partitions.into_iter().find(|p| p.number == Some(number)))
-                .map(part_row);
+            if let Some(d) = disks.into_iter().find(|d| d.name == disk) {
+                let ctx = device_context(state, std::slice::from_ref(&d)).await;
+                view.part = d
+                    .partitions
+                    .into_iter()
+                    .find(|p| p.number == Some(number))
+                    .map(|p| part_row(p, &ctx));
+            }
         }
         Err(e) => view.error = Some(format!("could not list block devices: {e:#}")),
     }
@@ -284,19 +449,24 @@ async fn gather_part_detail(
 }
 
 async fn part_detail_page(
-    State(_): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
     Path((disk, number)): Path<(String, u32)>,
 ) -> Response {
     page(PartDetailTemplate {
         user,
-        view: gather_part_detail(&disk, number, None, None, None).await,
+        view: gather_part_detail(&state, &disk, number, None, None, None).await,
     })
 }
 
-async fn part_detail_failed(disk: &str, number: u32, message: impl Into<String>) -> Response {
+async fn part_detail_failed(
+    state: &AppState,
+    disk: &str,
+    number: u32,
+    message: impl Into<String>,
+) -> Response {
     page(PartDetailPartial {
-        view: gather_part_detail(disk, number, None, Some(message.into()), None).await,
+        view: gather_part_detail(state, disk, number, None, Some(message.into()), None).await,
     })
 }
 
@@ -308,7 +478,8 @@ struct TableForm {
 async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<TableForm>) -> Response {
     let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return disk_detail_failed(&scope, format!("invalid disk name {:?}", form.disk)).await;
+        return disk_detail_failed(&state, &scope, format!("invalid disk name {:?}", form.disk))
+            .await;
     };
     let req = Request::PartitionTableCreate { disk: disk.clone() };
     run(
@@ -337,18 +508,23 @@ async fn part_create(
 ) -> Response {
     let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
-        return disk_detail_failed(&scope, format!("invalid disk name {:?}", form.disk)).await;
+        return disk_detail_failed(&state, &scope, format!("invalid disk name {:?}", form.disk))
+            .await;
     };
     let Ok(label) = PartLabel::new(form.label.trim()) else {
-        return disk_detail_failed(&scope, format!("invalid partition label {:?}", form.label))
-            .await;
+        return disk_detail_failed(
+            &state,
+            &scope,
+            format!("invalid partition label {:?}", form.label),
+        )
+        .await;
     };
     // Empty size means "rest of the disk"; sfdisk works in 512-byte sectors.
     let size_sectors = match form.size.trim() {
         "" => None,
         size => match super::zfs::parse_size(size, &form.unit) {
             Some(bytes) => Some(bytes / 512),
-            None => return disk_detail_failed(&scope, "invalid size").await,
+            None => return disk_detail_failed(&state, &scope, "invalid size").await,
         },
     };
     let req = Request::PartitionCreate {
@@ -384,6 +560,7 @@ async fn part_delete(
     let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
         return part_detail_failed(
+            &state,
             &scope,
             form.number,
             format!("invalid disk name {:?}", form.disk),
@@ -399,7 +576,7 @@ async fn part_delete(
     // disk; the delete task is viewable on /tasks.
     match crate::task_runner::start(&state, req, "partition-delete", &title) {
         Ok(_) => nav_redirect(&headers, &format!("/disks/{scope}")),
-        Err(e) => part_detail_failed(&scope, form.number, format!("{e:#}")).await,
+        Err(e) => part_detail_failed(&state, &scope, form.number, format!("{e:#}")).await,
     }
 }
 
@@ -427,12 +604,25 @@ async fn run_step(
     }
 }
 
-async fn finish_shrink(disk: &str, number: u32, result: Result<(), String>) -> Response {
+async fn finish_shrink(
+    state: &AppState,
+    disk: &str,
+    number: u32,
+    result: Result<(), String>,
+) -> Response {
     let view = match result {
         Ok(()) => {
-            gather_part_detail(disk, number, Some("partition shrunk".into()), None, None).await
+            gather_part_detail(
+                state,
+                disk,
+                number,
+                Some("partition shrunk".into()),
+                None,
+                None,
+            )
+            .await
         }
-        Err(e) => gather_part_detail(disk, number, None, Some(e), None).await,
+        Err(e) => gather_part_detail(state, disk, number, None, Some(e), None).await,
     };
     page(PartDetailPartial { view })
 }
@@ -448,6 +638,7 @@ async fn part_shrink(
     let scope = form.disk.trim().to_owned();
     let Ok(disk) = BlockDev::new(form.disk.trim()) else {
         return part_detail_failed(
+            &state,
             &scope,
             form.number,
             format!("invalid disk name {:?}", form.disk),
@@ -455,17 +646,28 @@ async fn part_shrink(
         .await;
     };
     let Some(bytes) = super::zfs::parse_size(&form.size, &form.unit) else {
-        return part_detail_failed(&scope, form.number, "invalid size").await;
+        return part_detail_failed(&state, &scope, form.number, "invalid size").await;
     };
     // 1 MiB alignment removes any sfdisk start/size rounding ambiguity.
     if !bytes.is_multiple_of(1 << 20) {
-        return part_detail_failed(&scope, form.number, "size must be a whole number of MiB").await;
+        return part_detail_failed(
+            &state,
+            &scope,
+            form.number,
+            "size must be a whole number of MiB",
+        )
+        .await;
     }
     let disks = match block::disks().await {
         Ok(d) => d,
         Err(e) => {
-            return part_detail_failed(&scope, form.number, format!("could not read disks: {e:#}"))
-                .await;
+            return part_detail_failed(
+                &state,
+                &scope,
+                form.number,
+                format!("could not read disks: {e:#}"),
+            )
+            .await;
         }
     };
     let Some(part) = disks
@@ -474,6 +676,7 @@ async fn part_shrink(
         .and_then(|d| d.partitions.iter().find(|p| p.number == Some(form.number)))
     else {
         return part_detail_failed(
+            &state,
             &scope,
             form.number,
             format!("partition {} on {disk} no longer exists", form.number),
@@ -482,6 +685,7 @@ async fn part_shrink(
     };
     if bytes / 512 >= part.size / 512 {
         return part_detail_failed(
+            &state,
             &scope,
             form.number,
             "new size must be smaller than the current size",
@@ -493,7 +697,7 @@ async fn part_shrink(
     let fstype = part.fstype.clone();
     let part_name = part.name.clone();
     let Ok(device) = DevicePath::new(format!("/dev/{part_name}")) else {
-        return part_detail_failed(&scope, form.number, "invalid device path").await;
+        return part_detail_failed(&state, &scope, form.number, "invalid device path").await;
     };
     let new_sectors = bytes / 512;
     // Shrink the filesystem 1 MiB short of the new partition end for slack.
@@ -506,6 +710,7 @@ async fn part_shrink(
     match shrinkability(fstype.as_deref(), mounted) {
         Shrink::No(reason) => {
             part_detail_failed(
+                &state,
                 &scope,
                 form.number,
                 format!("cannot shrink {device}: {reason}"),
@@ -520,7 +725,7 @@ async fn part_shrink(
                 format!("resize {device}"),
             )
             .await;
-            finish_shrink(&scope, form.number, r).await
+            finish_shrink(&state, &scope, form.number, r).await
         }
         Shrink::Ext => {
             let mut r = run_step(
@@ -553,12 +758,13 @@ async fn part_shrink(
                 )
                 .await;
             }
-            finish_shrink(&scope, form.number, r).await
+            finish_shrink(&state, &scope, form.number, r).await
         }
         Shrink::Btrfs => {
             let Ok(mp) = MountPath::new(format!("/run/greendotrdma/btrfs-resize-{part_name}"))
             else {
-                return part_detail_failed(&scope, form.number, "invalid temp mount path").await;
+                return part_detail_failed(&state, &scope, form.number, "invalid temp mount path")
+                    .await;
             };
             if let Err(e) = run_step(
                 &state,
@@ -571,7 +777,7 @@ async fn part_shrink(
             )
             .await
             {
-                return finish_shrink(&scope, form.number, Err(e)).await;
+                return finish_shrink(&state, &scope, form.number, Err(e)).await;
             }
             if let Err(e) = run_step(
                 &state,
@@ -594,7 +800,7 @@ async fn part_shrink(
                     "unmount".into(),
                 )
                 .await;
-                return finish_shrink(&scope, form.number, Err(e)).await;
+                return finish_shrink(&state, &scope, form.number, Err(e)).await;
             }
             // Hard gate: never resize the partition while the fs is still mounted.
             if let Err(e) = run_step(
@@ -608,6 +814,7 @@ async fn part_shrink(
             .await
             {
                 return finish_shrink(
+                    &state,
                     &scope,
                     form.number,
                     Err(format!(
@@ -623,18 +830,57 @@ async fn part_shrink(
                 format!("resize {device}"),
             )
             .await;
-            finish_shrink(&scope, form.number, r).await
+            finish_shrink(&state, &scope, form.number, r).await
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Shrink, fs_display, shrinkability};
+    use super::{DeviceContext, Shrink, fs_display, shrinkability, usage_for};
     use crate::routes::testutil::{form_post, login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
     use rstest::rstest;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn usage_for_covers_priority_branches() {
+        let ctx = DeviceContext {
+            members: HashMap::from([("/dev/sdb".to_string(), "tank".to_string())]),
+            in_use: HashSet::from(["/dev/sdc".to_string()]),
+            ..Default::default()
+        };
+        // mounted wins over everything
+        assert_eq!(
+            usage_for("/dev/sda1", Some("/boot"), Some("vfat"), 0, &ctx),
+            "mounted at /boot (vfat)"
+        );
+        // ZFS member resolved to its pool name, or a bare fallback when unknown
+        assert_eq!(
+            usage_for("/dev/sdb", None, Some("zfs_member"), 0, &ctx),
+            "ZFS pool: tank"
+        );
+        assert_eq!(
+            usage_for("/dev/sdd", None, Some("zfs_member"), 0, &ctx),
+            "ZFS pool member"
+        );
+        assert_eq!(
+            usage_for("/dev/sde", None, Some("LVM2_member"), 0, &ctx),
+            "LVM physical volume"
+        );
+        // raw device backing an export, a partitioned disk, a free disk, other fs
+        assert_eq!(
+            usage_for("/dev/sdc", None, None, 0, &ctx),
+            "exported (NVMe-oF/iSCSI)"
+        );
+        assert_eq!(
+            usage_for("/dev/sdf", None, None, 3, &ctx),
+            "partitioned (3 partitions)"
+        );
+        assert_eq!(usage_for("/dev/sdg", None, None, 0, &ctx), "available");
+        assert_eq!(usage_for("/dev/sdh1", None, Some("ext4"), 0, &ctx), "ext4");
+    }
 
     #[rstest]
     #[case(None, "no filesystem")]
@@ -674,11 +920,19 @@ mod tests {
         let req = auth(HttpRequest::get("/disks").body(Body::empty()).unwrap());
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Disks"), "{body}");
+        assert!(body.contains("Storage Devices"), "{body}");
+        // The per-disk page renders gracefully (the host may have no sdb), and
+        // when the disk exists it carries the SMART report + traffic charts.
         let req = auth(HttpRequest::get("/disks/sdb").body(Body::empty()).unwrap());
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("sdb") || body.contains("not found"), "{body}");
+        if body.contains("SMART report") {
+            // Present disk: charts render and the canned SMART dump shows despite
+            // smartctl's nonzero exit (fake helper returns ok:false).
+            assert!(body.contains("<svg"), "traffic/temp charts render: {body}");
+            assert!(body.contains("PASSED"), "smart dump shown verbatim: {body}");
+        }
         let req = auth(
             HttpRequest::get("/disks/sdb/part/1")
                 .body(Body::empty())

@@ -519,6 +519,30 @@ svg.chart polyline {
 
 .chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }
 
+.chart-title {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The full smartctl dump, shown verbatim and scrollable. */
+.smart-report {
+  max-height: 440px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 12px 14px;
+  background: var(--inset);
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--border-strong);
+  border-radius: 7px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  white-space: pre;
+}
+
 /* ---- Logs / task stream ------------------------------------------------- */
 
 .log {

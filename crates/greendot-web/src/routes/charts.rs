@@ -1,6 +1,6 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
-use crate::metrics::{PromSample, chart_svg, render_prometheus};
+use crate::metrics::{ChartUnit, PromSample, chart_svg, render_prometheus};
 use crate::{actual, dot};
 use askama::Template;
 use axum::extract::{Query, State};
@@ -67,7 +67,7 @@ async fn charts_page(
                     .unwrap_or_default(),
             };
             ChartCard {
-                svg: chart_svg(&points, 600, 120),
+                svg: chart_svg(&points, 600, 120, ChartUnit::for_series(&series)),
                 title: series,
             }
         })

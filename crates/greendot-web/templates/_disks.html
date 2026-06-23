@@ -8,14 +8,16 @@
   <p class="empty">No disks found.</p>
   {% else %}
   <table>
-    <thead><tr><th>Disk</th><th>Size</th><th>Model</th><th>Serial</th><th>Free</th><th></th></tr></thead>
+    <thead><tr><th></th><th>Device</th><th>Size</th><th>Model</th><th>Temp</th><th>Used for</th><th>Free</th><th></th></tr></thead>
     <tbody>
       {% for d in view.disks %}
       <tr>
+        <td><span class="dot {{ d.dot_class }}" title="SMART status"></span></td>
         <td><a href="/disks/{{ d.name }}">/dev/{{ d.name }}</a></td>
         <td>{{ d.size }}</td>
         <td>{{ d.model }}</td>
-        <td>{{ d.serial }}</td>
+        <td>{{ d.temp }}</td>
+        <td>{{ d.usage }}{% if d.poolable %} · <a href="/zfs/pool/create?device={{ d.device_path }}">create pool</a>{% endif %}</td>
         <td>{% if d.no_space %}No space left{% else %}{{ d.free }} (approx.){% endif %}</td>
         <td><a href="/disks/{{ d.name }}">Manage</a></td>
       </tr>

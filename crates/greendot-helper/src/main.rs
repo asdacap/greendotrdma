@@ -13,6 +13,7 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
+mod smart;
 mod zfs;
 
 use anyhow::{Context, Result, bail};
@@ -218,6 +219,13 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                     )
                     .is_err()
                     {
+                        return; // socket write failed; client gone
+                    }
+                }
+                Dispatch::SmartHealth(devices) => {
+                    // A read: no mutate_lock (mirrors how reads stream).
+                    let mut sink = SocketSink(&mut writer);
+                    if smart::report_health_into(&devices, &mut sink).is_err() {
                         return; // socket write failed; client gone
                     }
                 }

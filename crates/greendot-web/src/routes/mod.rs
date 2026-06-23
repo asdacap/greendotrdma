@@ -247,6 +247,59 @@ pub(crate) mod testutil {
                                 )
                             })
                         }
+                        // SMART batch health: a small canned inventory so the
+                        // device list renders a real dot + temperature.
+                        HelperRequest::SmartHealth { .. } => {
+                            let json = r#"[{"device":"sda","passed":true,"temp_c":38}]"#;
+                            wire::write_msg(
+                                w,
+                                &TaskEvent::Started {
+                                    command: "fake".into(),
+                                    args: vec![],
+                                    stdin: None,
+                                },
+                            )
+                            .and_then(|()| {
+                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
+                            })
+                            .and_then(|()| {
+                                wire::write_msg(
+                                    w,
+                                    &TaskEvent::Finished {
+                                        exit: 0,
+                                        ok: true,
+                                        error: None,
+                                    },
+                                )
+                            })
+                        }
+                        // SMART full report: a short canned dump. smartctl exits
+                        // nonzero on healthy drives, so Finished is ok:false to
+                        // prove the web shows stdout regardless.
+                        HelperRequest::SmartReport { .. } => {
+                            let dump = "smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n";
+                            wire::write_msg(
+                                w,
+                                &TaskEvent::Started {
+                                    command: "fake".into(),
+                                    args: vec![],
+                                    stdin: None,
+                                },
+                            )
+                            .and_then(|()| {
+                                wire::write_msg(w, &TaskEvent::Stdout { data: dump.into() })
+                            })
+                            .and_then(|()| {
+                                wire::write_msg(
+                                    w,
+                                    &TaskEvent::Finished {
+                                        exit: 4,
+                                        ok: false,
+                                        error: None,
+                                    },
+                                )
+                            })
+                        }
                         // Everything else (incl. EnableRoce) is a task: stream
                         // Started + a successful Finished.
                         _ => wire::write_msg(
