@@ -25,8 +25,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>New policy</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>New policy</button>
+  <dialog>
+  <article>
+  <header>New snapshot policy</header>
   <form class="card" hx-post="/snapshots/policy/create" hx-target="#snapshots-content" hx-swap="outerHTML">
     <label>Dataset
       <select name="dataset" required>
@@ -44,20 +46,32 @@
     <label>Snapshot prefix <input name="prefix" value="greendot-auto" required></label>
     <label>Keep last N <input name="keep_last" size="4" placeholder="∞"></label>
     <label>Keep newer than N days <input name="keep_days" size="4" placeholder="∞"></label>
-    <button type="submit">Create policy</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create policy</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 
-  <details>
-  <summary>Manual snapshot</summary>
-  <form class="inline" hx-post="/snapshots/manual" hx-target="#snapshots-content" hx-swap="outerHTML">
-    <select name="dataset" required>
-      {% for d in view.datasets %}<option>{{ d }}</option>{% endfor %}
-    </select>
-    <input name="name" placeholder="before-upgrade" required>
-    <button>Snapshot now</button>
+  <button type="button" class="dialog-trigger" data-dialog-open>Manual snapshot</button>
+  <dialog>
+  <article>
+  <header>Manual snapshot</header>
+  <form class="card" hx-post="/snapshots/manual" hx-target="#snapshots-content" hx-swap="outerHTML">
+    <label>Dataset
+      <select name="dataset" required>
+        {% for d in view.datasets %}<option>{{ d }}</option>{% endfor %}
+      </select>
+    </label>
+    <label>Snapshot name <input name="name" placeholder="before-upgrade" required></label>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Snapshot now</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 
   <h2>Existing snapshots</h2>
   {% if view.snapshots.is_empty() %}

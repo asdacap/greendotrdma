@@ -616,3 +616,76 @@ details summary:hover { color: var(--text); }
    rule above; only the card's own chrome (width, green top edge, shadow) is
    local. The label's top margin owns the field rhythm, as in .card. */
 .login-card input { margin-bottom: 0; }
+
+/* ---- Dialogs ------------------------------------------------------------ */
+/* Form dialogs replace the old disclosure dropdowns; one shared #gd-confirm
+   modal upgrades every hx-confirm. Native <dialog> gives ESC + focus-trap; Pico
+   paints article/header/footer and the brand drops it onto the panel. */
+
+/* Trigger reads like the old <summary>: a quiet muted label that opens a modal. */
+.dialog-trigger {
+  margin: 10px 0;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  cursor: pointer;
+  font: inherit;
+}
+.dialog-trigger:hover { color: var(--text); }
+.rowactions .dialog-trigger { margin: 0; }
+
+dialog { border: none; background: transparent; padding: 0; }
+dialog::backdrop { background: rgba(0, 0, 0, .55); }
+dialog > article {
+  margin: 0;
+  width: min(92vw, 460px);
+  padding: 20px 20px 22px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-top: 2px solid var(--green);
+  border-radius: 11px;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+}
+dialog > article > header {
+  margin: 0 0 6px;
+  padding: 0;
+  background: none;
+  border: none;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .04em;
+}
+/* A .card form fills the dialog — the <article> already owns the panel chrome. */
+dialog .card { max-width: none; padding: 0; background: none; border: none; }
+/* Footer holds Cancel + the action button, right-aligned. It lives inside the
+   form (so the action submits it), so target it directly, not Pico's article>footer. */
+dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+}
+dialog footer button { margin-top: 18px; }   /* clear of the last field */
+
+/* Quiet secondary (Cancel) button. */
+button.secondary {
+  --pico-background-color: transparent;
+  --pico-border-color: var(--border-strong);
+  --pico-color: var(--muted);
+}
+button.secondary:is(:hover, :focus, :active) {
+  --pico-background-color: var(--panel-2);
+  --pico-border-color: var(--muted);
+  --pico-color: var(--text);
+}
+
+/* Shared confirm modal — the type-the-name gate. */
+#gd-confirm-msg { color: var(--text); margin: 0 0 4px; }
+#gd-confirm-name { color: var(--red); font-family: var(--mono); }
+#gd-confirm-input { width: 100%; margin: 8px 0 0; font-family: var(--mono); }
+#gd-confirm-ok:disabled { opacity: .4; cursor: not-allowed; }

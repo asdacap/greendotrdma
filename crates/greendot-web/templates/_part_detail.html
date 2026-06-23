@@ -30,7 +30,8 @@
   <h2>Shrink</h2>
   {% if part.shrinkable %}
   <form class="inline" hx-post="/disks/part/shrink" hx-target="#part-detail-content" hx-swap="outerHTML"
-        hx-confirm="Shrink {{ part.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first.">
+        hx-confirm="Shrink {{ part.name }} to the new size? The filesystem is resized first (ext runs e2fsck -f -y, which auto-repairs). Back up first."
+        data-confirm-path="{{ part.name }}">
     <input type="hidden" name="disk" value="{{ view.disk }}">
     <input type="hidden" name="number" value="{{ number }}">
     <input name="size" size="6" placeholder="new size" required>
@@ -42,8 +43,9 @@
   {% endif %}
 
   <h2>Delete</h2>
-  <form class="inline" hx-post="/disks/part/delete"
-        hx-confirm="Delete {{ part.name }}? Data on it becomes unreachable.">
+  <form class="inline" hx-post="/disks/part/delete" hx-target="#part-detail-content" hx-swap="outerHTML"
+        hx-confirm="Delete {{ part.name }}? Data on it becomes unreachable."
+        data-confirm-path="{{ part.name }}">
     <input type="hidden" name="disk" value="{{ view.disk }}">
     <input type="hidden" name="number" value="{{ number }}">
     <button class="danger">Delete</button>

@@ -6,7 +6,8 @@
   {% if view.devices.is_empty() %}
   <p class="empty">No available block devices to build a VG from — free up an unmounted, unused partition first.</p>
   {% else %}
-  <form class="card" hx-post="/lvm/vg" hx-target="#vg-create-content" hx-swap="outerHTML">
+  <form class="card" hx-post="/lvm/vg" hx-target="#vg-create-content" hx-swap="outerHTML"
+        hx-confirm="Create the volume group? The selected devices are initialised as PVs.">
     <label>VG name <input name="name" placeholder="vg0" required></label>
     <fieldset>
       <legend>Physical volumes</legend>

@@ -20,8 +20,9 @@
   </table>
 
   <h2>Destroy snapshot</h2>
-  <form class="inline" hx-post="/snapshots/delete"
-        hx-confirm="Destroy snapshot {{ snap.name }}?">
+  <form class="inline" hx-post="/snapshots/delete" hx-target="#snap-detail-content" hx-swap="outerHTML"
+        hx-confirm="Destroy snapshot {{ snap.name }}?"
+        data-confirm-path="{{ snap.name }}">
     <input type="hidden" name="name" value="{{ snap.name }}">
     <button class="danger">Destroy</button>
   </form>

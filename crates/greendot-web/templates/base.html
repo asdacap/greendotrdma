@@ -31,7 +31,7 @@
     <a href="/docs/democratic-csi">democratic-csi</a>
     <div class="sidebar-footer">
       <span class="muted">{{ user.username }}</span>
-      <button class="linklike" hx-post="/logout">Sign out</button>
+      <button class="linklike" hx-post="/logout" hx-confirm="Sign out?">Sign out</button>
     </div>
   </nav>
   <main>
@@ -69,6 +69,105 @@
       function scan() { document.querySelectorAll("a[data-task-watch]").forEach(watch); }
       document.body.addEventListener("htmx:afterSwap", scan);
       scan();
+    })();
+  </script>
+
+  <!-- Shared confirm modal — every hx-confirm is upgraded to this styled dialog,
+       and data-confirm-path turns it into a type-the-name gate. -->
+  <dialog id="gd-confirm">
+    <article>
+      <header>Confirm</header>
+      <p id="gd-confirm-msg"></p>
+      <p id="gd-confirm-prompt" class="muted small" hidden>Type <code id="gd-confirm-name"></code> to confirm:</p>
+      <input id="gd-confirm-input" autocomplete="off" autocapitalize="off" spellcheck="false" hidden>
+      <footer>
+        <button type="button" class="secondary" id="gd-confirm-cancel">Cancel</button>
+        <button type="button" id="gd-confirm-ok">Confirm</button>
+      </footer>
+    </article>
+  </dialog>
+
+  <script>
+    // Form dialogs: a [data-dialog-open] trigger opens its adjacent <dialog>;
+    // [data-dialog-close] or a backdrop click closes the nearest one. Native
+    // <dialog> gives ESC + focus-trapping; a successful htmx swap replaces the
+    // dialog's subtree, so it also closes itself.
+    (function () {
+      document.body.addEventListener("click", function (e) {
+        var open = e.target.closest("[data-dialog-open]");
+        if (open) {
+          var d = open.nextElementSibling;
+          if (d && d.tagName === "DIALOG") d.showModal();
+          return;
+        }
+        if (e.target.closest("[data-dialog-close]")) {
+          var c = e.target.closest("dialog");
+          if (c) c.close();
+          return;
+        }
+        if (e.target.tagName === "DIALOG") e.target.close();   // backdrop
+      });
+      // Type-to-confirm embedded in a form (e.g. ZFS Destroy): keep its submit
+      // disabled until the typed value matches exactly. The button ships disabled.
+      document.body.addEventListener("input", function (e) {
+        var f = e.target.closest("[data-confirm-match]");
+        if (!f) return;
+        var form = f.closest("form");
+        var btn = form && form.querySelector("button[type=submit]");
+        if (btn) btn.disabled = f.value !== f.getAttribute("data-confirm-match");
+      });
+    })();
+  </script>
+  <script>
+    // Upgrade every hx-confirm to the styled modal, with a type-the-name gate when
+    // the triggering element carries data-confirm-path. htmx fires htmx:confirm for
+    // every request — bail (proceed normally) when there is no question.
+    (function () {
+      var dlg = document.getElementById("gd-confirm");
+      var msg = document.getElementById("gd-confirm-msg");
+      var prompt = document.getElementById("gd-confirm-prompt");
+      var nameEl = document.getElementById("gd-confirm-name");
+      var input = document.getElementById("gd-confirm-input");
+      var ok = document.getElementById("gd-confirm-ok");
+      var cancel = document.getElementById("gd-confirm-cancel");
+      var pending = null;
+
+      function reset() { pending = null; input.value = ""; input.hidden = true; prompt.hidden = true; }
+      function abort() { dlg.close(); reset(); }   // resolves without issuing the request
+
+      document.body.addEventListener("htmx:confirm", function (e) {
+        var q = e.detail.question;
+        if (!q) return;                  // no hx-confirm — let htmx proceed
+        e.preventDefault();              // hold the request until the user confirms
+        pending = e.detail;
+        msg.textContent = q;
+        var path = e.detail.elt.getAttribute("data-confirm-path");
+        ok.classList.toggle("danger", !!path);
+        if (path) {
+          nameEl.textContent = path;
+          prompt.hidden = false;
+          input.hidden = false;
+          ok.disabled = true;
+        } else {
+          ok.disabled = false;
+        }
+        dlg.showModal();
+        if (path) input.focus();
+      });
+
+      input.addEventListener("input", function () {
+        var path = pending && pending.elt.getAttribute("data-confirm-path");
+        ok.disabled = input.value !== path;
+      });
+      ok.addEventListener("click", function () {
+        var d = pending;
+        dlg.close();
+        reset();
+        if (d) d.issueRequest(true);
+      });
+      cancel.addEventListener("click", abort);
+      dlg.addEventListener("cancel", function (e) { e.preventDefault(); abort(); });   // ESC
+      dlg.addEventListener("click", function (e) { if (e.target === dlg) abort(); });  // backdrop
     })();
   </script>
 </body>

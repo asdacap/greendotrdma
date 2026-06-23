@@ -24,13 +24,15 @@
           </details>
           {% if !r.external %}
           {% if r.diagnose %}<a role="button" href="/nfs/{{ r.id }}/diagnose">Diagnose</a>{% endif %}
-          <form class="inline" hx-post="/nfs/toggle" hx-target="#nfs-content" hx-swap="outerHTML">
+          <form class="inline" hx-post="/nfs/toggle" hx-target="#nfs-content" hx-swap="outerHTML"
+                hx-confirm="{% if r.enabled %}Disable{% else %}Enable{% endif %} NFS export {{ r.path }}?">
             <input type="hidden" name="id" value="{{ r.id }}">
             <input type="hidden" name="enable" value="{{ !r.enabled }}">
             <button>{% if r.enabled %}Disable{% else %}Enable{% endif %}</button>
           </form>
           <form class="inline" hx-post="/nfs/delete" hx-target="#nfs-content" hx-swap="outerHTML"
-                hx-confirm="Delete NFS export {{ r.path }}? Clients will lose access.">
+                hx-confirm="Delete NFS export {{ r.path }}? Clients will lose access."
+                data-confirm-path="{{ r.path }}">
             <input type="hidden" name="id" value="{{ r.id }}">
             <button class="danger">Delete</button>
           </form>
@@ -42,8 +44,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>New NFS share</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>New NFS share</button>
+  <dialog>
+  <article>
+  <header>New NFS share</header>
   <form class="card" hx-post="/nfs/create" hx-target="#nfs-content" hx-swap="outerHTML">
     <label>Export path (absolute mounted directory)
       <input name="path" placeholder="/tank/share" required>
@@ -52,7 +56,11 @@
       <textarea name="clients" rows="3" placeholder="192.168.101.0/24&#10;*"></textarea>
     </label>
     <label class="checkbox"><input type="checkbox" name="readonly" value="1"> Read-only (ro)</label>
-    <button type="submit">Create share</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create share</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 </div>

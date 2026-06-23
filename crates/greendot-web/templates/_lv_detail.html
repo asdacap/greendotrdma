@@ -24,7 +24,8 @@
   </table>
 
   <h2>Grow</h2>
-  <form class="inline" hx-post="/lvm/lv/resize" hx-target="#lv-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/lvm/lv/resize" hx-target="#lv-detail-content" hx-swap="outerHTML"
+        hx-confirm="Grow {{ lv.full_name }} to the new size?">
     <input type="hidden" name="vg" value="{{ lv.vg }}">
     <input type="hidden" name="name" value="{{ lv.name }}">
     <input name="size" size="5" placeholder="grow to" required>
@@ -34,7 +35,8 @@
 
   <h2>Shrink</h2>
   <form class="inline" hx-post="/lvm/lv/shrink" hx-target="#lv-detail-content" hx-swap="outerHTML"
-        hx-confirm="Shrink {{ lv.full_name }}? Data beyond the new size is lost — back up first.">
+        hx-confirm="Shrink {{ lv.full_name }}? Data beyond the new size is lost — back up first."
+        data-confirm-path="{{ lv.full_name }}">
     <input type="hidden" name="vg" value="{{ lv.vg }}">
     <input type="hidden" name="name" value="{{ lv.name }}">
     <input name="size" size="5" placeholder="shrink to" required>
@@ -43,7 +45,8 @@
   </form>
 
   <h2>Rename</h2>
-  <form class="inline" hx-post="/lvm/lv/rename" hx-target="#lv-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/lvm/lv/rename" hx-target="#lv-detail-content" hx-swap="outerHTML"
+        hx-confirm="Rename {{ lv.full_name }}?">
     <input type="hidden" name="vg" value="{{ lv.vg }}">
     <input type="hidden" name="name" value="{{ lv.name }}">
     <input name="new_name" size="8" placeholder="new name" required>
@@ -51,8 +54,9 @@
   </form>
 
   <h2>Delete</h2>
-  <form class="inline" hx-post="/lvm/lv/delete"
-        hx-confirm="Delete {{ lv.full_name }}? This destroys the volume's data.">
+  <form class="inline" hx-post="/lvm/lv/delete" hx-target="#lv-detail-content" hx-swap="outerHTML"
+        hx-confirm="Delete {{ lv.full_name }}? This destroys the volume's data."
+        data-confirm-path="{{ lv.full_name }}">
     <input type="hidden" name="vg" value="{{ lv.vg }}">
     <input type="hidden" name="name" value="{{ lv.name }}">
     <button class="danger">Delete</button>

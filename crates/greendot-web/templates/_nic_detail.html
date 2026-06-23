@@ -29,7 +29,8 @@
   </form>
   {% else if nic.soft_roce %}
   <h2>Enable Soft-RoCE</h2>
-  <form class="inline" hx-post="/settings/rxe" hx-target="#nic-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/settings/rxe" hx-target="#nic-detail-content" hx-swap="outerHTML"
+        hx-confirm="Enable Soft-RoCE (rxe) on {{ nic.netdev }}?">
     <input type="hidden" name="netdev" value="{{ nic.netdev }}">
     <button>Enable Soft-RoCE</button>
   </form>

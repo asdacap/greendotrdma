@@ -31,8 +31,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>New iSCSI export</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>New iSCSI export</button>
+  <dialog>
+  <article>
+  <header>New iSCSI export</header>
   <form class="card" hx-post="/iscsi/create" hx-target="#iscsi-content" hx-swap="outerHTML">
     <label>Name <input name="name" placeholder="tape" required></label>
     <label>Block device
@@ -59,7 +61,11 @@
     <label>Allowed initiator IQNs (one per line, empty = allow any host)
       <textarea name="initiators" rows="3" placeholder="iqn.1993-08.org.debian:01:..."></textarea>
     </label>
-    <button type="submit">Create export</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create export</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 </div>

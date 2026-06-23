@@ -22,7 +22,8 @@
   </table>
 
   <h2>Resize</h2>
-  <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#zvol-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#zvol-detail-content" hx-swap="outerHTML"
+        hx-confirm="Resize {{ zvol.name }} to the new size?">
     <input type="hidden" name="dataset" value="{{ zvol.name }}">
     <input name="size" size="5" placeholder="new" required>
     <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
@@ -30,8 +31,9 @@
   </form>
 
   <h2>Delete</h2>
-  <form class="inline" hx-post="/zfs/zvol/delete"
-        hx-confirm="Delete {{ zvol.name }}? This destroys the volume's data.">
+  <form class="inline" hx-post="/zfs/zvol/delete" hx-target="#zvol-detail-content" hx-swap="outerHTML"
+        hx-confirm="Delete {{ zvol.name }}? This destroys the volume's data."
+        data-confirm-path="{{ zvol.name }}">
     <input type="hidden" name="dataset" value="{{ zvol.name }}">
     <button class="danger">Delete</button>
   </form>
