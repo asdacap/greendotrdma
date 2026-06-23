@@ -17,10 +17,10 @@ use crate::helper_client::HelperClient;
 use crate::state::{IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
-    NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec,
+    NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn,
     NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request, Transport,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
 
 /// greendot's NFS `fsid`s are offset into a reserved high range so they don't
@@ -33,17 +33,45 @@ pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
 /// banner and dots can link to it (`/tasks/{id}`). Empty when none has run.
 pub const RECONCILE_TASK_KEY: &str = "reconcile_task_id";
 
-const PORT_RDMA: u16 = 1;
-const PORT_TCP: u16 = 2;
-const PORT_LOOP: u16 = 3;
 const TRSVCID: u16 = 4420;
 
-/// Predicate over an NVMe-oF export (which transport it wants).
-type Wants = fn(&NvmeExport) -> bool;
+/// The IPs an export should listen on: its pinned interfaces resolved to their
+/// current IPs, or `default` when it pins none (the unchanged behavior). A
+/// selector that resolves to no current IP — link down, no DHCP lease yet, or an
+/// unknown scheme — contributes nothing, so the export simply isn't served there
+/// until an IP appears.
+pub(crate) fn listen_addrs(
+    interfaces: &[String],
+    default: IpAddr,
+    pci_addrs: &HashMap<String, Vec<IpAddr>>,
+) -> Vec<IpAddr> {
+    if interfaces.is_empty() {
+        return vec![default];
+    }
+    let mut addrs: Vec<IpAddr> = interfaces
+        .iter()
+        .filter_map(|s| crate::state::parse_listen_iface(s))
+        .filter_map(|pci| pci_addrs.get(&pci.to_string()))
+        .flatten()
+        .copied()
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
 
-/// Renders the desired nvmet state from the enabled NVMe-oF exports.
-pub fn render_nvmet(nvme: &[NvmeExport], listen: IpAddr) -> NvmetDesired {
-    let enabled = || nvme.iter().filter(|e| e.enabled);
+/// Renders the desired nvmet state from the enabled NVMe-oF exports. Each export
+/// listens on its pinned interfaces' current IPs (resolved via `pci_addrs`), or
+/// `default_listen` when it pins none.
+pub fn render_nvmet(
+    nvme: &[NvmeExport],
+    default_listen: IpAddr,
+    pci_addrs: &HashMap<String, Vec<IpAddr>>,
+) -> NvmetDesired {
+    let enabled = || {
+        nvme.iter()
+            .filter(|e| e.enabled && greendot_proto::DevicePath::new(&e.device_path).is_ok())
+    };
     let subsystems: Vec<NvmetSubsysSpec> = enabled()
         .filter_map(|e| {
             Some(NvmetSubsysSpec {
@@ -52,7 +80,7 @@ pub fn render_nvmet(nvme: &[NvmeExport], listen: IpAddr) -> NvmetDesired {
                 allowed_hosts: e
                     .initiators
                     .iter()
-                    .filter_map(|i| greendot_proto::Nqn::new(i.clone()).ok())
+                    .filter_map(|i| Nqn::new(i.clone()).ok())
                     .collect(),
                 namespaces: vec![NvmetNsSpec {
                     nsid: 1,
@@ -62,32 +90,61 @@ pub fn render_nvmet(nvme: &[NvmeExport], listen: IpAddr) -> NvmetDesired {
         })
         .collect();
 
-    let mut ports = Vec::new();
-    let wants: [(u16, Transport, Wants); 3] = [
-        (PORT_RDMA, Transport::Rdma, |e| e.want_rdma),
-        (PORT_TCP, Transport::Tcp, |e| e.want_tcp),
-        (PORT_LOOP, Transport::Loop, |e| e.want_loop),
-    ];
-    for (id, trtype, want) in wants {
-        let subs: Vec<_> = enabled()
-            .filter(|e| want(e) && greendot_proto::DevicePath::new(&e.device_path).is_ok())
-            .map(|e| e.nqn())
-            .collect();
-        if !subs.is_empty() {
-            ports.push(NvmetPortSpec {
-                id,
-                trtype,
-                traddr: listen,
-                trsvcid: TRSVCID,
-                subsystems: subs,
-            });
+    // A single nvmet port carries one (trtype, traddr) and links many subsystems,
+    // so group exports' NQNs by the address each lands on. Loop has no address and
+    // stays one group.
+    let mut net: BTreeMap<(Transport, IpAddr), Vec<Nqn>> = BTreeMap::new();
+    let mut loop_subs: Vec<Nqn> = Vec::new();
+    for e in enabled() {
+        let addrs = listen_addrs(&e.interfaces, default_listen, pci_addrs);
+        for (want, trtype) in [(e.want_rdma, Transport::Rdma), (e.want_tcp, Transport::Tcp)] {
+            if want {
+                for a in &addrs {
+                    net.entry((trtype, *a)).or_default().push(e.nqn());
+                }
+            }
         }
+        if e.want_loop {
+            loop_subs.push(e.nqn());
+        }
+    }
+
+    // Deterministic port ids from the sorted groups: the web drift pre-check and
+    // the CLI apply render the same live input independently, so the ids must
+    // agree. The loop port (if any) comes last.
+    let mut ports: Vec<NvmetPortSpec> = net
+        .into_iter()
+        .map(|((trtype, traddr), subsystems)| NvmetPortSpec {
+            id: 0,
+            trtype,
+            traddr,
+            trsvcid: TRSVCID,
+            subsystems,
+        })
+        .collect();
+    if !loop_subs.is_empty() {
+        ports.push(NvmetPortSpec {
+            id: 0,
+            trtype: Transport::Loop,
+            traddr: default_listen, // ignored for loop — no address is bound
+            trsvcid: TRSVCID,
+            subsystems: loop_subs,
+        });
+    }
+    for (i, p) in ports.iter_mut().enumerate() {
+        p.id = i as u16 + 1;
     }
     NvmetDesired { subsystems, ports }
 }
 
-/// Renders the desired LIO state from the enabled iSCSI exports.
-pub fn render_lio(iscsi: &[IscsiExport], listen: IpAddr) -> LioDesired {
+/// Renders the desired LIO state from the enabled iSCSI exports. Each target's
+/// portals listen on the export's pinned interfaces' current IPs (resolved via
+/// `pci_addrs`), or `default_listen` when it pins none.
+pub fn render_lio(
+    iscsi: &[IscsiExport],
+    default_listen: IpAddr,
+    pci_addrs: &HashMap<String, Vec<IpAddr>>,
+) -> LioDesired {
     let mut backstores = Vec::new();
     let mut targets = Vec::new();
     for e in iscsi.iter().filter(|e| e.enabled) {
@@ -101,20 +158,24 @@ pub fn render_lio(iscsi: &[IscsiExport], listen: IpAddr) -> LioDesired {
             name: name.clone(),
             device_path,
         });
+        // Portals are per-target (not shared), so one iSER (3260) and/or TCP
+        // (3261, else 3260) portal per resolved address.
         let mut portals = Vec::new();
-        if e.want_rdma {
-            portals.push(LioPortalSpec {
-                addr: listen,
-                port: 3260,
-                iser: true,
-            });
-        }
-        if e.want_tcp {
-            portals.push(LioPortalSpec {
-                addr: listen,
-                port: if e.want_rdma { 3261 } else { 3260 },
-                iser: false,
-            });
+        for addr in listen_addrs(&e.interfaces, default_listen, pci_addrs) {
+            if e.want_rdma {
+                portals.push(LioPortalSpec {
+                    addr,
+                    port: 3260,
+                    iser: true,
+                });
+            }
+            if e.want_tcp {
+                portals.push(LioPortalSpec {
+                    addr,
+                    port: if e.want_rdma { 3261 } else { 3260 },
+                    iser: false,
+                });
+            }
         }
         targets.push(LioTargetSpec {
             iqn: e.iqn(),
@@ -376,8 +437,9 @@ pub async fn cli_run(cfg: &Config) -> anyhow::Result<bool> {
     let helper = HelperClient::new(cfg.helper_socket.clone());
 
     let nfs_exports = desired.nfs_exports;
-    let nvmet_desired = render_nvmet(&nvme_exports, desired.listen);
-    let lio_desired = render_lio(&iscsi_exports, desired.listen);
+    let pci_addrs = crate::actual::nic::pci_addrs();
+    let nvmet_desired = render_nvmet(&nvme_exports, desired.listen, &pci_addrs);
+    let lio_desired = render_lio(&iscsi_exports, desired.listen, &pci_addrs);
     let nfs_desired = render_nfs(&nfs_exports, NFS_RDMA_PORT);
     let nvmet_ok = nvmet_satisfied(&nvmet_desired, &crate::actual::nvmet::read(&cfg.nvmet_root));
     let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
@@ -455,19 +517,26 @@ mod tests {
             want_loop: false,
             allow_any_host: false,
             initiators: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
+            interfaces: vec![],
             last_error: None,
         }
     }
 
     #[test]
     fn renders_nvmet_subsystems_and_ports() {
-        let d = render_nvmet(&[nvme_export()], "10.0.0.5".parse().unwrap());
+        let d = render_nvmet(
+            &[nvme_export()],
+            "10.0.0.5".parse().unwrap(),
+            &HashMap::new(),
+        );
         assert_eq!(d.subsystems.len(), 1);
         assert_eq!(d.subsystems[0].nqn.as_str(), "nqn.2026-06.io.greendot:vm1");
         assert_eq!(d.subsystems[0].allowed_hosts.len(), 1);
         // rdma (port 1) + tcp (port 2), both linking the subsystem; no loop.
         let ids: Vec<u16> = d.ports.iter().map(|p| p.id).collect();
-        assert_eq!(ids, vec![PORT_RDMA, PORT_TCP]);
+        assert_eq!(ids, vec![1, 2]);
+        assert_eq!(d.ports[0].trtype, Transport::Rdma);
+        assert_eq!(d.ports[1].trtype, Transport::Tcp);
         assert!(
             d.ports
                 .iter()
@@ -478,7 +547,7 @@ mod tests {
     #[test]
     fn nvmet_satisfied_detects_match_and_drift() {
         let listen: IpAddr = "10.0.0.5".parse().unwrap();
-        let d = render_nvmet(&[nvme_export()], listen);
+        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new());
         let actual = ActualNvmet {
             subsystems: vec![Subsys {
                 nqn: "nqn.2026-06.io.greendot:vm1".into(),
@@ -528,6 +597,115 @@ mod tests {
         assert!(nvmet_satisfied(&d, &foreign));
     }
 
+    /// Two physical ports with known live IPs, for the interface-pinning tests.
+    fn pci_addrs() -> HashMap<String, Vec<IpAddr>> {
+        HashMap::from([
+            ("0000:00:10.0".to_owned(), vec!["10.0.0.1".parse().unwrap()]),
+            ("0000:00:11.0".to_owned(), vec!["10.0.0.2".parse().unwrap()]),
+        ])
+    }
+
+    #[test]
+    fn listen_addrs_resolves_pins_or_falls_back_to_default() {
+        let default: IpAddr = "0.0.0.0".parse().unwrap();
+        let pci = pci_addrs();
+        // No pins → the default (unchanged behavior).
+        assert_eq!(listen_addrs(&[], default, &pci), vec![default]);
+        // One pin → its current IP.
+        assert_eq!(
+            listen_addrs(&["pci:0000:00:10.0".into()], default, &pci),
+            vec!["10.0.0.1".parse::<IpAddr>().unwrap()]
+        );
+        // Unknown scheme / unresolvable port / malformed all contribute nothing.
+        assert!(
+            listen_addrs(
+                &[
+                    "mac:00:11:22:33:44:55".into(),
+                    "pci:0000:00:99.0".into(),
+                    "garbage".into(),
+                ],
+                default,
+                &pci,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn renders_per_interface_nvmet_ports() {
+        let default: IpAddr = "0.0.0.0".parse().unwrap();
+        let pci = pci_addrs();
+        let pin = |id: i64, name: &str, ifaces: &[&str]| NvmeExport {
+            id,
+            name: name.into(),
+            interfaces: ifaces.iter().map(|s| s.to_string()).collect(),
+            want_rdma: true,
+            want_tcp: false,
+            ..nvme_export()
+        };
+
+        // One pinned interface → a single RDMA port at the resolved IP, not 0.0.0.0.
+        let d = render_nvmet(&[pin(1, "a", &["pci:0000:00:10.0"])], default, &pci);
+        assert_eq!(d.ports.len(), 1);
+        assert_eq!(d.ports[0].trtype, Transport::Rdma);
+        assert_eq!(d.ports[0].traddr.to_string(), "10.0.0.1");
+
+        // Two exports on the same (transport, IP) share one port; the subsystem
+        // remains, even for the export whose pin can't be resolved (no port).
+        let shared = render_nvmet(
+            &[
+                pin(1, "a", &["pci:0000:00:10.0"]),
+                pin(2, "b", &["pci:0000:00:10.0"]),
+            ],
+            default,
+            &pci,
+        );
+        assert_eq!(shared.ports.len(), 1);
+        assert_eq!(shared.ports[0].subsystems.len(), 2);
+
+        // One export pinning both ports → one RDMA port per resolved IP.
+        let multi = render_nvmet(
+            &[pin(1, "a", &["pci:0000:00:10.0", "pci:0000:00:11.0"])],
+            default,
+            &pci,
+        );
+        let addrs: BTreeSet<String> = multi.ports.iter().map(|p| p.traddr.to_string()).collect();
+        assert_eq!(
+            addrs,
+            BTreeSet::from(["10.0.0.1".into(), "10.0.0.2".into()])
+        );
+
+        // An unresolvable pin yields no port but keeps the subsystem (honest "not
+        // served" rather than silently falling back to the default address).
+        let unresolved = render_nvmet(&[pin(1, "a", &["pci:0000:00:99.0"])], default, &pci);
+        assert!(unresolved.ports.is_empty());
+        assert_eq!(unresolved.subsystems.len(), 1);
+    }
+
+    #[test]
+    fn renders_per_interface_lio_portals() {
+        let default: IpAddr = "0.0.0.0".parse().unwrap();
+        let e = IscsiExport {
+            interfaces: vec!["pci:0000:00:10.0".into()],
+            want_rdma: true,
+            want_tcp: true,
+            ..iscsi_export()
+        };
+        let d = render_lio(&[e], default, &pci_addrs());
+        let portals: BTreeSet<(String, bool)> = d.targets[0]
+            .portals
+            .iter()
+            .map(|p| (fmt_addr(p.addr, p.port), p.iser))
+            .collect();
+        assert_eq!(
+            portals,
+            BTreeSet::from([
+                ("10.0.0.1:3260".to_owned(), true),
+                ("10.0.0.1:3261".to_owned(), false),
+            ])
+        );
+    }
+
     fn iscsi_export() -> IscsiExport {
         IscsiExport {
             id: 1,
@@ -539,6 +717,7 @@ mod tests {
             allow_any_host: false,
             // iSCSI initiators are IQNs, not NQNs.
             initiators: vec!["iqn.1993-08.org.debian:01:abc".into()],
+            interfaces: vec![],
             last_error: None,
         }
     }
@@ -546,7 +725,7 @@ mod tests {
     #[test]
     fn renders_and_satisfies_lio() {
         let listen: IpAddr = "10.0.0.5".parse().unwrap();
-        let d = render_lio(&[iscsi_export()], listen);
+        let d = render_lio(&[iscsi_export()], listen, &HashMap::new());
         assert_eq!(d.targets[0].iqn.as_str(), "iqn.2026-06.io.greendot:tape");
         // rdma => iser on 3260, tcp => plain on 3261
         assert_eq!(d.targets[0].portals.len(), 2);

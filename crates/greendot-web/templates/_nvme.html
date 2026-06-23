@@ -48,6 +48,15 @@
     <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> RDMA</label>
     <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>
     <label class="checkbox"><input type="checkbox" name="want_loop" value="1"> Loop (local testing)</label>
+    {% if !view.interfaces.is_empty() %}
+    <fieldset>
+      <legend>Listen interfaces (optional — empty uses the default listen address)</legend>
+      <p class="muted small">Select multiple to serve the export on several paths (multipath).</p>
+      {% for i in view.interfaces %}
+      <label class="checkbox"><input type="checkbox" name="interfaces" value="{{ i.value }}"{% if i.checked %} checked{% endif %}> {{ i.label }}</label>
+      {% endfor %}
+    </fieldset>
+    {% endif %}
     <label>Allowed initiator NQNs (one per line, empty = allow any host)
       <textarea name="initiators" rows="3" placeholder="nqn.2014-08.org.nvmexpress:..."></textarea>
     </label>

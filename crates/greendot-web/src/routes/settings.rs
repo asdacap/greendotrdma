@@ -596,7 +596,7 @@ mod tests {
         let req = auth(HttpRequest::get("/settings").body(Body::empty()).unwrap());
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Listen address"), "{body}");
+        assert!(body.contains("Default target listen address"), "{body}");
         assert!(body.contains("Network interfaces"), "{body}");
 
         // The per-NIC page renders (a graceful not-found is fine in the test env).

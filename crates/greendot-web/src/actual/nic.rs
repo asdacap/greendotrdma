@@ -7,7 +7,7 @@
 
 use super::rdma::{port_active, read_trimmed};
 use crate::helper_client::HelperClient;
-use greendot_proto::Request;
+use greendot_proto::{PciAddress, Request};
 use std::collections::HashMap;
 use std::net::IpAddr;
 use std::path::Path;
@@ -17,6 +17,10 @@ pub struct NicStatus {
     pub netdev: String,
     /// Backing RDMA device name, when one exists.
     pub rdma: Option<String>,
+    /// The PCI address of the backing physical port, when this is a physical NIC
+    /// — the stable identity used to pin an export to this port across IP churn
+    /// and NIC swaps.
+    pub pci: Option<PciAddress>,
     pub addrs: Vec<IpAddr>,
     pub kind: NicRdmaKind,
 }
@@ -83,6 +87,45 @@ fn is_ethernet(net_dir: &Path) -> bool {
         && read_trimmed(&net_dir.join("type")).as_deref() == Some("1")
 }
 
+/// PCI address from the netdev's `device` symlink, e.g. `0000:00:10.0` (a plain
+/// PCI bus address — no vendor knowledge, so the web reads it directly). Mirrors
+/// the helper's `hardware::pci_of`.
+fn pci_of(net_dir: &Path) -> Option<PciAddress> {
+    let target = std::fs::read_link(net_dir.join("device")).ok()?;
+    PciAddress::new(target.file_name()?.to_string_lossy().as_ref()).ok()
+}
+
+/// PCI address (bare, e.g. `0000:00:10.0`) → current non-loopback IPs, joining
+/// each netdev's `device` symlink with `netdev_addrs`. Pure over its inputs and
+/// helper-free, so the reconciler resolves a pinned interface to its live IP
+/// without a helper round-trip.
+pub fn pci_to_addrs(
+    net_root: &Path,
+    netdev_addrs: &HashMap<String, Vec<IpAddr>>,
+) -> HashMap<String, Vec<IpAddr>> {
+    let mut map: HashMap<String, Vec<IpAddr>> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(net_root) else {
+        return map;
+    };
+    for entry in entries.flatten() {
+        let Some(pci) = pci_of(&entry.path()) else {
+            continue;
+        };
+        let netdev = entry.file_name().to_string_lossy().into_owned();
+        if let Some(addrs) = netdev_addrs.get(&netdev) {
+            map.entry(pci.to_string())
+                .or_default()
+                .extend(addrs.iter().copied());
+        }
+    }
+    map
+}
+
+/// Live PCI address → IPs map from `/sys/class/net` and `getifaddrs`.
+pub fn pci_addrs() -> HashMap<String, Vec<IpAddr>> {
+    pci_to_addrs(Path::new("/sys/class/net"), &super::rdma::netdev_addrs())
+}
+
 /// Classify every interface under `net_root`, using `ib_root` for RDMA backing,
 /// `netdev_addrs` for the addresses column, and `roce_hw` (netdev → vendor, from
 /// the helper) to mark a plain Ethernet NIC as RoCE-capable-but-disabled. Pure
@@ -128,6 +171,7 @@ pub fn classify(
             Some(NicStatus {
                 rdma,
                 kind,
+                pci: pci_of(&net_dir),
                 addrs: netdev_addrs.get(&netdev).cloned().unwrap_or_default(),
                 netdev,
             })
@@ -319,6 +363,35 @@ mod tests {
         assert_eq!(f.kind(&nics, "ibp1s0"), NicRdmaKind::Inactive);
         assert_eq!(f.kind(&nics, "br0"), NicRdmaKind::Unsupported);
         assert_eq!(f.kind(&nics, "eth1"), NicRdmaKind::SoftRoceable);
+    }
+
+    #[test]
+    fn reads_pci_address_and_resolves_to_ips() {
+        let f = Fixture::new("pci");
+        f.netdev("ens16", "1", Some("0000:00:10.0"));
+        f.netdev("br0", "1", None); // virtual: no PCI device
+
+        // classify records the physical NIC's PCI address, none for the virtual one.
+        let nics = f.classify(&HashMap::new());
+        let pci = |netdev: &str| {
+            nics.iter()
+                .find(|n| n.netdev == netdev)
+                .unwrap()
+                .pci
+                .as_ref()
+                .map(ToString::to_string)
+        };
+        assert_eq!(pci("ens16").as_deref(), Some("0000:00:10.0"));
+        assert_eq!(pci("br0"), None);
+
+        // pci_to_addrs joins the `device` symlink with the netdev → IPs map.
+        let addrs = HashMap::from([("ens16".to_owned(), vec!["10.0.0.1".parse().unwrap()])]);
+        let map = pci_to_addrs(&f.root.join("net"), &addrs);
+        assert_eq!(
+            map.get("0000:00:10.0"),
+            Some(&vec!["10.0.0.1".parse::<IpAddr>().unwrap()])
+        );
+        assert!(!map.contains_key("br0"));
     }
 
     #[test]

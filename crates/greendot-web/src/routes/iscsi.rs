@@ -5,8 +5,8 @@
 //! democratic-csi) are surfaced read-only with an honest, observed-transport dot.
 
 use super::block_export::{
-    ClientCmd, DiagnoseView, ExportRow, dot_class, join_devices, listen_addr, reconcile_state,
-    render_diagnose,
+    ClientCmd, DiagnoseView, ExportRow, IfaceChoice, dot_class, iface_choices, join_devices,
+    listen_addr, reconcile_state, render_diagnose,
 };
 use super::{AppState, page};
 use crate::actual;
@@ -32,6 +32,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/iscsi/create", post(create))
         .route("/iscsi/{id}", get(detail_page))
         .route("/iscsi/toggle", post(toggle))
+        .route("/iscsi/interfaces", post(set_interfaces))
         .route("/iscsi/delete", post(delete))
         .route("/iscsi/{id}/diagnose", get(diagnose_page))
         .route("/partials/iscsi", get(dots_partial))
@@ -39,14 +40,14 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// Builds the client connect command(s) for an iSCSI export. Ports mirror the
 /// server side in [`crate::reconcile`]: iSER on 3260, plain TCP on 3261 when
-/// iSER is also on (else 3260). An unspecified listen address (the default —
-/// all interfaces) renders a `<server-ip>` placeholder.
-fn client_instructions(e: &crate::state::IscsiExport, listen: IpAddr) -> Vec<ClientCmd> {
-    let addr = if listen.is_unspecified() {
-        "<server-ip>".to_owned()
-    } else {
-        listen.to_string()
-    };
+/// iSER is also on (else 3260). `addrs` are the export's resolved listen IPs;
+/// the first concrete one is advertised, falling back to a `<server-ip>`
+/// placeholder when none is concrete.
+fn client_instructions(e: &crate::state::IscsiExport, addrs: &[IpAddr]) -> Vec<ClientCmd> {
+    let addr = addrs
+        .iter()
+        .find(|a| !a.is_unspecified())
+        .map_or_else(|| "<server-ip>".to_owned(), ToString::to_string);
     let iqn = e.iqn();
     let mut cmds = Vec::new();
     if e.want_rdma {
@@ -126,6 +127,8 @@ fn foreign_iscsi_rows(
 pub struct IscsiExportsView {
     pub rows: Vec<ExportRow>,
     pub devices: Vec<actual::block::AvailDevice>,
+    /// Physical ports offered in the create form's "listen interfaces" picker.
+    pub interfaces: Vec<IfaceChoice>,
     pub banner: Option<String>,
     /// The reconcile task to link from the banner (`/tasks/{id}`).
     pub banner_task_id: Option<i64>,
@@ -144,6 +147,7 @@ pub async fn gather(
     let mut view = IscsiExportsView {
         rows: vec![],
         devices: vec![],
+        interfaces: iface_choices(state, &[]).await,
         banner: None,
         banner_task_id: None,
         flash,
@@ -162,6 +166,7 @@ pub async fn gather(
     let sessions = actual::lio::sessions(&state.lio_root);
     let rdma = actual::rdma::devices();
     let listen = listen_addr(state);
+    let pci_addrs = actual::nic::pci_addrs();
     match state.db.list_iscsi_exports() {
         Ok(exports) => {
             view.rows = exports
@@ -206,7 +211,10 @@ pub async fn gather(
                         ),
                         enabled: e.enabled,
                         diagnose,
-                        client: client_instructions(e, listen),
+                        client: client_instructions(
+                            e,
+                            &crate::reconcile::listen_addrs(&e.interfaces, listen, &pci_addrs),
+                        ),
                         external: false,
                         task_id: row_task,
                     }
@@ -256,6 +264,9 @@ pub struct ExportDetailView {
     pub name: String,
     /// `None` when the export id is unknown (or belongs to a foreign export).
     pub row: Option<ExportRow>,
+    /// Physical ports for the "listen interfaces" edit form, this export's
+    /// current pins pre-checked.
+    pub interfaces: Vec<IfaceChoice>,
     pub banner: Option<String>,
     /// The reconcile task to link from the banner (`/tasks/{id}`).
     pub banner_task_id: Option<i64>,
@@ -285,12 +296,20 @@ async fn gather_detail(
     form_error: Option<String>,
     task_id: Option<i64>,
 ) -> ExportDetailView {
+    let selected = state
+        .db
+        .list_iscsi_exports()
+        .ok()
+        .and_then(|es| es.into_iter().find(|e| e.id == id))
+        .map(|e| e.interfaces)
+        .unwrap_or_default();
     let view = gather(state, flash, form_error, task_id).await;
     let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
     ExportDetailView {
         name: row
             .as_ref()
             .map_or_else(|| id.to_string(), |r| r.name.clone()),
+        interfaces: iface_choices(state, &selected).await,
         row,
         banner: view.banner,
         banner_task_id: view.banner_task_id,
@@ -389,38 +408,42 @@ async fn finish(
     })
 }
 
-#[derive(Deserialize)]
-struct CreateForm {
-    name: String,
-    device: String,
-    #[serde(default)]
-    want_rdma: Option<String>,
-    #[serde(default)]
-    want_tcp: Option<String>,
-    #[serde(default)]
-    allow_any_host: Option<String>,
-    #[serde(default)]
-    initiators: String,
-}
-
-async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
+/// Create reads the raw pair list because the "listen interfaces" picker arrives
+/// as repeated `interfaces` keys (the same pattern as the pool/VG create forms).
+async fn create(
+    State(state): State<Arc<AppState>>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
     let view_err = |msg: String| async {
         page(IscsiPartial {
             view: gather(&state, None, Some(msg), None).await,
         })
     };
-    let Ok(name) = ExportName::new(form.name.trim()) else {
+    let (mut name, mut device, mut initiators_raw) = (String::new(), String::new(), String::new());
+    let (mut want_rdma, mut want_tcp, mut allow_any_host) = (false, false, false);
+    let mut interfaces: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "name" => name = v,
+            "device" => device = v,
+            "initiators" => initiators_raw = v,
+            "want_rdma" => want_rdma = true,
+            "want_tcp" => want_tcp = true,
+            "allow_any_host" => allow_any_host = true,
+            "interfaces" => interfaces.push(v),
+            _ => {}
+        }
+    }
+    let Ok(name) = ExportName::new(name.trim()) else {
         return view_err(format!(
-            "invalid export name {:?} (lowercase letters, digits, '-', '.')",
-            form.name
+            "invalid export name {name:?} (lowercase letters, digits, '-', '.')"
         ))
         .await;
     };
-    let Ok(device) = DevicePath::new(form.device.trim()) else {
-        return view_err(format!("invalid device path {:?}", form.device)).await;
+    let Ok(device) = DevicePath::new(device.trim()) else {
+        return view_err(format!("invalid device path {device:?}")).await;
     };
-    let initiators: Vec<String> = form
-        .initiators
+    let initiators: Vec<String> = initiators_raw
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -429,17 +452,24 @@ async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>
     if let Some(bad) = initiators.iter().find(|i| Iqn::new((*i).clone()).is_err()) {
         return view_err(format!("invalid initiator name {bad:?}")).await;
     }
-    let allow_any_host = form.allow_any_host.is_some() || initiators.is_empty();
-    if !(form.want_rdma.is_some() || form.want_tcp.is_some()) {
+    if let Some(bad) = interfaces
+        .iter()
+        .find(|s| crate::state::parse_listen_iface(s).is_none())
+    {
+        return view_err(format!("invalid interface selector {bad:?}")).await;
+    }
+    let allow_any_host = allow_any_host || initiators.is_empty();
+    if !(want_rdma || want_tcp) {
         return view_err("select at least one transport".into()).await;
     }
     let new = NewIscsiExport {
         name: name.to_string(),
         device_path: device.to_string(),
-        want_rdma: form.want_rdma.is_some(),
-        want_tcp: form.want_tcp.is_some(),
+        want_rdma,
+        want_tcp,
         allow_any_host,
         initiators,
+        interfaces,
     };
     let result = match state.db.insert_iscsi_export(&new) {
         Ok(_) => reconcile_state(&state).await,
@@ -468,6 +498,42 @@ async fn toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) ->
     };
     page(IscsiDetailPartial {
         view: gather_detail(&state, form.id, flash, error, task_id).await,
+    })
+}
+
+/// Sets the export's pinned listen interfaces (repeated `interfaces` keys), then
+/// reconciles. Stays on the export's page, re-rendering its detail partial.
+async fn set_interfaces(
+    State(state): State<Arc<AppState>>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let mut id: i64 = 0;
+    let mut interfaces: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "id" => id = v.trim().parse().unwrap_or(0),
+            "interfaces" => interfaces.push(v),
+            _ => {}
+        }
+    }
+    if let Some(bad) = interfaces
+        .iter()
+        .find(|s| crate::state::parse_listen_iface(s).is_none())
+    {
+        let err = format!("invalid interface selector {bad:?}");
+        return page(IscsiDetailPartial {
+            view: gather_detail(&state, id, None, Some(err), None).await,
+        });
+    }
+    let (flash, error, task_id) = match state.db.set_iscsi_export_interfaces(id, &interfaces) {
+        Ok(()) => match reconcile_state(&state).await {
+            Ok(task_id) => (Some("listen interfaces updated".to_owned()), None, task_id),
+            Err(e) => (None, Some(format!("{e:#}")), None),
+        },
+        Err(e) => (None, Some(format!("{e:#}")), None),
+    };
+    page(IscsiDetailPartial {
+        view: gather_detail(&state, id, flash, error, task_id).await,
     })
 }
 
@@ -506,13 +572,14 @@ mod tests {
             want_tcp,
             allow_any_host: true,
             initiators: vec![],
+            interfaces: vec![],
             last_error: None,
         };
         let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 5).into();
 
         // iSER on 3260, plain TCP bumped to 3261 because iSER is also on; each is
         // a discovery + login pair against the derived IQN.
-        let iscsi = super::client_instructions(&export(true, true), addr);
+        let iscsi = super::client_instructions(&export(true, true), &[addr]);
         assert_eq!(iscsi.len(), 2);
         assert!(
             iscsi[0].cmd.contains("modprobe ib_iser"),
@@ -535,7 +602,7 @@ mod tests {
             iscsi[1].cmd
         );
         // TCP-only keeps the standard 3260 port.
-        let tcp_only = super::client_instructions(&export(false, true), addr);
+        let tcp_only = super::client_instructions(&export(false, true), &[addr]);
         assert_eq!(tcp_only.len(), 1);
         assert!(
             tcp_only[0].cmd.contains("-p 10.0.0.5:3260 --login"),

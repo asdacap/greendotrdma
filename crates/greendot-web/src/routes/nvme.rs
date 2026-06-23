@@ -5,8 +5,8 @@
 //! read-only with an honest, observed-transport dot.
 
 use super::block_export::{
-    ClientCmd, DiagnoseView, ExportRow, dot_class, join_devices, listen_addr, reconcile_state,
-    render_diagnose,
+    ClientCmd, DiagnoseView, ExportRow, IfaceChoice, dot_class, iface_choices, join_devices,
+    listen_addr, reconcile_state, render_diagnose,
 };
 use super::{AppState, page};
 use crate::actual;
@@ -32,6 +32,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/nvme/create", post(create))
         .route("/nvme/{id}", get(detail_page))
         .route("/nvme/toggle", post(toggle))
+        .route("/nvme/interfaces", post(set_interfaces))
         .route("/nvme/delete", post(delete))
         .route("/nvme/{id}/diagnose", get(diagnose_page))
         .route("/partials/nvme", get(dots_partial))
@@ -39,14 +40,15 @@ pub fn router() -> Router<Arc<AppState>> {
 
 /// Builds the per-transport `nvme connect` command(s) for an export. Ports
 /// mirror the server side in [`crate::reconcile`] (`TRSVCID` 4420); the `loop`
-/// transport is local-only testing and is omitted. An unspecified listen
-/// address (the default — all interfaces) renders a `<server-ip>` placeholder.
-fn client_instructions(e: &crate::state::NvmeExport, listen: IpAddr) -> Vec<ClientCmd> {
-    let addr = if listen.is_unspecified() {
-        "<server-ip>".to_owned()
-    } else {
-        listen.to_string()
-    };
+/// transport is local-only testing and is omitted. `addrs` are the export's
+/// resolved listen IPs; the first concrete one is advertised, falling back to a
+/// `<server-ip>` placeholder when none is concrete (unspecified default, or a
+/// pinned interface with no current IP).
+fn client_instructions(e: &crate::state::NvmeExport, addrs: &[IpAddr]) -> Vec<ClientCmd> {
+    let addr = addrs
+        .iter()
+        .find(|a| !a.is_unspecified())
+        .map_or_else(|| "<server-ip>".to_owned(), ToString::to_string);
     let nqn = e.nqn();
     // Each transport needs its own fabrics module loaded first, or the connect
     // fails with "/dev/nvme-fabrics: No such file or directory".
@@ -118,6 +120,8 @@ fn foreign_nvme_rows(
 pub struct NvmeExportsView {
     pub rows: Vec<ExportRow>,
     pub devices: Vec<actual::block::AvailDevice>,
+    /// Physical ports offered in the create form's "listen interfaces" picker.
+    pub interfaces: Vec<IfaceChoice>,
     pub banner: Option<String>,
     /// The reconcile task to link from the banner (`/tasks/{id}`).
     pub banner_task_id: Option<i64>,
@@ -136,6 +140,7 @@ pub async fn gather(
     let mut view = NvmeExportsView {
         rows: vec![],
         devices: vec![],
+        interfaces: iface_choices(state, &[]).await,
         banner: None,
         banner_task_id: None,
         flash,
@@ -153,6 +158,7 @@ pub async fn gather(
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let rdma = actual::rdma::devices();
     let listen = listen_addr(state);
+    let pci_addrs = actual::nic::pci_addrs();
     match state.db.list_nvme_exports() {
         Ok(exports) => {
             view.rows = exports
@@ -195,7 +201,10 @@ pub async fn gather(
                         clients: None,
                         enabled: e.enabled,
                         diagnose,
-                        client: client_instructions(e, listen),
+                        client: client_instructions(
+                            e,
+                            &crate::reconcile::listen_addrs(&e.interfaces, listen, &pci_addrs),
+                        ),
                         external: false,
                         task_id: row_task,
                     }
@@ -244,6 +253,9 @@ pub struct ExportDetailView {
     pub name: String,
     /// `None` when the export id is unknown (or belongs to a foreign export).
     pub row: Option<ExportRow>,
+    /// Physical ports for the "listen interfaces" edit form, this export's
+    /// current pins pre-checked.
+    pub interfaces: Vec<IfaceChoice>,
     pub banner: Option<String>,
     /// The reconcile task to link from the banner (`/tasks/{id}`).
     pub banner_task_id: Option<i64>,
@@ -275,12 +287,20 @@ async fn gather_detail(
     form_error: Option<String>,
     task_id: Option<i64>,
 ) -> ExportDetailView {
+    let selected = state
+        .db
+        .list_nvme_exports()
+        .ok()
+        .and_then(|es| es.into_iter().find(|e| e.id == id))
+        .map(|e| e.interfaces)
+        .unwrap_or_default();
     let view = gather(state, flash, form_error, task_id).await;
     let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
     ExportDetailView {
         name: row
             .as_ref()
             .map_or_else(|| id.to_string(), |r| r.name.clone()),
+        interfaces: iface_choices(state, &selected).await,
         row,
         banner: view.banner,
         banner_task_id: view.banner_task_id,
@@ -381,40 +401,44 @@ async fn finish(
     })
 }
 
-#[derive(Deserialize)]
-struct CreateForm {
-    name: String,
-    device: String,
-    #[serde(default)]
-    want_rdma: Option<String>,
-    #[serde(default)]
-    want_tcp: Option<String>,
-    #[serde(default)]
-    want_loop: Option<String>,
-    #[serde(default)]
-    allow_any_host: Option<String>,
-    #[serde(default)]
-    initiators: String,
-}
-
-async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
+/// Create reads the raw pair list because the "listen interfaces" picker arrives
+/// as repeated `interfaces` keys (the same pattern as the pool/VG create forms).
+async fn create(
+    State(state): State<Arc<AppState>>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
     let view_err = |msg: String| async {
         page(NvmePartial {
             view: gather(&state, None, Some(msg), None).await,
         })
     };
-    let Ok(name) = ExportName::new(form.name.trim()) else {
+    let (mut name, mut device, mut initiators_raw) = (String::new(), String::new(), String::new());
+    let (mut want_rdma, mut want_tcp, mut want_loop, mut allow_any_host) =
+        (false, false, false, false);
+    let mut interfaces: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "name" => name = v,
+            "device" => device = v,
+            "initiators" => initiators_raw = v,
+            "want_rdma" => want_rdma = true,
+            "want_tcp" => want_tcp = true,
+            "want_loop" => want_loop = true,
+            "allow_any_host" => allow_any_host = true,
+            "interfaces" => interfaces.push(v),
+            _ => {}
+        }
+    }
+    let Ok(name) = ExportName::new(name.trim()) else {
         return view_err(format!(
-            "invalid export name {:?} (lowercase letters, digits, '-', '.')",
-            form.name
+            "invalid export name {name:?} (lowercase letters, digits, '-', '.')"
         ))
         .await;
     };
-    let Ok(device) = DevicePath::new(form.device.trim()) else {
-        return view_err(format!("invalid device path {:?}", form.device)).await;
+    let Ok(device) = DevicePath::new(device.trim()) else {
+        return view_err(format!("invalid device path {device:?}")).await;
     };
-    let initiators: Vec<String> = form
-        .initiators
+    let initiators: Vec<String> = initiators_raw
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -423,18 +447,25 @@ async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>
     if let Some(bad) = initiators.iter().find(|i| Nqn::new((*i).clone()).is_err()) {
         return view_err(format!("invalid initiator name {bad:?}")).await;
     }
-    let allow_any_host = form.allow_any_host.is_some() || initiators.is_empty();
-    if !(form.want_rdma.is_some() || form.want_tcp.is_some() || form.want_loop.is_some()) {
+    if let Some(bad) = interfaces
+        .iter()
+        .find(|s| crate::state::parse_listen_iface(s).is_none())
+    {
+        return view_err(format!("invalid interface selector {bad:?}")).await;
+    }
+    let allow_any_host = allow_any_host || initiators.is_empty();
+    if !(want_rdma || want_tcp || want_loop) {
         return view_err("select at least one transport".into()).await;
     }
     let new = NewNvmeExport {
         name: name.to_string(),
         device_path: device.to_string(),
-        want_rdma: form.want_rdma.is_some(),
-        want_tcp: form.want_tcp.is_some(),
-        want_loop: form.want_loop.is_some(),
+        want_rdma,
+        want_tcp,
+        want_loop,
         allow_any_host,
         initiators,
+        interfaces,
     };
     let result = match state.db.insert_nvme_export(&new) {
         Ok(_) => reconcile_state(&state).await,
@@ -463,6 +494,42 @@ async fn toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) ->
     };
     page(NvmeDetailPartial {
         view: gather_detail(&state, form.id, flash, error, task_id).await,
+    })
+}
+
+/// Sets the export's pinned listen interfaces (repeated `interfaces` keys), then
+/// reconciles. Stays on the export's page, re-rendering its detail partial.
+async fn set_interfaces(
+    State(state): State<Arc<AppState>>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let mut id: i64 = 0;
+    let mut interfaces: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "id" => id = v.trim().parse().unwrap_or(0),
+            "interfaces" => interfaces.push(v),
+            _ => {}
+        }
+    }
+    if let Some(bad) = interfaces
+        .iter()
+        .find(|s| crate::state::parse_listen_iface(s).is_none())
+    {
+        let err = format!("invalid interface selector {bad:?}");
+        return page(NvmeDetailPartial {
+            view: gather_detail(&state, id, None, Some(err), None).await,
+        });
+    }
+    let (flash, error, task_id) = match state.db.set_nvme_export_interfaces(id, &interfaces) {
+        Ok(()) => match reconcile_state(&state).await {
+            Ok(task_id) => (Some("listen interfaces updated".to_owned()), None, task_id),
+            Err(e) => (None, Some(format!("{e:#}")), None),
+        },
+        Err(e) => (None, Some(format!("{e:#}")), None),
+    };
+    page(NvmeDetailPartial {
+        view: gather_detail(&state, id, flash, error, task_id).await,
     })
 }
 
@@ -502,6 +569,7 @@ mod tests {
             want_loop: true, // local-only — must never surface as a client command
             allow_any_host: true,
             initiators: vec![],
+            interfaces: vec![],
             last_error: None,
         };
         let addr: IpAddr = Ipv4Addr::new(10, 0, 0, 5).into();
@@ -509,7 +577,7 @@ mod tests {
         // One block per network transport (loop omitted), each with its fabrics
         // module prerequisite, the connect (derived NQN, port 4420, the concrete
         // listen address), and a disconnect hint.
-        let nvme = super::client_instructions(&export(true, true), addr);
+        let nvme = super::client_instructions(&export(true, true), &[addr]);
         assert_eq!(nvme.len(), 2);
         for (cmd, module, trtype) in [
             (&nvme[0].cmd, "nvme-rdma", "rdma"),
@@ -529,7 +597,8 @@ mod tests {
         }
 
         // An unspecified listen address renders the <server-ip> placeholder.
-        let unspec = super::client_instructions(&export(true, false), Ipv4Addr::UNSPECIFIED.into());
+        let unspec =
+            super::client_instructions(&export(true, false), &[Ipv4Addr::UNSPECIFIED.into()]);
         assert!(
             unspec[0].cmd.contains("-a <server-ip> -s 4420"),
             "{}",
@@ -612,6 +681,49 @@ mod tests {
             let req = auth(HttpRequest::get("/nvme").body(Body::empty()).unwrap());
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("No NVMe-oF exports yet"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn create_and_edit_listen_interfaces() {
+            let app = test_app();
+            let (cookie, csrf) = login(&app).await;
+            let auth = |mut req: HttpRequest<Body>| {
+                req.headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+                req.headers_mut()
+                    .insert("x-greendot-csrf", csrf.parse().unwrap());
+                req
+            };
+
+            // Create pinning a PCI-tagged interface — the selector is accepted and
+            // stored (resolution to a live IP happens at reconcile).
+            let req = auth(form_post(
+                "/nvme/create",
+                "name=vm1&device=%2Fdev%2Fzvol%2Ftank%2Fvm1&want_tcp=1&interfaces=pci%3A0000%3A00%3A10.0",
+            ));
+            let (status, _, body) = send(&app, req).await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("created export vm1"), "{body}");
+
+            // A malformed selector on the edit route is rejected.
+            let (_, _, body) = send(
+                &app,
+                auth(form_post("/nvme/interfaces", "id=1&interfaces=garbage")),
+            )
+            .await;
+            assert!(body.contains("invalid interface selector"), "{body}");
+
+            // A valid selector updates and reconciles (fake helper says Ok).
+            let (status, _, body) = send(
+                &app,
+                auth(form_post(
+                    "/nvme/interfaces",
+                    "id=1&interfaces=pci%3A0000%3A00%3A11.0",
+                )),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK);
+            assert!(body.contains("listen interfaces updated"), "{body}");
         }
 
         #[tokio::test]

@@ -35,6 +35,18 @@
   <p class="muted small">Run as root, on a client with a matching transport (an RDMA NIC for RDMA). Not persistent across reboot — add the target to <code>/etc/nvme/discovery.conf</code> and <code>systemctl enable nvmf-autoconnect</code>.</p>
   {% endif %}
 
+  {% if !view.interfaces.is_empty() %}
+  <h2>Listen interfaces</h2>
+  <form class="card" hx-post="/nvme/interfaces" hx-target="#export-detail-content" hx-swap="outerHTML">
+    <input type="hidden" name="id" value="{{ row.id }}">
+    <p class="muted small">Pin this export to specific physical ports; empty uses the default listen address. The selection follows the physical port across IP changes (DHCP) and NIC swaps. Selecting multiple serves the export on several paths (multipath).</p>
+    {% for i in view.interfaces %}
+    <label class="checkbox"><input type="checkbox" name="interfaces" value="{{ i.value }}"{% if i.checked %} checked{% endif %}> {{ i.label }}</label>
+    {% endfor %}
+    <button type="submit">Save &amp; reconcile</button>
+  </form>
+  {% endif %}
+
   <h2>Manage</h2>
   {% if row.diagnose %}<p><a role="button" href="/nvme/{{ row.id }}/diagnose">Diagnose</a></p>{% endif %}
   <form class="inline" hx-post="/nvme/toggle" hx-target="#export-detail-content" hx-swap="outerHTML">

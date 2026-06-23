@@ -38,11 +38,12 @@
     {% endif %}
   {% endif %}
 
-  <h2>Target listen address</h2>
+  <h2>Default target listen address</h2>
   <form class="card" hx-post="/settings/listen" hx-target="#settings-content" hx-swap="outerHTML">
-    <label>Listen address (NVMe-oF and iSCSI targets bind here)
+    <label>Default listen address — NVMe-oF and iSCSI targets bind here unless an export pins specific interfaces
       <input name="listen_addr" value="{{ view.listen_addr }}">
     </label>
+    <p class="muted small">Default <code>0.0.0.0</code> serves on all interfaces. Pin individual exports to physical ports on their own pages.</p>
     <button type="submit">Save &amp; reconcile</button>
   </form>
 

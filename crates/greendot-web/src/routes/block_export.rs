@@ -39,12 +39,13 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
         .unwrap_or(Ipv4Addr::UNSPECIFIED.into());
 
     let nfs_exports = state.db.list_nfs_exports()?;
+    let pci_addrs = actual::nic::pci_addrs();
     let nvmet_ok = reconcile::nvmet_satisfied(
-        &reconcile::render_nvmet(&nvme_exports, listen),
+        &reconcile::render_nvmet(&nvme_exports, listen, &pci_addrs),
         &actual::nvmet::read(&state.nvmet_root),
     );
     let lio_ok = reconcile::lio_satisfied(
-        &reconcile::render_lio(&iscsi_exports, listen),
+        &reconcile::render_lio(&iscsi_exports, listen, &pci_addrs),
         &actual::lio::read(&state.lio_root),
     );
     // NFS actual state needs root, so this pre-check makes one helper round-trip
@@ -158,7 +159,8 @@ pub struct ClientCmd {
     pub cmd: String,
 }
 
-/// The configured listen address, or the unspecified address (all interfaces).
+/// The configured default listen address, or the unspecified address (all
+/// interfaces). Exports that pin no interface bind here.
 pub fn listen_addr(state: &AppState) -> IpAddr {
     state
         .db
@@ -167,6 +169,57 @@ pub fn listen_addr(state: &AppState) -> IpAddr {
         .flatten()
         .and_then(|s| s.parse().ok())
         .unwrap_or(Ipv4Addr::UNSPECIFIED.into())
+}
+
+/// One selectable physical port in an export's "listen interfaces" picker. The
+/// `value` is the stored scheme-tagged selector (`pci:0000:00:10.0`); the label
+/// shows the friendly netdev/IP/RDMA status so the user can pick by sight.
+pub struct IfaceChoice {
+    pub value: String,
+    pub label: String,
+    pub checked: bool,
+}
+
+/// A short, vendor-free RDMA-readiness label for the interface picker.
+fn iface_status(kind: &actual::nic::NicRdmaKind) -> &'static str {
+    use actual::nic::NicRdmaKind::*;
+    match kind {
+        Active => "RDMA active",
+        Inactive => "RDMA down",
+        CapableDisabled { .. } => "RoCE off",
+        SoftRoceable => "no RDMA",
+        Unsupported => "other",
+    }
+}
+
+/// The physical NICs an export can be pinned to, with the ones in `selected`
+/// pre-checked. Only interfaces with a PCI address (physical ports) are offered;
+/// the PCI address is the stable identity that survives IP churn and NIC swaps.
+pub async fn iface_choices(state: &AppState, selected: &[String]) -> Vec<IfaceChoice> {
+    let sel: std::collections::HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let mut choices: Vec<IfaceChoice> = actual::nic::interfaces(&state.helper)
+        .await
+        .into_iter()
+        .filter_map(|n| {
+            let value = format!("pci:{}", n.pci?);
+            let addrs = if n.addrs.is_empty() {
+                "no IP".to_owned()
+            } else {
+                n.addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            Some(IfaceChoice {
+                checked: sel.contains(value.as_str()),
+                label: format!("{} — {} ({})", n.netdev, addrs, iface_status(&n.kind)),
+                value,
+            })
+        })
+        .collect();
+    choices.sort_by(|a, b| a.label.cmp(&b.label));
+    choices
 }
 
 /// CSS class for a dot state. The disabled (gray) case is handled by the caller.

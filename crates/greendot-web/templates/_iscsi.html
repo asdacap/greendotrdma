@@ -47,6 +47,15 @@
     </label>
     <label class="checkbox"><input type="checkbox" name="want_rdma" value="1" checked> iSER (RDMA; plain TCP moves to port 3261)</label>
     <label class="checkbox"><input type="checkbox" name="want_tcp" value="1" checked> TCP fallback</label>
+    {% if !view.interfaces.is_empty() %}
+    <fieldset>
+      <legend>Listen interfaces (optional — empty uses the default listen address)</legend>
+      <p class="muted small">Select multiple to serve the export on several paths (multipath).</p>
+      {% for i in view.interfaces %}
+      <label class="checkbox"><input type="checkbox" name="interfaces" value="{{ i.value }}"{% if i.checked %} checked{% endif %}> {{ i.label }}</label>
+      {% endfor %}
+    </fieldset>
+    {% endif %}
     <label>Allowed initiator IQNs (one per line, empty = allow any host)
       <textarea name="initiators" rows="3" placeholder="iqn.1993-08.org.debian:01:..."></textarea>
     </label>

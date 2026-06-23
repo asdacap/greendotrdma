@@ -4,7 +4,7 @@
 //! sync.
 
 use anyhow::{Context, Result};
-use greendot_proto::{Iqn, Nqn};
+use greendot_proto::{Iqn, Nqn, PciAddress};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -34,6 +34,10 @@ pub struct NvmeExport {
     pub allow_any_host: bool,
     #[serde(default)]
     pub initiators: Vec<String>,
+    /// Physical ports this export listens on, as scheme-tagged selectors
+    /// (`pci:0000:00:10.0`); empty means "the global default listen address".
+    #[serde(default)]
+    pub interfaces: Vec<String>,
     #[serde(default)]
     pub last_error: Option<String>,
 }
@@ -60,6 +64,10 @@ pub struct IscsiExport {
     pub allow_any_host: bool,
     #[serde(default)]
     pub initiators: Vec<String>,
+    /// Physical ports this export listens on, as scheme-tagged selectors
+    /// (`pci:0000:00:10.0`); empty means "the global default listen address".
+    #[serde(default)]
+    pub interfaces: Vec<String>,
     #[serde(default)]
     pub last_error: Option<String>,
 }
@@ -79,6 +87,7 @@ pub struct NewNvmeExport {
     pub want_loop: bool,
     pub allow_any_host: bool,
     pub initiators: Vec<String>,
+    pub interfaces: Vec<String>,
 }
 
 pub struct NewIscsiExport {
@@ -88,6 +97,16 @@ pub struct NewIscsiExport {
     pub want_tcp: bool,
     pub allow_any_host: bool,
     pub initiators: Vec<String>,
+    pub interfaces: Vec<String>,
+}
+
+/// Parses a stored listen-interface selector into the physical port it pins.
+/// The scheme prefix tags the identifier type so future schemes (`mac:`,
+/// `name:`) can be added without breaking saved configs; unknown schemes (and
+/// malformed addresses) parse to `None` and are skipped — graceful forward-compat.
+pub fn parse_listen_iface(s: &str) -> Option<PciAddress> {
+    s.strip_prefix("pci:")
+        .and_then(|addr| PciAddress::new(addr).ok())
 }
 
 /// A file-level NFS export of an absolute directory path, served over RDMA.
@@ -310,6 +329,7 @@ impl Db {
             want_loop: new.want_loop,
             allow_any_host: new.allow_any_host,
             initiators: dedup_preserve(&new.initiators),
+            interfaces: dedup_preserve(&new.interfaces),
             last_error: None,
         });
         self.persist(&doc)?;
@@ -341,6 +361,14 @@ impl Db {
         self.persist(&doc)
     }
 
+    pub fn set_nvme_export_interfaces(&self, id: i64, interfaces: &[String]) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.nvme_export.iter_mut().find(|e| e.id == id) {
+            e.interfaces = dedup_preserve(interfaces);
+        }
+        self.persist(&doc)
+    }
+
     pub fn delete_nvme_export(&self, id: i64) -> Result<()> {
         let mut doc = self.config.lock().unwrap();
         doc.nvme_export.retain(|e| e.id != id);
@@ -363,6 +391,7 @@ impl Db {
             want_tcp: new.want_tcp,
             allow_any_host: new.allow_any_host,
             initiators: dedup_preserve(&new.initiators),
+            interfaces: dedup_preserve(&new.interfaces),
             last_error: None,
         });
         self.persist(&doc)?;
@@ -390,6 +419,14 @@ impl Db {
         let mut doc = self.config.lock().unwrap();
         if let Some(e) = doc.iscsi_export.iter_mut().find(|e| e.id == id) {
             e.last_error = error.map(str::to_owned);
+        }
+        self.persist(&doc)
+    }
+
+    pub fn set_iscsi_export_interfaces(&self, id: i64, interfaces: &[String]) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if let Some(e) = doc.iscsi_export.iter_mut().find(|e| e.id == id) {
+            e.interfaces = dedup_preserve(interfaces);
         }
         self.persist(&doc)
     }
@@ -682,6 +719,7 @@ fn migrate_legacy_exports(doc: &mut ConfigDoc) {
                 want_tcp: e.want_tcp,
                 allow_any_host: e.allow_any_host,
                 initiators: e.initiators,
+                interfaces: Vec::new(),
                 last_error: e.last_error,
             });
         } else {
@@ -695,6 +733,7 @@ fn migrate_legacy_exports(doc: &mut ConfigDoc) {
                 want_loop: e.want_loop,
                 allow_any_host: e.allow_any_host,
                 initiators: e.initiators,
+                interfaces: Vec::new(),
                 last_error: e.last_error,
             });
         }
@@ -736,7 +775,22 @@ mod tests {
             want_loop: false,
             allow_any_host: false,
             initiators: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
+            interfaces: vec![],
         }
+    }
+
+    #[test]
+    fn parse_listen_iface_accepts_pci_scheme_only() {
+        // A `pci:`-tagged valid address parses to its bare PCI address.
+        assert_eq!(
+            parse_listen_iface("pci:0000:00:10.0").map(|p| p.to_string()),
+            Some("0000:00:10.0".to_owned())
+        );
+        // An unknown scheme, a missing scheme, and a malformed address all reject
+        // (so future schemes stay forward-compatible and bad input is skipped).
+        assert!(parse_listen_iface("mac:00:11:22:33:44:55").is_none());
+        assert!(parse_listen_iface("0000:00:10.0").is_none());
+        assert!(parse_listen_iface("pci:nonsense").is_none());
     }
 
     #[test]
@@ -853,6 +907,7 @@ mod tests {
             want_tcp: false,
             allow_any_host: false,
             initiators: vec!["iqn.1993-08.org.debian:01:abc".into()],
+            interfaces: vec![],
         };
         let id = db.insert_iscsi_export(&new("tape")).unwrap();
         assert!(

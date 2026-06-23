@@ -623,6 +623,7 @@ mod tests {
             want_loop: false,
             allow_any_host: true,
             initiators: vec![],
+            interfaces: vec![],
             last_error: last_error.map(Into::into),
         }
     }
@@ -637,6 +638,7 @@ mod tests {
             want_tcp,
             allow_any_host: true,
             initiators: vec![],
+            interfaces: vec![],
             last_error: last_error.map(Into::into),
         }
     }
@@ -1151,6 +1153,7 @@ mod tests {
         let nic = |rdma: Option<&str>, kind: NicRdmaKind, addrs: &[&str]| NicStatus {
             netdev: "ens16v0".into(),
             rdma: rdma.map(Into::into),
+            pci: None,
             addrs: addrs.iter().map(|a| a.parse().unwrap()).collect(),
             kind,
         };
