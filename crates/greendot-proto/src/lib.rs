@@ -124,6 +124,20 @@ pub enum Request {
         device: DevicePath,
     },
 
+    // SMART (privileged reads via smartctl, which needs root). The full report
+    // is a plain task the web collects (not recorded on the Tasks page); the
+    // batch health read is a special arm that merges per-device JSON, like
+    // RoceCapableNics. The web prepends `/dev/` to the validated bare name.
+    /// Full `smartctl -x` dump for one device, collected verbatim by the web.
+    SmartReport {
+        device: BlockDev,
+    },
+    /// Per-device SMART health + temperature for a batch of devices, streamed as
+    /// `[{device, passed, temp_c}]` JSON — the dots/temps on the list.
+    SmartHealth {
+        devices: Vec<BlockDev>,
+    },
+
     // LVM. Reads need root, so they go through the helper too (LvmReport),
     // unlike ZFS reads which the web service runs unprivileged.
     LvmReport {
@@ -345,6 +359,10 @@ mod tests {
     #[case::pool_add(Request::PoolDeviceAdd {
         pool: PoolName::new("tank").unwrap(),
         device: DevicePath::new("/dev/sdd").unwrap(),
+    })]
+    #[case::smart_report(Request::SmartReport { device: BlockDev::new("sda").unwrap() })]
+    #[case::smart_health(Request::SmartHealth {
+        devices: vec![BlockDev::new("sda").unwrap(), BlockDev::new("nvme0n1").unwrap()],
     })]
     #[case::lvm_report(Request::LvmReport { what: LvmReport::Lvs })]
     #[case::vg_create(Request::VgCreate {

@@ -3,6 +3,7 @@
 //! exact numbers.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pool {
@@ -129,6 +130,37 @@ pub fn parse_snapshot_list(out: &str) -> Result<Vec<Snapshot>> {
         .collect()
 }
 
+/// Device path → pool name, from `zpool list -vHP`. Pool header rows are not
+/// indented (their first column is the pool name); vdev/device rows are indented.
+/// Any indented row whose first token is a `/dev/...` path is a leaf device of
+/// the current pool. Container rows (`mirror-0`, `raidz1-0`, `logs`, `cache`, …)
+/// have a keyword first token and are skipped.
+///
+/// v1 limitation: members are matched verbatim against the lsblk `/dev/<name>`
+/// paths, so a pool created against a `/dev/disk/by-id/...` path is recorded here
+/// but won't match a bare device row — lsblk's `zfs_member` remains the fallback.
+pub fn parse_pool_members(out: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    let mut current_pool: Option<String> = None;
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let indented = line.starts_with([' ', '\t']);
+        let Some(first) = line.split_whitespace().next() else {
+            continue;
+        };
+        if !indented {
+            current_pool = Some(first.to_string());
+        } else if first.starts_with('/')
+            && let Some(pool) = &current_pool
+        {
+            map.insert(first.to_string(), pool.clone());
+        }
+    }
+    map
+}
+
 /// Runs `argv`, returning `None` when the binary isn't installed — a missing
 /// `zpool`/`zfs` means ZFS is absent on this host, which callers surface as a
 /// distinct "not installed" state rather than an error.
@@ -162,6 +194,20 @@ pub async fn pools() -> Result<Option<Vec<Pool>>> {
     .await?
     .map(|out| parse_zpool_list(&out))
     .transpose()
+}
+
+/// `zpool list -vHP` → device path → pool name. `None` when zpool isn't
+/// installed (ZFS absent), like [`pools`].
+pub async fn pool_members() -> Result<Option<HashMap<String, String>>> {
+    Ok(run(&[
+        "zpool",
+        "list",
+        "-vHP",
+        "-o",
+        "name,size,alloc,free,frag,health",
+    ])
+    .await?
+    .map(|out| parse_pool_members(&out)))
 }
 
 pub async fn datasets() -> Result<Option<Vec<Dataset>>> {
@@ -230,6 +276,29 @@ mod tests {
             "non-numeric size must error"
         );
         assert_eq!(parse_zpool_list("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parses_pool_members_skipping_containers_and_unresolved_byid() {
+        // `zpool list -vHP`: pool headers are flush-left; vdev containers and
+        // leaf devices are tab-indented. Only `/dev/...` leaves map to a pool.
+        let out = "tank\t3985729650688\t1099511627776\t2886218022912\t4\tONLINE\n\
+                   \tmirror-0\t3985729650688\t1099511627776\t2886218022912\t-\t-\n\
+                   \t/dev/sdb\t-\t-\t-\t-\t-\n\
+                   \t/dev/sdc\t-\t-\t-\t-\t-\n\
+                   backup\t998579896320\t499289948160\t499289948160\t-\tONLINE\n\
+                   \t/dev/disk/by-id/wwn-0x5000abc-part1\t-\t-\t-\t-\t-\n";
+        let map = parse_pool_members(out);
+        assert_eq!(map.get("/dev/sdb"), Some(&"tank".to_string()));
+        assert_eq!(map.get("/dev/sdc"), Some(&"tank".to_string()));
+        // The mirror-0 container row is not a device → not mapped.
+        assert!(!map.contains_key("mirror-0"));
+        // A by-id leaf is recorded verbatim (won't match a bare /dev/sdX lookup).
+        assert_eq!(
+            map.get("/dev/disk/by-id/wwn-0x5000abc-part1"),
+            Some(&"backup".to_string())
+        );
+        assert!(parse_pool_members("").is_empty());
     }
 
     #[test]

@@ -198,8 +198,39 @@ pub fn render_prometheus(samples: &[PromSample]) -> String {
     out
 }
 
+/// How a chart's peak value is labelled. Series are rates/sizes (bytes),
+/// temperatures (°C), or saturation (%).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartUnit {
+    Bytes,
+    Celsius,
+    Percent,
+}
+
+impl ChartUnit {
+    /// Picks the unit from a metrics series key (`disk:sda:read_bps`,
+    /// `disk:sda:temp_c`, `pool:tank:used_percent`, …).
+    pub fn for_series(series: &str) -> ChartUnit {
+        if series.ends_with(":temp_c") {
+            ChartUnit::Celsius
+        } else if series.ends_with("_percent") {
+            ChartUnit::Percent
+        } else {
+            ChartUnit::Bytes
+        }
+    }
+
+    fn label(self, max: f64) -> String {
+        match self {
+            ChartUnit::Bytes => crate::fmt::human_bytes(max as u64),
+            ChartUnit::Celsius => format!("{max:.0} °C"),
+            ChartUnit::Percent => format!("{max:.0}%"),
+        }
+    }
+}
+
 /// A simple line chart as inline SVG; pure string building, no JS.
-pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32) -> String {
+pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32, unit: ChartUnit) -> String {
     if points.len() < 2 {
         return format!(
             r#"<svg class="chart" viewBox="0 0 {width} {height}"><text x="4" y="{}" class="chart-label">no data yet</text></svg>"#,
@@ -224,7 +255,7 @@ pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32) -> String {
     format!(
         r#"<svg class="chart" viewBox="0 0 {width} {height}"><polyline fill="none" points="{}"/><text x="4" y="12" class="chart-label">max {}</text></svg>"#,
         coords.join(" "),
-        crate::fmt::human_bytes(max as u64),
+        unit.label(max),
     )
 }
 
@@ -303,9 +334,19 @@ mod tests {
             "long ranges read the hourly table"
         );
 
-        let svg = chart_svg(&ring, 600, 120);
+        let svg = chart_svg(&ring, 600, 120, ChartUnit::Bytes);
         assert!(svg.contains("<polyline"), "{svg}");
         assert!(svg.contains("max 1000 B"), "{svg}");
-        assert!(chart_svg(&[], 600, 120).contains("no data yet"));
+        assert!(chart_svg(&[], 600, 120, ChartUnit::Bytes).contains("no data yet"));
+        // Non-byte units label the peak appropriately.
+        assert!(
+            chart_svg(&[(0, 30.0), (5, 38.0)], 600, 120, ChartUnit::Celsius).contains("max 38 °C")
+        );
+        assert_eq!(ChartUnit::for_series("disk:sda:temp_c"), ChartUnit::Celsius);
+        assert_eq!(
+            ChartUnit::for_series("pool:tank:used_percent"),
+            ChartUnit::Percent
+        );
+        assert_eq!(ChartUnit::for_series("disk:sda:read_bps"), ChartUnit::Bytes);
     }
 }

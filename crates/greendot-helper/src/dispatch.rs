@@ -3,8 +3,8 @@
 //! are never recorded as tasks (auth would store the password).
 
 use crate::cmd::TaskSpec;
-use crate::{fs, install, lio, lvm, modules, pam, partition, zfs};
-use greendot_proto::{NetdevName, NfsDesired, NvmetDesired, Request, Response};
+use crate::{fs, install, lio, lvm, modules, pam, partition, smart, zfs};
+use greendot_proto::{BlockDev, NetdevName, NfsDesired, NvmetDesired, Request, Response};
 use std::sync::Mutex;
 
 pub struct Ctx {
@@ -34,6 +34,9 @@ pub enum Dispatch {
     /// Privileged read of per-NIC RDMA advisories (vendor-specific diagnostic
     /// text), streamed as JSON like `RoceCapableNics`.
     NicRdmaAdvice,
+    /// Privileged batch read of per-device SMART health+temp, streamed as JSON
+    /// like `RoceCapableNics` (runs `smartctl` once per device and merges).
+    SmartHealth(Vec<BlockDev>),
     /// Turn on hardware RoCE for a NIC: vendor-detect, probe, then set+reload —
     /// the multi-step vendor-specific flow streamed as one task.
     EnableRoce(NetdevName),
@@ -142,6 +145,9 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::PoolDeviceAdd { pool, device } => {
             Dispatch::Task(zfs::pool_device_add(&pool, &device))
         }
+
+        Request::SmartReport { device } => Dispatch::Task(smart::report(&device)),
+        Request::SmartHealth { devices } => Dispatch::SmartHealth(devices),
 
         Request::LvmReport { what } => Dispatch::Task(lvm::report(what)),
         Request::VgCreate { name, devices } => Dispatch::Task(lvm::vg_create(&name, &devices)),
@@ -270,6 +276,9 @@ mod tests {
     #[case::pool_device_add(
         Request::PoolDeviceAdd { pool: PoolName::new("tank").unwrap(), device: dev("/dev/sdd") },
         zfs::pool_device_add(&PoolName::new("tank").unwrap(), &dev("/dev/sdd")))]
+    #[case::smart_report(
+        Request::SmartReport { device: disk("sda") },
+        smart::report(&disk("sda")))]
     #[case::lio_apply(
         Request::LioApply { desired: LioDesired::default() },
         lio::apply_spec(&LioDesired::default()))]
@@ -407,6 +416,12 @@ mod tests {
         assert!(matches!(
             plan(&ctx, Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
             Dispatch::EnableRoce(nd) if nd.as_str() == "ens16"
+        ));
+        // SMART health is a batch read routed to its own arm (one TaskSpec can't
+        // express "run smartctl per device and merge").
+        assert!(matches!(
+            plan(&ctx, Request::SmartHealth { devices: vec![disk("sda")] }),
+            Dispatch::SmartHealth(d) if d.len() == 1 && d[0].as_str() == "sda"
         ));
     }
 }

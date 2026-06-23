@@ -9,7 +9,7 @@
   {% else %}
   {% if let Some(part) = view.part %}
   <table>
-    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th></tr></thead>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th>Used for</th></tr></thead>
     <tbody>
       <tr>
         <td>{{ part.name }}</td>
@@ -17,9 +17,14 @@
         <td>{{ part.fstype }}</td>
         <td>{{ part.label }}</td>
         <td>{{ part.mountpoint }}</td>
+        <td>{{ part.usage }}</td>
       </tr>
     </tbody>
   </table>
+
+  {% if part.poolable %}
+  <p><a href="/zfs/pool/create?device={{ part.device_path }}">Create a ZFS pool with this partition →</a></p>
+  {% endif %}
 
   {% if let Some(number) = part.number %}
   <h2>Shrink</h2>

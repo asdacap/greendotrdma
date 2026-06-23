@@ -8,24 +8,39 @@
   <p class="empty">Disk /dev/{{ view.name }} not found.</p>
   {% else %}
   {% if let Some(disk) = view.disk %}
+  <h2><span class="dot {{ disk.dot_class }}" title="SMART status"></span> /dev/{{ view.name }}</h2>
   <table>
-    <thead><tr><th>Size</th><th>Model</th><th>Serial</th><th>Free</th></tr></thead>
+    <thead><tr><th>Size</th><th>Model</th><th>Serial</th><th>Temp</th><th>Used for</th><th>Free</th></tr></thead>
     <tbody>
       <tr>
         <td>{{ disk.size }}</td>
         <td>{{ disk.model }}</td>
         <td>{{ disk.serial }}</td>
+        <td>{{ disk.temp }}</td>
+        <td>{{ disk.usage }}</td>
         <td>{% if disk.no_space %}No space left{% else %}{{ disk.free }} (approx.){% endif %}</td>
       </tr>
     </tbody>
   </table>
+  {% if disk.poolable %}
+  <p><a href="/zfs/pool/create?device={{ disk.device_path }}">Create a ZFS pool with this whole disk →</a></p>
+  {% endif %}
+
+  <h2>Traffic</h2>
+  <div class="chartgrid">
+    <div class="chartcard"><div class="chart-title">Read</div>{{ view.traffic_read_svg|safe }}</div>
+    <div class="chartcard"><div class="chart-title">Write</div>{{ view.traffic_write_svg|safe }}</div>
+  </div>
+
+  <h2>Temperature</h2>
+  <div class="chartcard">{{ view.temp_svg|safe }}</div>
 
   <h2>Partitions</h2>
   {% if disk.partitions.is_empty() %}
   <p class="empty">No partitions.</p>
   {% else %}
   <table>
-    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th></th></tr></thead>
+    <thead><tr><th>Partition</th><th>Size</th><th>Filesystem</th><th>Label</th><th>Mounted</th><th>Used for</th><th></th></tr></thead>
     <tbody>
       {% for p in disk.partitions %}
       <tr>
@@ -34,6 +49,7 @@
         <td>{{ p.fstype }}</td>
         <td>{{ p.label }}</td>
         <td>{{ p.mountpoint }}</td>
+        <td>{{ p.usage }}{% if p.poolable %} · <a href="/zfs/pool/create?device={{ p.device_path }}">create pool</a>{% endif %}</td>
         <td>
           {% if let Some(number) = p.number %}
           <a href="/disks/{{ view.name }}/part/{{ number }}">Manage</a>
@@ -43,6 +59,17 @@
       {% endfor %}
     </tbody>
   </table>
+  {% endif %}
+
+  <h2>SMART report</h2>
+  {% if view.smart_installed %}
+  {% if view.smart_report.trim().is_empty() %}
+  <p class="empty">No SMART data for this device.</p>
+  {% else %}
+  <pre class="smart-report">{{ view.smart_report }}</pre>
+  {% endif %}
+  {% else %}
+  <p class="empty">smartctl is not installed — install the smartmontools package (Tasks → Install dependencies).</p>
   {% endif %}
 
   <h2>Add partition</h2>

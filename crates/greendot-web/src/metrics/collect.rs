@@ -60,6 +60,60 @@ fn collect_rdma(metrics: &Metrics, root: &Path, ts: i64) {
     }
 }
 
+/// `/sys/class/hwmon/hwmonN/temp1_input` is milli-°C → °C.
+pub fn parse_temp_millis(raw: &str) -> Option<f64> {
+    raw.trim().parse::<i64>().ok().map(|m| m as f64 / 1000.0)
+}
+
+/// `nvme0n1`-style namespace name (controller digits + `n` + namespace digits;
+/// no partition suffix). Used to find the block device behind an NVMe hwmon.
+fn is_nvme_namespace(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("nvme") else {
+        return false;
+    };
+    let mut parts = rest.splitn(2, 'n');
+    let ctrl = parts.next().unwrap_or("");
+    let ns = parts.next().unwrap_or("");
+    !ctrl.is_empty()
+        && ctrl.bytes().all(|b| b.is_ascii_digit())
+        && !ns.is_empty()
+        && ns.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The block device a hwmon entry measures: `drivetemp` (SATA/SAS) exposes it
+/// under `device/block/<sdX>`; `nvme` exposes the namespace directly under
+/// `device/<nvmeXnY>`. Pure sysfs walking — no device-vendor knowledge.
+fn hwmon_block_device(hwmon_dir: &Path) -> Option<String> {
+    let device = hwmon_dir.join("device");
+    if let Some(name) = read_dir_names(&device.join("block")).into_iter().next() {
+        return Some(name);
+    }
+    read_dir_names(&device)
+        .into_iter()
+        .find(|n| is_nvme_namespace(n))
+}
+
+/// Pushes a `disk:<dev>:temp_c` gauge for every `drivetemp`/`nvme` hwmon that
+/// resolves to a block device. Hosts without `drivetemp` simply yield no SATA
+/// temp series.
+fn collect_drive_temp(metrics: &Metrics, hwmon_root: &Path, ts: i64) {
+    for hw in read_dir_names(hwmon_root) {
+        let dir = hwmon_root.join(&hw);
+        let name = std::fs::read_to_string(dir.join("name")).unwrap_or_default();
+        if !matches!(name.trim(), "drivetemp" | "nvme") {
+            continue;
+        }
+        let Some(dev) = hwmon_block_device(&dir) else {
+            continue;
+        };
+        if let Ok(raw) = std::fs::read_to_string(dir.join("temp1_input"))
+            && let Some(celsius) = parse_temp_millis(&raw)
+        {
+            metrics.push(&format!("disk:{dev}:temp_c"), ts, celsius);
+        }
+    }
+}
+
 async fn collect_pools(metrics: &Metrics, ts: i64) {
     if let Ok(Some(pools)) = crate::actual::zfs::pools().await {
         for pool in pools {
@@ -80,6 +134,7 @@ pub async fn collector(state: std::sync::Arc<AppState>) {
         let ts = chrono::Utc::now().timestamp();
         collect_block(&state.metrics, Path::new("/sys/block"), ts);
         collect_rdma(&state.metrics, Path::new("/sys/class/infiniband"), ts);
+        collect_drive_temp(&state.metrics, Path::new("/sys/class/hwmon"), ts);
         if ts / 60 != last_minute {
             last_minute = ts / 60;
             collect_pools(&state.metrics, ts).await;
@@ -142,6 +197,50 @@ mod tests {
             vec![(105, (1024.0 * 512.0) / 5.0)]
         );
         assert_eq!(metrics.ring_series("disk:sda:write_bps"), vec![(105, 0.0)]);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[rstest]
+    #[case::celsius("38000\n", Some(38.0))]
+    #[case::fractional("45250", Some(45.25))]
+    #[case::garbage("warm", None)]
+    fn temp_millis_parsing(#[case] raw: &str, #[case] expected: Option<f64>) {
+        assert_eq!(parse_temp_millis(raw), expected);
+    }
+
+    #[test]
+    fn drive_temp_resolves_drivetemp_and_nvme_block_devices() {
+        let tmp = std::env::temp_dir().join(format!("gd-hwmon{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // SATA drive: drivetemp exposes the disk under device/block/sda.
+        let sata = tmp.join("hwmon0");
+        std::fs::create_dir_all(sata.join("device/block/sda")).unwrap();
+        std::fs::write(sata.join("name"), "drivetemp\n").unwrap();
+        std::fs::write(sata.join("temp1_input"), "38000\n").unwrap();
+        // NVMe: namespace sits directly under device/nvme0n1.
+        let nvme = tmp.join("hwmon1");
+        std::fs::create_dir_all(nvme.join("device/nvme0n1")).unwrap();
+        std::fs::write(nvme.join("name"), "nvme\n").unwrap();
+        std::fs::write(nvme.join("temp1_input"), "45000\n").unwrap();
+        // A non-disk sensor (CPU) is ignored.
+        let cpu = tmp.join("hwmon2");
+        std::fs::create_dir_all(&cpu).unwrap();
+        std::fs::write(cpu.join("name"), "k10temp\n").unwrap();
+        std::fs::write(cpu.join("temp1_input"), "55000\n").unwrap();
+
+        let metrics = Metrics::in_memory().unwrap();
+        collect_drive_temp(&metrics, &tmp, 100);
+        assert_eq!(metrics.ring_series("disk:sda:temp_c"), vec![(100, 38.0)]);
+        assert_eq!(
+            metrics.ring_series("disk:nvme0n1:temp_c"),
+            vec![(100, 45.0)]
+        );
+        assert!(
+            metrics
+                .series_names()
+                .iter()
+                .all(|s| !s.contains("k10temp"))
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 }
