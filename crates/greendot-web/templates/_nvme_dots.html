@@ -1,4 +1,5 @@
 {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+{% if let Some(id) = view.banner_task_id %}<p class="muted small"><a href="/tasks/{{ id }}">view reconcile task ↗</a></p>{% endif %}
 {% if view.rows.is_empty() %}
 <p class="empty">No NVMe-oF exports yet — head to <a href="/nvme">NVMe-oF</a>.</p>
 {% else %}

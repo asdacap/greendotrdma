@@ -81,6 +81,8 @@ pub struct SnapshotsView {
     pub datasets: Vec<String>,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -110,6 +112,7 @@ async fn gather(
     state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> SnapshotsView {
     let mut view = SnapshotsView {
         policies: vec![],
@@ -117,6 +120,7 @@ async fn gather(
         datasets: vec![],
         error: None,
         flash,
+        task_id,
         form_error,
     };
     match state.db.list_policies() {
@@ -150,13 +154,18 @@ async fn snapshots_page(
 ) -> Response {
     page(SnapshotsTemplate {
         user,
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
-async fn render(state: &AppState, flash: Option<String>, error: Option<String>) -> Response {
+async fn render(
+    state: &AppState,
+    flash: Option<String>,
+    error: Option<String>,
+    task_id: Option<i64>,
+) -> Response {
     page(SnapshotsPartial {
-        view: gather(state, flash, error).await,
+        view: gather(state, flash, error, task_id).await,
     })
 }
 
@@ -168,6 +177,8 @@ pub struct PolicyDetailView {
     pub policy: Option<PolicyRow>,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -189,10 +200,12 @@ async fn gather_policy_detail(
     id: i64,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> PolicyDetailView {
     let mut view = PolicyDetailView {
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match state.db.list_policies() {
@@ -214,7 +227,7 @@ async fn policy_detail_page(
 ) -> Response {
     page(PolicyDetailTemplate {
         user,
-        view: gather_policy_detail(&state, id, None, None).await,
+        view: gather_policy_detail(&state, id, None, None, None).await,
     })
 }
 
@@ -225,7 +238,7 @@ async fn policy_detail(
     form_error: Option<String>,
 ) -> Response {
     page(PolicyDetailPartial {
-        view: gather_policy_detail(state, id, flash, form_error).await,
+        view: gather_policy_detail(state, id, flash, form_error, None).await,
     })
 }
 
@@ -238,6 +251,8 @@ pub struct SnapDetailView {
     pub name: String,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -258,11 +273,13 @@ async fn gather_snap_detail(
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> SnapDetailView {
     let mut view = SnapDetailView {
         name: name.to_owned(),
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match actual::zfs::snapshots().await {
@@ -283,13 +300,18 @@ async fn snap_detail_page(
 ) -> Response {
     page(SnapDetailTemplate {
         user,
-        view: gather_snap_detail(&name, None, None).await,
+        view: gather_snap_detail(&name, None, None, None).await,
     })
 }
 
-async fn snap_detail(name: &str, flash: Option<String>, form_error: Option<String>) -> Response {
+async fn snap_detail(
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+    task_id: Option<i64>,
+) -> Response {
     page(SnapDetailPartial {
-        view: gather_snap_detail(name, flash, form_error).await,
+        view: gather_snap_detail(name, flash, form_error, task_id).await,
     })
 }
 
@@ -320,6 +342,7 @@ async fn policy_create(
             &state,
             None,
             Some(format!("invalid dataset {:?}", form.dataset)),
+            None,
         )
         .await;
     }
@@ -329,6 +352,7 @@ async fn policy_create(
             &state,
             None,
             Some(format!("invalid cron expression {cron:?}")),
+            None,
         )
         .await;
     }
@@ -337,6 +361,7 @@ async fn policy_create(
             &state,
             None,
             Some(format!("invalid prefix {:?}", form.prefix)),
+            None,
         )
         .await;
     }
@@ -346,6 +371,7 @@ async fn policy_create(
             &state,
             None,
             Some("keep limits must be numbers or empty".into()),
+            None,
         )
         .await;
     };
@@ -365,10 +391,11 @@ async fn policy_create(
                 &state,
                 Some(format!("policy created for {}", policy.dataset)),
                 None,
+                None,
             )
             .await
         }
-        Err(e) => render(&state, None, Some(format!("{e:#}"))).await,
+        Err(e) => render(&state, None, Some(format!("{e:#}")), None).await,
     }
 }
 
@@ -419,6 +446,7 @@ async fn manual_snapshot(
             &state,
             None,
             Some("invalid dataset or snapshot name".into()),
+            None,
         )
         .await;
     };
@@ -427,12 +455,10 @@ async fn manual_snapshot(
         snap: snap.clone(),
     };
     let title = format!("snapshot {dataset}@{snap}");
-    let (flash, error) = match crate::task_runner::run(&state, req, "snapshot-create", &title).await
-    {
-        Ok(o) => o.message(&format!("created {dataset}@{snap}")),
-        Err(e) => (None, Some(format!("{e:#}"))),
-    };
-    render(&state, flash, error).await
+    match crate::task_runner::start(&state, req, "snapshot-create", &title) {
+        Ok(id) => render(&state, Some(format!("started {title}")), None, Some(id)).await,
+        Err(e) => render(&state, None, Some(format!("{e:#}")), None).await,
+    }
 }
 
 #[derive(Deserialize)]
@@ -447,20 +473,18 @@ async fn snapshot_delete(
 ) -> Response {
     let parts = form.name.split_once('@');
     let Some((dataset, snap)) = parts else {
-        return snap_detail(&form.name, None, Some("invalid snapshot name".into())).await;
+        return snap_detail(&form.name, None, Some("invalid snapshot name".into()), None).await;
     };
     let (Ok(dataset), Ok(snap)) = (DatasetName::new(dataset), SnapName::new(snap)) else {
-        return snap_detail(&form.name, None, Some("invalid snapshot name".into())).await;
+        return snap_detail(&form.name, None, Some("invalid snapshot name".into()), None).await;
     };
     let req = Request::SnapshotDestroy { dataset, snap };
     let title = format!("destroy {}", form.name);
-    match crate::task_runner::run(&state, req, "snapshot-destroy", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, "/snapshots"),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "snapshot destroy failed".into());
-            snap_detail(&form.name, None, Some(msg)).await
-        }
-        Err(e) => snap_detail(&form.name, None, Some(format!("{e:#}"))).await,
+    // Removing the snapshot means its page no longer applies — go back to the
+    // index; the destroy task is viewable on /tasks.
+    match crate::task_runner::start(&state, req, "snapshot-destroy", &title) {
+        Ok(_) => nav_redirect(&headers, "/snapshots"),
+        Err(e) => snap_detail(&form.name, None, Some(format!("{e:#}")), None).await,
     }
 }
 
@@ -524,13 +548,18 @@ mod tests {
         assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
         assert_eq!(headers[header::LOCATION], "/snapshots");
 
-        // Manual snapshot via the fake helper stays on the index.
+        // Manual snapshot dispatches a background task and stays on the index,
+        // linking to the task it just started.
         let req = auth(form_post(
             "/snapshots/manual",
             "dataset=tank%2Fvm1&name=before-upgrade",
         ));
         let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("created tank/vm1@before-upgrade"), "{body}");
+        assert!(
+            body.contains("started snapshot tank/vm1@before-upgrade"),
+            "{body}"
+        );
+        assert!(body.contains("view task"), "{body}");
 
         // An unknown snapshot name renders gracefully (never 500).
         let (status, _, body) = send(&app, get("/snapshots/snap/tank%2Fvm1%40nope")).await;

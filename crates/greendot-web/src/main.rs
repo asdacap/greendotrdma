@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         metrics: metrics::Metrics::open(&config.metrics_db_path)?,
         nvmet_root: config.nvmet_root.clone(),
         lio_root: config.lio_root.clone(),
-        reconcile_lock: tokio::sync::Mutex::new(()),
+        reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
         reconcile_cmd: reconcile_cmd(config_arg),
     });

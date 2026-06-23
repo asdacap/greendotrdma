@@ -42,8 +42,10 @@ pub struct AppState {
     pub metrics: crate::metrics::Metrics,
     pub nvmet_root: std::path::PathBuf,
     pub lio_root: std::path::PathBuf,
-    /// Serializes reconcile passes (UI actions vs the periodic task).
-    pub reconcile_lock: tokio::sync::Mutex<()>,
+    /// Serializes reconcile passes (UI actions vs the periodic task). Held — via
+    /// an owned guard — across the now-backgrounded reconcile run, so two passes
+    /// never overlap even though dispatch no longer blocks the caller.
+    pub reconcile_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
     /// The command run (as a recorded task) to reconcile on drift — normally
@@ -289,7 +291,7 @@ pub(crate) mod testutil {
             metrics: crate::metrics::Metrics::in_memory().unwrap(),
             lio_root: nvmet_root.join("lio"),
             nvmet_root,
-            reconcile_lock: tokio::sync::Mutex::new(()),
+            reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
             tasks: crate::task_runner::TaskHub::default(),
             reconcile_cmd,
         })

@@ -103,6 +103,8 @@ pub struct SettingsView {
     /// Whether the one-click installer can drive this OS (Debian/Ubuntu).
     pub install_supported: bool,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -139,6 +141,7 @@ async fn gather(
     state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> SettingsView {
     let devs = rdma::devices();
     let nics: Vec<NicRow> = nic::interfaces(&state.helper)
@@ -202,6 +205,7 @@ async fn gather(
             .collect(),
         nics,
         flash,
+        task_id,
         form_error,
     }
 }
@@ -212,7 +216,7 @@ async fn settings_page(
 ) -> Response {
     page(SettingsTemplate {
         user,
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
@@ -223,6 +227,8 @@ pub struct NicDetailView {
     pub nic: Option<NicRow>,
     pub netdev: String,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -244,6 +250,7 @@ async fn gather_nic_detail(
     netdev: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> NicDetailView {
     NicDetailView {
         nic: nic::interfaces(helper)
@@ -253,6 +260,7 @@ async fn gather_nic_detail(
             .find(|n| n.netdev == netdev),
         netdev: netdev.to_owned(),
         flash,
+        task_id,
         form_error,
     }
 }
@@ -264,7 +272,7 @@ async fn nic_detail_page(
 ) -> Response {
     page(NicDetailTemplate {
         user,
-        view: gather_nic_detail(&state.helper, &netdev, None, None).await,
+        view: gather_nic_detail(&state.helper, &netdev, None, None, None).await,
     })
 }
 
@@ -332,12 +340,13 @@ async fn nic_diagnose_page(
 }
 
 async fn reconcile_now(State(state): State<Arc<AppState>>) -> Response {
-    let (flash, error) = match reconcile_state(&state).await {
-        Ok(()) => (Some("reconciled".into()), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+    let (flash, error, task_id) = match reconcile_state(&state).await {
+        Ok(Some(id)) => (Some("reconcile started".into()), None, Some(id)),
+        Ok(None) => (Some("already reconciled".into()), None, None),
+        Err(e) => (None, Some(format!("{e:#}")), None),
     };
     page(SettingsPartial {
-        view: gather(&state, flash, error).await,
+        view: gather(&state, flash, error, task_id).await,
     })
 }
 
@@ -350,22 +359,30 @@ async fn set_listen(State(state): State<Arc<AppState>>, Form(form): Form<ListenF
     let addr = form.listen_addr.trim();
     if addr.parse::<std::net::IpAddr>().is_err() {
         return page(SettingsPartial {
-            view: gather(&state, None, Some(format!("invalid IP address {addr:?}"))).await,
+            view: gather(
+                &state,
+                None,
+                Some(format!("invalid IP address {addr:?}")),
+                None,
+            )
+            .await,
         });
     }
     let result = match state.db.set_setting("listen_addr", addr) {
         Ok(()) => reconcile_state(&state).await,
         Err(e) => Err(e),
     };
-    let (flash, error) = match result {
-        Ok(()) => (
-            Some(format!("listen address set to {addr}; exports reconciled")),
+    let (flash, error, task_id) = match result {
+        Ok(Some(id)) => (
+            Some(format!("listen address set to {addr}; reconciling exports")),
             None,
+            Some(id),
         ),
-        Err(e) => (None, Some(format!("{e:#}"))),
+        Ok(None) => (Some(format!("listen address set to {addr}")), None, None),
+        Err(e) => (None, Some(format!("{e:#}")), None),
     };
     page(SettingsPartial {
-        view: gather(&state, flash, error).await,
+        view: gather(&state, flash, error, task_id).await,
     })
 }
 
@@ -382,55 +399,65 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
                 &form.netdev,
                 None,
                 Some(format!("invalid interface name {:?}", form.netdev)),
+                None,
             )
             .await,
         });
     };
-    let steps = [
-        (
-            "modules",
-            "load rxe module",
-            Request::EnsureModules {
-                modules: vec![KernelModule::Rxe],
-            },
-        ),
-        (
-            "rxe-link",
-            &format!("add Soft-RoCE on {netdev}"),
-            Request::RxeLinkAdd {
-                netdev: netdev.clone(),
-            },
-        ),
-    ];
-    for (kind, title, req) in steps {
-        match crate::task_runner::run(&state, req, kind, title).await {
-            Ok(o) if o.ok => {}
-            Ok(o) => {
-                let msg = o.error.unwrap_or_else(|| "task failed".into());
-                return page(NicDetailPartial {
-                    view: gather_nic_detail(&state.helper, netdev.as_str(), None, Some(msg)).await,
-                });
-            }
-            Err(e) => {
-                return page(NicDetailPartial {
-                    view: gather_nic_detail(
-                        &state.helper,
-                        netdev.as_str(),
-                        None,
-                        Some(format!("{e:#}")),
-                    )
-                    .await,
-                });
-            }
+    // Soft-RoCE needs the rxe module loaded before the link is added, so the two
+    // steps (then a reconcile) must run in order — drive the whole sequence on a
+    // background task and return at once. The notice links to the module-load
+    // task; the link-add step is recorded as its own task on /tasks.
+    let title = format!("enable Soft-RoCE on {netdev}");
+    let id = match crate::task_runner::begin(&state, "rxe", "load rxe module") {
+        Ok(id) => id,
+        Err(e) => {
+            return page(NicDetailPartial {
+                view: gather_nic_detail(
+                    &state.helper,
+                    netdev.as_str(),
+                    None,
+                    Some(format!("{e:#}")),
+                    None,
+                )
+                .await,
+            });
         }
-    }
-    let _ = reconcile_state(&state).await;
+    };
+    let st = state.clone();
+    let nd = netdev.clone();
+    tokio::spawn(async move {
+        let rx = st.helper.run_task(Request::EnsureModules {
+            modules: vec![KernelModule::Rxe],
+        });
+        let loaded = crate::task_runner::drive(&st, id, rx)
+            .await
+            .map(|o| o.ok)
+            .unwrap_or(false);
+        st.tasks.unregister(id);
+        if !loaded {
+            return;
+        }
+        let added = crate::task_runner::run(
+            &st,
+            Request::RxeLinkAdd { netdev: nd.clone() },
+            "rxe-link",
+            &format!("add Soft-RoCE on {nd}"),
+        )
+        .await
+        .map(|o| o.ok)
+        .unwrap_or(false);
+        if added {
+            let _ = reconcile_state(&st).await;
+        }
+    });
     page(NicDetailPartial {
         view: gather_nic_detail(
             &state.helper,
             netdev.as_str(),
-            Some(format!("Soft-RoCE enabled on {netdev}")),
+            Some(format!("started {title}")),
             None,
+            Some(id),
         )
         .await,
     })
@@ -444,7 +471,9 @@ struct RoceForm {
 /// Turn on hardware RoCE for a NIC. The helper detects the vendor, confirms its
 /// enable parameter is present and off (a VF may be PF-gated and can't
 /// self-enable), then sets it and reloads the device — all as one task. The
-/// reload briefly drops the NIC. The web names only the interface.
+/// reload briefly drops the NIC (which can drop the caller's own session), so it
+/// runs non-blocking; exports re-realize over the now-RoCE NIC on the next
+/// reconcile pass. The web names only the interface.
 async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>) -> Response {
     let Ok(netdev) = NetdevName::new(form.netdev.trim()) else {
         return page(NicDetailPartial {
@@ -453,32 +482,44 @@ async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>
                 &form.netdev,
                 None,
                 Some(format!("invalid interface name {:?}", form.netdev)),
+                None,
             )
             .await,
         });
     };
     let title = format!("enable RoCE on {netdev}");
-    let (flash, error) = match crate::task_runner::run(
+    let view = match crate::task_runner::start(
         &state,
         Request::EnableRoce {
             netdev: netdev.clone(),
         },
         "roce",
         &title,
-    )
-    .await
-    {
-        Ok(o) => o.message(&format!(
-            "RoCE enabled on {netdev}; reconnect if your session dropped"
-        )),
-        Err(e) => (None, Some(format!("{e:#}"))),
+    ) {
+        Ok(id) => {
+            gather_nic_detail(
+                &state.helper,
+                netdev.as_str(),
+                Some(format!(
+                    "started {title}; reconnect if your session dropped"
+                )),
+                None,
+                Some(id),
+            )
+            .await
+        }
+        Err(e) => {
+            gather_nic_detail(
+                &state.helper,
+                netdev.as_str(),
+                None,
+                Some(format!("{e:#}")),
+                None,
+            )
+            .await
+        }
     };
-    if error.is_none() {
-        let _ = reconcile_state(&state).await;
-    }
-    page(NicDetailPartial {
-        view: gather_nic_detail(&state.helper, netdev.as_str(), flash, error).await,
-    })
+    page(NicDetailPartial { view })
 }
 
 #[derive(Deserialize)]
@@ -498,7 +539,13 @@ async fn install_deps(
         .collect();
     if packages.is_empty() {
         return page(SettingsPartial {
-            view: gather(&state, None, Some("no valid packages to install".into())).await,
+            view: gather(
+                &state,
+                None,
+                Some("no valid packages to install".into()),
+                None,
+            )
+            .await,
         });
     }
     let names = packages
@@ -507,14 +554,12 @@ async fn install_deps(
         .collect::<Vec<_>>()
         .join(", ");
     let req = Request::InstallPackages { packages };
-    let (flash, error) =
-        match crate::task_runner::run(&state, req, "install", &format!("install {names}")).await {
-            Ok(o) => o.message(&format!("installed {names}")),
-            Err(e) => (None, Some(format!("{e:#}"))),
-        };
-    page(SettingsPartial {
-        view: gather(&state, flash, error).await,
-    })
+    let title = format!("install {names}");
+    let view = match crate::task_runner::start(&state, req, "install", &title) {
+        Ok(id) => gather(&state, Some(format!("started {title}")), None, Some(id)).await,
+        Err(e) => gather(&state, None, Some(format!("{e:#}")), None).await,
+    };
+    page(SettingsPartial { view })
 }
 
 #[cfg(test)]
@@ -600,7 +645,7 @@ mod tests {
 
         // Soft-RoCE enable round-trips through the fake helper.
         let (_, _, body) = send(&app, auth(form_post("/settings/rxe", "netdev=eth0"))).await;
-        assert!(body.contains("Soft-RoCE enabled on eth0"), "{body}");
+        assert!(body.contains("started enable Soft-RoCE on eth0"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/settings/rxe", "netdev=bad%2Fname"))).await;
         assert!(body.contains("invalid interface name"), "{body}");
 
@@ -608,7 +653,7 @@ mod tests {
         // task (the fake helper reports success); an invalid interface name is
         // rejected before the helper is asked.
         let (_, _, body) = send(&app, auth(form_post("/settings/roce", "netdev=eth0"))).await;
-        assert!(body.contains("RoCE enabled on eth0"), "{body}");
+        assert!(body.contains("started enable RoCE on eth0"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/settings/roce", "netdev=bad%2Fname"))).await;
         assert!(body.contains("invalid interface name"), "{body}");
     }

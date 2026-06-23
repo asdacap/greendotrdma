@@ -50,6 +50,8 @@ pub struct DisksView {
     pub disks: Vec<DiskRow>,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -90,11 +92,16 @@ struct DisksTemplate {
     view: DisksView,
 }
 
-async fn gather(flash: Option<String>, form_error: Option<String>) -> DisksView {
+async fn gather(
+    flash: Option<String>,
+    form_error: Option<String>,
+    task_id: Option<i64>,
+) -> DisksView {
     let mut view = DisksView {
         disks: vec![],
         error: None,
         flash,
+        task_id,
         form_error,
     };
     match block::disks().await {
@@ -144,7 +151,7 @@ async fn disks_page(
 ) -> Response {
     page(DisksTemplate {
         user,
-        view: gather(None, None).await,
+        view: gather(None, None, None).await,
     })
 }
 
@@ -156,6 +163,8 @@ pub struct DiskDetailView {
     pub disk: Option<DiskRow>,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -176,12 +185,14 @@ async fn gather_disk_detail(
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> DiskDetailView {
     let mut view = DiskDetailView {
         name: name.to_owned(),
         disk: None,
         error: None,
         flash,
+        task_id,
         form_error,
     };
     match block::disks().await {
@@ -198,33 +209,23 @@ async fn disk_detail_page(
 ) -> Response {
     page(DiskDetailTemplate {
         user,
-        view: gather_disk_detail(&disk, None, None).await,
+        view: gather_disk_detail(&disk, None, None, None).await,
     })
 }
 
 /// Runs a disk-level request as a recorded task and re-renders the owning disk's
 /// detail partial with the outcome.
-async fn run(
-    state: &AppState,
-    req: Request,
-    kind: &str,
-    title: &str,
-    success: String,
-    disk: &str,
-) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather_disk_detail(disk, flash, error).await
-        }
-        Err(e) => gather_disk_detail(disk, None, Some(format!("{e:#}"))).await,
+async fn run(state: &Arc<AppState>, req: Request, kind: &str, title: &str, disk: &str) -> Response {
+    let view = match crate::task_runner::start(state, req, kind, title) {
+        Ok(id) => gather_disk_detail(disk, Some(format!("started {title}")), None, Some(id)).await,
+        Err(e) => gather_disk_detail(disk, None, Some(format!("{e:#}")), None).await,
     };
     page(DiskDetailPartial { view })
 }
 
 async fn disk_detail_failed(disk: &str, message: impl Into<String>) -> Response {
     page(DiskDetailPartial {
-        view: gather_disk_detail(disk, None, Some(message.into())).await,
+        view: gather_disk_detail(disk, None, Some(message.into()), None).await,
     })
 }
 
@@ -236,6 +237,8 @@ pub struct PartDetailView {
     pub part: Option<PartRow>,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -257,12 +260,14 @@ async fn gather_part_detail(
     number: u32,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> PartDetailView {
     let mut view = PartDetailView {
         disk: disk.to_owned(),
         part: None,
         error: None,
         flash,
+        task_id,
         form_error,
     };
     match block::disks().await {
@@ -285,13 +290,13 @@ async fn part_detail_page(
 ) -> Response {
     page(PartDetailTemplate {
         user,
-        view: gather_part_detail(&disk, number, None, None).await,
+        view: gather_part_detail(&disk, number, None, None, None).await,
     })
 }
 
 async fn part_detail_failed(disk: &str, number: u32, message: impl Into<String>) -> Response {
     page(PartDetailPartial {
-        view: gather_part_detail(disk, number, None, Some(message.into())).await,
+        view: gather_part_detail(disk, number, None, Some(message.into()), None).await,
     })
 }
 
@@ -311,7 +316,6 @@ async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<Table
         req,
         "gpt-create",
         &format!("new GPT on {disk}"),
-        format!("created new GPT on {disk}"),
         &scope,
     )
     .await
@@ -358,7 +362,6 @@ async fn part_create(
         req,
         "partition-create",
         &format!("create partition on {disk}"),
-        format!("created partition on {disk}"),
         &scope,
     )
     .await
@@ -370,9 +373,9 @@ struct PartDeleteForm {
     number: u32,
 }
 
-/// Deletes a partition (a remove-op): on success the partition's page no longer
-/// applies, so redirect back to the owning disk; on failure (still present)
-/// re-render the partition detail with the error.
+/// Deletes a partition (a remove-op): the partition's page no longer applies,
+/// so redirect back to the owning disk; a dispatch failure re-renders the
+/// partition detail with the error.
 async fn part_delete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -392,12 +395,10 @@ async fn part_delete(
         number: form.number,
     };
     let title = format!("delete partition {} on {disk}", form.number);
-    match crate::task_runner::run(&state, req, "partition-delete", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, &format!("/disks/{scope}")),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| format!("{title} failed"));
-            part_detail_failed(&scope, form.number, msg).await
-        }
+    // Removing the partition means its page no longer applies — go back to the
+    // disk; the delete task is viewable on /tasks.
+    match crate::task_runner::start(&state, req, "partition-delete", &title) {
+        Ok(_) => nav_redirect(&headers, &format!("/disks/{scope}")),
         Err(e) => part_detail_failed(&scope, form.number, format!("{e:#}")).await,
     }
 }
@@ -428,8 +429,10 @@ async fn run_step(
 
 async fn finish_shrink(disk: &str, number: u32, result: Result<(), String>) -> Response {
     let view = match result {
-        Ok(()) => gather_part_detail(disk, number, Some("partition shrunk".into()), None).await,
-        Err(e) => gather_part_detail(disk, number, None, Some(e)).await,
+        Ok(()) => {
+            gather_part_detail(disk, number, Some("partition shrunk".into()), None, None).await
+        }
+        Err(e) => gather_part_detail(disk, number, None, Some(e), None).await,
     };
     page(PartDetailPartial { view })
 }
@@ -694,7 +697,7 @@ mod tests {
             "disk=sdb&size=100&unit=GiB&label=data",
         ));
         let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("created partition on sdb"), "{body}");
+        assert!(body.contains("started create partition on sdb"), "{body}");
         let req = auth(form_post(
             "/disks/part/create",
             "disk=..%2Fsda&size=&unit=GiB&label=data",

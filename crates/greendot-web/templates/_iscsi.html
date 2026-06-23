@@ -1,7 +1,9 @@
 <div id="iscsi-content">
   {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(id) = view.banner_task_id %}<p class="muted small"><a href="/tasks/{{ id }}">view reconcile task ↗</a></p>{% endif %}
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+  {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
 
   {% if view.rows.is_empty() %}
   <p class="empty">No iSCSI exports yet — create one below.</p>
@@ -12,7 +14,7 @@
       {% for r in view.rows %}
       <tr>
         <td><span class="dot {{ r.dot_class }}" title="{{ r.dot_reason }}"></span></td>
-        <td>{{ r.name }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}</span></td>
+        <td>{{ r.name }}{% if r.external %} <span class="badge" title="Present on the box but not managed by GreenDotRDMA">External</span>{% endif %}<br><span class="muted small">{{ r.dot_reason }}{% if let Some(id) = r.task_id %} · <a href="/tasks/{{ id }}">view task ↗</a>{% endif %}</span></td>
         <td>{{ r.device }}</td>
         <td>{{ r.transports }}</td>
         <td>{{ r.hosts }}</td>

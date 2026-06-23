@@ -1,0 +1,5 @@
+- All IO or System operation must be wrapped in a Task. Its stdin/stdout/stderr is recorded.
+  - The web UI should return without waiting for the Task, showing a notice with a link to the task page, and listen for completion of the Task within 5 second. If the task finished within 5 second, then is should refresh the page to reflect.
+- There should not be any hardware specific code in the greendot-web. 
+- Any Hardware specific code must be wrapped in a generic trait so that it is easy to expand for other hardware.
+- Diagnostic is a key feature. When something is not fully on, there should be a diagnostic tool to diagnose.

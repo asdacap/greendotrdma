@@ -112,6 +112,8 @@ pub struct LvmView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -126,10 +128,16 @@ fn used_percent(size: u64, free: u64) -> u8 {
     (size.saturating_sub(free).saturating_mul(100) / size.max(1)) as u8
 }
 
-async fn gather(state: &AppState, flash: Option<String>, form_error: Option<String>) -> LvmView {
+async fn gather(
+    state: &AppState,
+    flash: Option<String>,
+    form_error: Option<String>,
+    task_id: Option<i64>,
+) -> LvmView {
     let mut view = LvmView {
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     let joined = tokio::try_join!(
@@ -169,7 +177,7 @@ async fn lvm_page(
 ) -> Response {
     page(LvmTemplate {
         user,
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
@@ -188,6 +196,8 @@ pub struct VgDetailView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -209,11 +219,13 @@ async fn gather_vg_detail(
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> VgDetailView {
     let mut view = VgDetailView {
         name: name.to_owned(),
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     let joined = tokio::try_join!(
@@ -272,33 +284,31 @@ async fn vg_detail_page(
 ) -> Response {
     page(VgDetailTemplate {
         user,
-        view: gather_vg_detail(&state, &name, None, None).await,
+        view: gather_vg_detail(&state, &name, None, None, None).await,
     })
 }
 
 /// Runs an LV request as a recorded task and re-renders the owning VG's detail
 /// partial with the outcome.
 async fn run_lv(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     kind: &str,
     title: &str,
-    success: String,
     vg: &str,
 ) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather_vg_detail(state, vg, flash, error).await
+    let view = match crate::task_runner::start(state, req, kind, title) {
+        Ok(id) => {
+            gather_vg_detail(state, vg, Some(format!("started {title}")), None, Some(id)).await
         }
-        Err(e) => gather_vg_detail(state, vg, None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_vg_detail(state, vg, None, Some(format!("{e:#}")), None).await,
     };
     page(VgDetailPartial { view })
 }
 
 async fn lv_failed(state: &AppState, vg: &str, message: impl Into<String>) -> Response {
     page(VgDetailPartial {
-        view: gather_vg_detail(state, vg, None, Some(message.into())).await,
+        view: gather_vg_detail(state, vg, None, Some(message.into()), None).await,
     })
 }
 
@@ -313,6 +323,8 @@ pub struct LvDetailView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -335,12 +347,14 @@ async fn gather_lv_detail(
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> LvDetailView {
     let mut view = LvDetailView {
         vg: vg.to_owned(),
         name: name.to_owned(),
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match lvm::logical_volumes(&state.helper).await {
@@ -364,27 +378,33 @@ async fn lv_detail_page(
 ) -> Response {
     page(LvDetailTemplate {
         user,
-        view: gather_lv_detail(&state, &vg, &name, None, None).await,
+        view: gather_lv_detail(&state, &vg, &name, None, None, None).await,
     })
 }
 
 /// Runs an LV request as a recorded task and re-renders the owning LV's detail
 /// partial with the outcome (stay-on-page ops: grow / shrink / rename).
 async fn run_lv_detail(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     kind: &str,
     title: &str,
-    success: String,
     vg: &str,
     name: &str,
 ) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather_lv_detail(state, vg, name, flash, error).await
+    let view = match crate::task_runner::start(state, req, kind, title) {
+        Ok(id) => {
+            gather_lv_detail(
+                state,
+                vg,
+                name,
+                Some(format!("started {title}")),
+                None,
+                Some(id),
+            )
+            .await
         }
-        Err(e) => gather_lv_detail(state, vg, name, None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_lv_detail(state, vg, name, None, Some(format!("{e:#}")), None).await,
     };
     page(LvDetailPartial { view })
 }
@@ -396,7 +416,7 @@ async fn lv_detail_failed(
     message: impl Into<String>,
 ) -> Response {
     page(LvDetailPartial {
-        view: gather_lv_detail(state, vg, name, None, Some(message.into())).await,
+        view: gather_lv_detail(state, vg, name, None, Some(message.into()), None).await,
     })
 }
 
@@ -409,6 +429,8 @@ pub struct PvDetailView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -430,10 +452,12 @@ async fn gather_pv_detail(
     device: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> PvDetailView {
     let mut view = PvDetailView {
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match lvm::physical_volumes(&state.helper).await {
@@ -463,13 +487,13 @@ async fn pv_detail_page(
     let device = format!("/{id}");
     page(PvDetailTemplate {
         user,
-        view: gather_pv_detail(&state, &device, None, None).await,
+        view: gather_pv_detail(&state, &device, None, None, None).await,
     })
 }
 
 async fn pv_detail_failed(state: &AppState, device: &str, message: impl Into<String>) -> Response {
     page(PvDetailPartial {
-        view: gather_pv_detail(state, device, None, Some(message.into())).await,
+        view: gather_pv_detail(state, device, None, Some(message.into()), None).await,
     })
 }
 
@@ -497,7 +521,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
     let Some(size) = parse_size(&form.size, &form.unit) else {
         return lv_failed(&state, &scope, "invalid size").await;
     };
-    let (req, title, success) = if form.thin.is_some() {
+    let (req, title) = if form.thin.is_some() {
         // Thin volume: the chosen pool (`vg/pool`) determines the VG.
         let Some((vg, pool)) = form.pool.split_once('/') else {
             return lv_failed(&state, &scope, "choose a thin pool").await;
@@ -513,7 +537,6 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
                 virtual_size: size,
             },
             format!("create thin volume {vg}/{name}"),
-            format!("created thin volume {vg}/{name}"),
         )
     } else {
         let Ok(vg) = VgName::new(form.vg.trim()) else {
@@ -526,10 +549,9 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
                 size,
             },
             format!("create LV {vg}/{name}"),
-            format!("created LV {vg}/{name}"),
         )
     };
-    run_lv(&state, req, "lv-create", &title, success, &scope).await
+    run_lv(&state, req, "lv-create", &title, &scope).await
 }
 
 #[derive(Deserialize)]
@@ -561,7 +583,6 @@ async fn thin_pool_create(
         req,
         "thin-pool-create",
         &format!("create thin pool {vg}/{name}"),
-        format!("created thin pool {vg}/{name}"),
         &scope,
     )
     .await
@@ -600,7 +621,6 @@ async fn lv_resize(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         req,
         "lv-resize",
         &format!("grow {vg}/{name}"),
-        format!("resized {vg}/{name}"),
         &scope_vg,
         &scope_name,
     )
@@ -623,7 +643,6 @@ async fn lv_shrink(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         req,
         "lv-shrink",
         &format!("shrink {vg}/{name}"),
-        format!("shrank {vg}/{name}"),
         &scope_vg,
         &scope_name,
     )
@@ -663,7 +682,6 @@ async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRename
         req,
         "lv-rename",
         &format!("rename {vg}/{name} to {new_name}"),
-        format!("renamed {vg}/{name} to {new_name}"),
         &scope_vg,
         new_name.as_str(),
     )
@@ -692,12 +710,8 @@ async fn lv_delete(
         vg: vg.clone(),
         name: name.clone(),
     };
-    match crate::task_runner::run(&state, req, "lv-delete", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, &format!("/lvm/vg/{scope_vg}")),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "delete failed".into());
-            lv_detail_failed(&state, &scope_vg, &scope_name, msg).await
-        }
+    match crate::task_runner::start(&state, req, "lv-delete", &title) {
+        Ok(_) => nav_redirect(&headers, &format!("/lvm/vg/{scope_vg}")),
         Err(e) => lv_detail_failed(&state, &scope_vg, &scope_name, format!("{e:#}")).await,
     }
 }
@@ -729,7 +743,6 @@ async fn vg_extend(State(state): State<Arc<AppState>>, Form(form): Form<VgDevice
         req,
         "vg-extend",
         &format!("extend {vg} with {device}"),
-        format!("added {device} to {vg}"),
         &scope,
     )
     .await
@@ -754,12 +767,8 @@ async fn vg_reduce(
         vg: vg.clone(),
         device: device.clone(),
     };
-    match crate::task_runner::run(&state, req, "vg-reduce", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, "/lvm"),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "remove from VG failed".into());
-            pv_detail_failed(&state, &device_scope, msg).await
-        }
+    match crate::task_runner::start(&state, req, "vg-reduce", &title) {
+        Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => pv_detail_failed(&state, &device_scope, format!("{e:#}")).await,
     }
 }
@@ -782,12 +791,8 @@ async fn vg_remove(
     };
     let title = format!("remove volume group {vg}");
     let req = Request::VgRemove { vg: vg.clone() };
-    match crate::task_runner::run(&state, req, "vg-remove", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, "/lvm"),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "VG removal failed".into());
-            lv_failed(&state, &scope, msg).await
-        }
+    match crate::task_runner::start(&state, req, "vg-remove", &title) {
+        Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => lv_failed(&state, &scope, format!("{e:#}")).await,
     }
 }
@@ -921,12 +926,8 @@ async fn vg_create(
         name: vg,
         devices: device_paths,
     };
-    match crate::task_runner::run(&state, req, "vg-create", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, "/lvm"),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "VG creation failed".into());
-            vg_create_failed(&state, selected, msg).await
-        }
+    match crate::task_runner::start(&state, req, "vg-create", &title) {
+        Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => vg_create_failed(&state, selected, format!("{e:#}")).await,
     }
 }
@@ -994,7 +995,7 @@ mod tests {
         );
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("created LV vg0/data"), "{body}");
+        assert!(body.contains("started create LV vg0/data"), "{body}");
 
         // Invalid LV name is rejected before the helper.
         let req = auth(
@@ -1015,7 +1016,10 @@ mod tests {
             ),
         );
         let (_, _, body) = send(&app, req).await;
-        assert!(body.contains("created thin volume vg0/vm1"), "{body}");
+        assert!(
+            body.contains("started create thin volume vg0/vm1"),
+            "{body}"
+        );
     }
 
     #[tokio::test]
@@ -1092,7 +1096,7 @@ mod tests {
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(
-            body.contains("resized vg0/data") && body.contains(r#"id="lv-detail-content""#),
+            body.contains("started grow vg0/data") && body.contains(r#"id="lv-detail-content""#),
             "{body}"
         );
 
@@ -1141,7 +1145,7 @@ mod tests {
         );
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("added /dev/sdc to vg0"), "{body}");
+        assert!(body.contains("started extend vg0 with /dev/sdc"), "{body}");
 
         // Remove-from-VG is a remove-op: success redirects to the LVM index.
         let req = auth(

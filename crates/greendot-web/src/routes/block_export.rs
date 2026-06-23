@@ -8,19 +8,28 @@ use super::{AppState, page};
 use crate::actual;
 use crate::auth::CurrentUser;
 use crate::dot::Criterion;
-use crate::reconcile::{self, RECONCILE_ERROR_KEY};
+use crate::reconcile::{self, RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
+use crate::state::{IscsiExport, NfsExport, NvmeExport};
+use crate::task_runner::TaskOutcome;
 use askama::Template;
 use axum::response::Response;
 use greendot_proto::{DotState, NFS_RDMA_PORT};
 use std::net::{IpAddr, Ipv4Addr};
+use std::sync::Arc;
 
 /// Serialized full reconcile against current desired state. A cheap in-process
 /// drift pre-check keeps the steady state (and the 60 s timer) silent; on drift
-/// it runs `greendot-cli reconcile` as a recorded, streamable task and surfaces
-/// the outcome on the export dots and the settings banner. The web stays the
-/// sole writer of the config — the CLI only reads it.
-pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
-    let _guard = state.reconcile_lock.lock().await;
+/// it dispatches `greendot-cli reconcile` as a recorded, streamable task and
+/// returns its id *without waiting* — the outcome is surfaced on the export dots
+/// and the settings banner once it finishes (in the background). The web stays
+/// the sole writer of the config — the CLI only reads it.
+///
+/// Returns `Some(task_id)` when a reconcile was dispatched (so the caller can
+/// link its notice/banner to `/tasks/{id}`), or `None` when already realized.
+pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64>> {
+    // Owned so it can move into the spawn: held continuously through the drift
+    // pre-check and the background reconcile run, so passes never overlap.
+    let guard = state.reconcile_lock.clone().lock_owned().await;
     let nvme_exports = state.db.list_nvme_exports()?;
     let iscsi_exports = state.db.list_iscsi_exports()?;
     let listen: IpAddr = state
@@ -45,20 +54,52 @@ pub async fn reconcile_state(state: &AppState) -> anyhow::Result<()> {
         &actual::nfs::read(&state.helper).await,
     );
     if nvmet_ok && lio_ok && nfs_ok {
-        return Ok(()); // already realized — emit no task
+        return Ok(None); // already realized — emit no task
     }
 
-    let outcome = crate::task_runner::run_local(
-        state,
-        &state.reconcile_cmd,
-        "reconcile",
-        "Reconcile exports",
-    )
-    .await?;
-    let err = (!outcome.ok).then(|| outcome.error.unwrap_or_else(|| "reconcile failed".into()));
+    // Record the task up front and publish its id, so the banner and the drifted
+    // exports' dots can link to it while it runs; drive it to completion — and
+    // apply the outcome — on a background task that holds the reconcile lock.
+    let id = crate::task_runner::begin(state, "reconcile", "Reconcile exports")?;
+    state.db.set_setting(RECONCILE_TASK_KEY, &id.to_string())?;
+    let st = state.clone();
+    let cmd = state.reconcile_cmd.clone();
+    tokio::spawn(async move {
+        let _guard = guard; // serialize: released only when the run is done
+        let outcome =
+            crate::task_runner::drive(&st, id, crate::task_runner::spawn_command_events(&cmd))
+                .await
+                .unwrap_or_else(|e| TaskOutcome {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                });
+        st.tasks.unregister(id);
+        if let Err(e) = apply_reconcile_outcome(
+            &st,
+            &nvme_exports,
+            &iscsi_exports,
+            &nfs_exports,
+            (nvmet_ok, lio_ok, nfs_ok),
+            outcome,
+        ) {
+            tracing::error!(error = %e, "recording reconcile outcome failed");
+        }
+    });
+    Ok(Some(id))
+}
 
-    // Surface the result on the dots of the protocols that drifted (the task's
-    // output carries the detail) and on the settings banner.
+/// Surfaces a finished reconcile on the dots of the protocols that drifted (the
+/// task's output carries the detail) and on the settings banner. `*_ok` are the
+/// pre-check verdicts: a protocol that was already satisfied keeps a clear dot.
+fn apply_reconcile_outcome(
+    state: &AppState,
+    nvme_exports: &[NvmeExport],
+    iscsi_exports: &[IscsiExport],
+    nfs_exports: &[NfsExport],
+    (nvmet_ok, lio_ok, nfs_ok): (bool, bool, bool),
+    outcome: TaskOutcome,
+) -> anyhow::Result<()> {
+    let err = (!outcome.ok).then(|| outcome.error.unwrap_or_else(|| "reconcile failed".into()));
     for e in nvme_exports.iter().filter(|e| e.enabled) {
         state
             .db
@@ -103,6 +144,9 @@ pub struct ExportRow {
     /// provisioned by democratic-csi). Rendered read-only with an "External"
     /// badge; its dot reflects only the observed transport.
     pub external: bool,
+    /// The reconcile task to link from this export's dot when it isn't fully
+    /// realized (`/tasks/{id}`); `None` for green/disabled/foreign rows.
+    pub task_id: Option<i64>,
 }
 
 /// A labelled client-side connect command shown under each export.
