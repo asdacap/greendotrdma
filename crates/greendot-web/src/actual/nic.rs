@@ -169,6 +169,45 @@ fn parse_roce_capable(stdout: &str) -> HashMap<String, String> {
         .collect()
 }
 
+/// An opaque per-NIC RDMA advisory from the helper: a human label and detail
+/// explaining why a NIC may lack RDMA and how to fix it. The web renders these
+/// verbatim and reads nothing into them — all vendor knowledge stays in the
+/// helper (`Request::NicRdmaAdvice`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NicAdvice {
+    pub label: String,
+    pub detail: String,
+}
+
+/// The helper's per-NIC advisories as `netdev → advice`. A transport failure or
+/// empty inventory yields no advisories, the same graceful degradation as
+/// elsewhere.
+pub async fn rdma_advice(helper: &HelperClient) -> HashMap<String, NicAdvice> {
+    parse_nic_advice(&helper.collect(Request::NicRdmaAdvice).await.stdout)
+}
+
+fn parse_nic_advice(stdout: &str) -> HashMap<String, NicAdvice> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        netdev: String,
+        label: String,
+        detail: String,
+    }
+    serde_json::from_str::<Vec<Row>>(stdout)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|r| {
+            (
+                r.netdev,
+                NicAdvice {
+                    label: r.label,
+                    detail: r.detail,
+                },
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,5 +330,22 @@ mod tests {
         // Garbage / empty degrades to no capable NICs.
         assert!(parse_roce_capable("not json").is_empty());
         assert!(parse_roce_capable("[]").is_empty());
+    }
+
+    #[test]
+    fn parses_nic_advice_inventory() {
+        let json = r#"[{"netdev":"ens16v0","label":"Load the driver","detail":"do X first"}]"#;
+        let map = parse_nic_advice(json);
+        assert_eq!(
+            map.get("ens16v0"),
+            Some(&NicAdvice {
+                label: "Load the driver".into(),
+                detail: "do X first".into(),
+            })
+        );
+        // Garbage / empty / missing fields degrade to no advisories.
+        assert!(parse_nic_advice("not json").is_empty());
+        assert!(parse_nic_advice("[]").is_empty());
+        assert!(parse_nic_advice(r#"[{"netdev":"x"}]"#).is_empty());
     }
 }

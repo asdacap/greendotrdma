@@ -221,6 +221,18 @@ fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
                         return; // socket write failed; client gone
                     }
                 }
+                Dispatch::NicRdmaAdvice => {
+                    // A read: no mutate_lock (mirrors how reads stream).
+                    let mut sink = SocketSink(&mut writer);
+                    if hardware::report_nic_advice_into(
+                        std::path::Path::new(hardware::NET_ROOT),
+                        &mut sink,
+                    )
+                    .is_err()
+                    {
+                        return; // socket write failed; client gone
+                    }
+                }
                 Dispatch::EnableRoce(netdev) => {
                     let _guard = ctx.mutate_lock.lock().unwrap();
                     let mut sink = SocketSink(&mut writer);

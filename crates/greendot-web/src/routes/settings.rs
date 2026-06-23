@@ -2,6 +2,7 @@ use super::{AppState, page};
 use crate::actual::nic::{self, NicRdmaKind, NicStatus};
 use crate::actual::rdma;
 use crate::auth::CurrentUser;
+use crate::dot::{Criterion, nic_diagnostics};
 use crate::routes::block_export::reconcile_state;
 use askama::Template;
 use axum::extract::{Form, Path, State};
@@ -16,6 +17,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings", get(settings_page))
         .route("/settings/nic/{netdev}", get(nic_detail_page))
+        .route("/settings/nic/{netdev}/diagnose", get(nic_diagnose_page))
         .route("/settings/reconcile", post(reconcile_now))
         .route("/settings/listen", post(set_listen))
         .route("/settings/rxe", post(enable_rxe))
@@ -42,6 +44,9 @@ pub struct NicRow {
     pub roce: bool,
     /// True → render an "Enable Soft-RoCE" button for this netdev.
     pub soft_roce: bool,
+    /// True → offer the per-NIC Diagnose page (the NIC isn't actively serving
+    /// RDMA, so there is something to explain).
+    pub diagnose: bool,
 }
 
 /// Map a classified NIC to a table row, dropping interfaces that aren't RDMA
@@ -59,6 +64,8 @@ pub(crate) fn nic_row(s: NicStatus) -> Option<NicRow> {
         NicRdmaKind::SoftRoceable => ("no RDMA".into(), "dot-gray", false, true),
         NicRdmaKind::Unsupported => return None,
     };
+    // Anything that isn't actively serving RDMA has something to diagnose.
+    let diagnose = !matches!(s.kind, NicRdmaKind::Active);
     Some(NicRow {
         rdma: s.rdma.unwrap_or_else(|| "—".into()),
         addrs: s
@@ -71,6 +78,7 @@ pub(crate) fn nic_row(s: NicStatus) -> Option<NicRow> {
         dot,
         roce,
         soft_roce,
+        diagnose,
         netdev: s.netdev,
     })
 }
@@ -257,6 +265,69 @@ async fn nic_detail_page(
     page(NicDetailTemplate {
         user,
         view: gather_nic_detail(&state.helper, &netdev, None, None).await,
+    })
+}
+
+// ---- Per-NIC Diagnose page (read-only RDMA-readiness checklist) ----
+
+pub struct NicDiagnoseView {
+    pub netdev: String,
+    /// Short status line for the header (empty when the NIC isn't found).
+    pub status: String,
+    pub dot_class: &'static str,
+    pub criteria: Vec<Criterion>,
+    pub not_found: bool,
+}
+
+#[derive(Template)]
+#[template(path = "nic_diagnose.html")]
+struct NicDiagnoseTemplate {
+    user: CurrentUser,
+    view: NicDiagnoseView,
+}
+
+/// Build the diagnose view for `netdev`: the vendor-neutral structural checklist
+/// plus whatever opaque advisory the helper supplied for this NIC.
+async fn gather_nic_diagnose(
+    helper: &crate::helper_client::HelperClient,
+    netdev: &str,
+) -> NicDiagnoseView {
+    let Some(status) = nic::interfaces(helper)
+        .await
+        .into_iter()
+        .find(|n| n.netdev == netdev)
+    else {
+        return NicDiagnoseView {
+            netdev: netdev.to_owned(),
+            status: String::new(),
+            dot_class: "dot-gray",
+            criteria: vec![],
+            not_found: true,
+        };
+    };
+    let advice = nic::rdma_advice(helper).await;
+    let criteria = nic_diagnostics(&status, advice.get(netdev));
+    // The header dot/label reuses the same per-row mapping as the table.
+    let (status_text, dot_class) = nic_row(status.clone())
+        .map(|r| (r.status, r.dot))
+        .unwrap_or((String::new(), "dot-gray"));
+    NicDiagnoseView {
+        netdev: netdev.to_owned(),
+        status: status_text,
+        dot_class,
+        criteria,
+        not_found: false,
+    }
+}
+
+async fn nic_diagnose_page(
+    State(state): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(netdev): Path<String>,
+) -> Response {
+    page(NicDiagnoseTemplate {
+        user,
+        view: gather_nic_diagnose(&state.helper, &netdev).await,
     })
 }
 
@@ -491,6 +562,27 @@ mod tests {
         );
         let (status, _, _) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
+
+        // The per-NIC Diagnose page renders its checklist (the back link and
+        // title are always present); a clearly nonexistent interface takes the
+        // graceful not-found path.
+        let req = auth(
+            HttpRequest::get("/settings/nic/eth0/diagnose")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("Diagnose"), "{body}");
+        assert!(body.contains("Back to Settings"), "{body}");
+        let req = auth(
+            HttpRequest::get("/settings/nic/zzz999/diagnose")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let (status, _, body) = send(&app, req).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.contains("not found"), "{body}");
 
         // Valid listen address persists; invalid is rejected.
         let (_, _, body) = send(

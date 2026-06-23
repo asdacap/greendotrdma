@@ -217,6 +217,13 @@ pub enum Request {
     EnableRoce {
         netdev: NetdevName,
     },
+    /// Per-NIC RDMA *advisories* (a privileged read): the helper inspects each
+    /// NIC's hardware via its vendor knowledge and returns opaque
+    /// `[{netdev, label, detail}]` JSON explaining why a NIC may lack RDMA and
+    /// how to fix it (e.g. an SR-IOV VF whose host must load the RDMA driver
+    /// before setting the VF count). The web renders these verbatim on the
+    /// per-NIC Diagnose page — it carries no vendor knowledge itself.
+    NicRdmaAdvice,
     /// Read live RDMA connections (`rdma -j resource show cm_id`): a privileged
     /// *read* used to surface NVMe-oF/iSER peers the kernel exposes no other
     /// way (this kernel lacks CONFIG_NVME_TARGET_DEBUGFS).
@@ -365,6 +372,7 @@ mod tests {
     #[case::enable_roce(Request::EnableRoce {
         netdev: NetdevName::new("ens16").unwrap(),
     })]
+    #[case::nic_rdma_advice(Request::NicRdmaAdvice)]
     #[case::rdma_resources(Request::RdmaResources)]
     #[case::install(Request::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],

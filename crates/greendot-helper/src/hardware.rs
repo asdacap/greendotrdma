@@ -144,6 +144,11 @@ fn vendor_id(net_dir: &Path) -> Option<String> {
     read_trimmed(&net_dir.join("device/vendor"))
 }
 
+/// PCI device id from the netdev's `device/device`, e.g. `"0x1889"`.
+fn device_id(net_dir: &Path) -> Option<String> {
+    read_trimmed(&net_dir.join("device/device"))
+}
+
 /// PCI address from the netdev's `device` symlink, e.g. `0000:00:10.0`.
 fn pci_of(net_dir: &Path) -> Option<PciAddress> {
     let target = std::fs::read_link(net_dir.join("device")).ok()?;
@@ -185,6 +190,58 @@ pub fn roce_capable(net_root: &Path) -> Vec<(String, &'static str)> {
     out
 }
 
+// ---- per-NIC RDMA advisories (diagnostic-only; vendor knowledge stays here) ----
+
+/// Intel's PCI vendor id.
+const INTEL_VENDOR_ID: &str = "0x8086";
+/// PCI device ids of Intel Ethernet *Adaptive Virtual Functions* (`iavf`) — the
+/// SR-IOV VFs of the irdma-capable families (E810/`ice`, X7xx/`i40e`). These
+/// VFs get RDMA only when the host loads `irdma` before the VF count is set;
+/// non-RDMA Intel VFs (igb/ixgbe) use other ids and are deliberately excluded.
+/// One entry today; extend the slice to cover more irdma VF ids.
+const INTEL_IRDMA_VF_IDS: &[&str] = &["0x1889"];
+
+/// Human advisory for a detected Intel irdma VF that has no RDMA: the host-side
+/// driver-ordering requirement is invisible from the VF, so spell it out.
+const IRDMA_VF_LABEL: &str = "SR-IOV VF: host must load the RDMA driver before creating VFs";
+const IRDMA_VF_DETAIL: &str = "This is an Intel Ethernet Adaptive virtual function. RDMA on the VF \
+     works only if the host loads the irdma driver (modprobe irdma) BEFORE the \
+     VF count is set via sriov_numvfs. VFs created before irdma is loaded come \
+     up without RDMA — on the host, load irdma, then re-create the VFs.";
+
+/// Every ethernet NIC that is an Intel irdma-capable Adaptive VF: matched by
+/// PCI vendor [`INTEL_VENDOR_ID`] and a device id in [`INTEL_IRDMA_VF_IDS`].
+fn intel_irdma_vfs(net_root: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(net_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let net_dir = entry.path();
+            if !is_ethernet(&net_dir) || vendor_id(&net_dir).as_deref() != Some(INTEL_VENDOR_ID) {
+                return None;
+            }
+            let dev = device_id(&net_dir)?;
+            INTEL_IRDMA_VF_IDS
+                .contains(&dev.as_str())
+                .then(|| entry.file_name().to_string_lossy().into_owned())
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Per-NIC RDMA advisories as `(netdev, label, detail)` — the vendor-specific
+/// explanations the web renders opaquely on the Diagnose page. Only Intel irdma
+/// VFs produce one today; this is where any future per-NIC advice is added.
+fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)> {
+    intel_irdma_vfs(net_root)
+        .into_iter()
+        .map(|netdev| (netdev, IRDMA_VF_LABEL, IRDMA_VF_DETAIL))
+        .collect()
+}
+
 // ---- streamed handlers (collected/recorded by the web like NfsReport/NfsApply) ----
 
 /// Streams the RoCE-capable NIC inventory as one JSON line — a privileged read
@@ -201,6 +258,30 @@ pub fn report_capable_into(net_root: &Path, sink: &mut dyn EventSink) -> io::Res
         .collect();
     sink.emit(TaskEvent::Stdout {
         data: serde_json::Value::Array(nics).to_string(),
+    })?;
+    sink.emit(TaskEvent::Finished {
+        exit: 0,
+        ok: true,
+        error: None,
+    })
+}
+
+/// Streams the per-NIC RDMA advisories as one JSON line — a privileged read the
+/// web collects: `[{"netdev":"ens16v0","label":"…","detail":"…"}, …]`.
+pub fn report_nic_advice_into(net_root: &Path, sink: &mut dyn EventSink) -> io::Result<()> {
+    sink.emit(TaskEvent::Started {
+        command: "nic-advice".into(),
+        args: Vec::new(),
+        stdin: None,
+    })?;
+    let advice: Vec<serde_json::Value> = nic_rdma_advice(net_root)
+        .into_iter()
+        .map(|(netdev, label, detail)| {
+            serde_json::json!({ "netdev": netdev, "label": label, "detail": detail })
+        })
+        .collect();
+    sink.emit(TaskEvent::Stdout {
+        data: serde_json::Value::Array(advice).to_string(),
     })?;
     sink.emit(TaskEvent::Finished {
         exit: 0,
@@ -309,14 +390,17 @@ mod tests {
             Fixture { root }
         }
 
-        fn netdev(&self, name: &str, type_: &str, pci: Option<(&str, &str)>) {
+        /// A netdev with the given ARPHRD `type` and, when `pci` is set, a PCI
+        /// `device` symlink to a dir carrying that `(pci_addr, vendor, device)`.
+        fn netdev(&self, name: &str, type_: &str, pci: Option<(&str, &str, &str)>) {
             let dir = self.root.join("net").join(name);
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("type"), format!("{type_}\n")).unwrap();
-            if let Some((pci, vendor)) = pci {
+            if let Some((pci, vendor, device)) = pci {
                 let pci_dir = self.root.join("pci").join(pci);
                 std::fs::create_dir_all(&pci_dir).unwrap();
                 std::fs::write(pci_dir.join("vendor"), format!("{vendor}\n")).unwrap();
+                std::fs::write(pci_dir.join("device"), format!("{device}\n")).unwrap();
                 std::os::unix::fs::symlink(&pci_dir, dir.join("device")).unwrap();
             }
         }
@@ -335,8 +419,8 @@ mod tests {
     #[test]
     fn detect_and_inventory_match_only_registered_vendors() {
         let f = Fixture::new("detect");
-        f.netdev("ens16", "1", Some(("0000:00:10.0", "0x15b3"))); // Mellanox
-        f.netdev("eth0", "1", Some(("0000:01:00.0", "0x10ec"))); // Realtek
+        f.netdev("ens16", "1", Some(("0000:00:10.0", "0x15b3", "0x1017"))); // Mellanox
+        f.netdev("eth0", "1", Some(("0000:01:00.0", "0x10ec", "0x8168"))); // Realtek
         f.netdev("br0", "1", None); // virtual (no PCI device)
 
         let (hw, pci) = detect(&f.net_root(), "ens16").expect("Mellanox detected");
@@ -349,6 +433,26 @@ mod tests {
             roce_capable(&f.net_root()),
             vec![("ens16".to_owned(), "Mellanox")]
         );
+    }
+
+    #[test]
+    fn intel_irdma_vfs_match_only_the_adaptive_vf_id() {
+        let f = Fixture::new("ivf");
+        // Intel Adaptive VF (8086:1889) → detected, with an advisory.
+        f.netdev("ens16v0", "1", Some(("0000:00:10.1", "0x8086", "0x1889")));
+        // Intel non-RDMA VF (different device id) → not detected.
+        f.netdev("eth2", "1", Some(("0000:02:10.1", "0x8086", "0x10ed")));
+        // Non-Intel vendor with the same device id → not detected (vendor gates).
+        f.netdev("eth3", "1", Some(("0000:03:00.0", "0x15b3", "0x1889")));
+        // Virtual interface (no PCI device) → not detected.
+        f.netdev("br0", "1", None);
+
+        assert_eq!(intel_irdma_vfs(&f.net_root()), vec!["ens16v0".to_owned()]);
+        let advice = nic_rdma_advice(&f.net_root());
+        assert_eq!(advice.len(), 1);
+        assert_eq!(advice[0].0, "ens16v0");
+        assert_eq!(advice[0].1, IRDMA_VF_LABEL);
+        assert!(advice[0].2.contains("sriov_numvfs"), "{}", advice[0].2);
     }
 
     #[test]

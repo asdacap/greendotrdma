@@ -3,6 +3,7 @@
 
 use crate::actual::lio::{ActualLio, Portal, Target};
 use crate::actual::nfs::ActualNfs;
+use crate::actual::nic::{NicAdvice, NicRdmaKind, NicStatus};
 use crate::actual::nvmet::{ActualNvmet, Port};
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
 use crate::state::{IscsiExport, NfsExport, NvmeExport};
@@ -553,6 +554,54 @@ pub fn nfs_diagnostics(
     crits
 }
 
+/// Ordered RDMA-readiness checklist for a single NIC: the vendor-neutral
+/// structural chain (an RDMA device backs it, a port is ACTIVE, it has an IP),
+/// followed by any opaque per-NIC advisory the helper supplied — rendered
+/// verbatim, marked satisfied once RDMA is present. This module reads nothing
+/// vendor-specific into the advisory; that knowledge lives only in the helper.
+pub fn nic_diagnostics(nic: &NicStatus, advice: Option<&NicAdvice>) -> Vec<Criterion> {
+    let mut crits = vec![
+        crit(
+            "RDMA device backs this interface",
+            nic.rdma.is_some(),
+            match &nic.rdma {
+                Some(dev) => dev.clone(),
+                None => "no RDMA device under /sys/class/infiniband for this interface".to_owned(),
+            },
+        ),
+        crit(
+            "An RDMA port is ACTIVE",
+            matches!(nic.kind, NicRdmaKind::Active),
+            match nic.kind {
+                NicRdmaKind::Active => "port ACTIVE".to_owned(),
+                NicRdmaKind::Inactive => "RDMA device present but all ports down".to_owned(),
+                _ => "no RDMA device".to_owned(),
+            },
+        ),
+        crit(
+            "Interface has a usable IP",
+            !nic.addrs.is_empty(),
+            if nic.addrs.is_empty() {
+                "no non-loopback IP on this interface".to_owned()
+            } else {
+                nic.addrs
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            },
+        ),
+    ];
+    if let Some(a) = advice {
+        crits.push(Criterion {
+            label: a.label.clone(),
+            ok: nic.rdma.is_some(),
+            detail: a.detail.clone(),
+        });
+    }
+    crits
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1095,5 +1144,46 @@ mod tests {
             external_nfs_dot(&actual_nfs(true, None), &dev, listen).state,
             DotState::Yellow
         );
+    }
+
+    #[test]
+    fn nic_diagnostics_structural_chain_and_opaque_advisory() {
+        let nic = |rdma: Option<&str>, kind: NicRdmaKind, addrs: &[&str]| NicStatus {
+            netdev: "ens16v0".into(),
+            rdma: rdma.map(Into::into),
+            addrs: addrs.iter().map(|a| a.parse().unwrap()).collect(),
+            kind,
+        };
+
+        // Plain NIC, no RDMA: the structural chain fails and there is no
+        // advisory row.
+        let bare = nic(None, NicRdmaKind::SoftRoceable, &[]);
+        let crits = nic_diagnostics(&bare, None);
+        assert_eq!(crits.len(), 3);
+        assert!(crits.iter().all(|c| !c.ok), "{crits:#?}");
+
+        // The helper's opaque advisory is appended verbatim and fails while RDMA
+        // is still absent — the web reads nothing vendor-specific into it.
+        let advice = NicAdvice {
+            label: "Do X".into(),
+            detail: "first do Y".into(),
+        };
+        let crits = nic_diagnostics(&bare, Some(&advice));
+        assert_eq!(crits.len(), 4);
+        assert_eq!(crits[3].label, "Do X");
+        assert_eq!(crits[3].detail, "first do Y");
+        assert!(!crits[3].ok);
+
+        // Active, addressed NIC: structural rows pass and the advisory reads as
+        // satisfied (RDMA present).
+        let active = nic(Some("rxe-eth0"), NicRdmaKind::Active, &["10.0.0.5"]);
+        assert!(nic_diagnostics(&active, Some(&advice)).iter().all(|c| c.ok));
+
+        // Inactive device: the port-active row owns the failure, device-present
+        // stays green.
+        let down = nic(Some("ib0"), NicRdmaKind::Inactive, &["10.0.0.5"]);
+        let crits = nic_diagnostics(&down, None);
+        assert!(find(&crits, "RDMA device backs").ok);
+        assert!(!find(&crits, "port is ACTIVE").ok);
     }
 }

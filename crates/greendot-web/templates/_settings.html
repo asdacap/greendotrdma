@@ -84,6 +84,7 @@
         <td class="small">{{ n.status }}</td>
         <td>
           {% if n.roce || n.soft_roce %}<a href="/settings/nic/{{ n.netdev }}">Manage</a>{% endif %}
+          {% if n.diagnose %}<a href="/settings/nic/{{ n.netdev }}/diagnose">Diagnose</a>{% endif %}
         </td>
       </tr>
       {% endfor %}

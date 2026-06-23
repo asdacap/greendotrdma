@@ -31,6 +31,9 @@ pub enum Dispatch {
     /// Privileged read of the RoCE-capable NIC inventory (vendor classification
     /// via the `NetworkHardware` registry), streamed as JSON like `NfsReport`.
     RoceCapableNics,
+    /// Privileged read of per-NIC RDMA advisories (vendor-specific diagnostic
+    /// text), streamed as JSON like `RoceCapableNics`.
+    NicRdmaAdvice,
     /// Turn on hardware RoCE for a NIC: vendor-detect, probe, then set+reload —
     /// the multi-step vendor-specific flow streamed as one task.
     EnableRoce(NetdevName),
@@ -91,6 +94,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         },
         Request::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
         Request::RoceCapableNics => Dispatch::RoceCapableNics,
+        Request::NicRdmaAdvice => Dispatch::NicRdmaAdvice,
         Request::EnableRoce { netdev } => Dispatch::EnableRoce(netdev),
         Request::RdmaResources => Dispatch::Task(modules::rdma_resources()),
 
@@ -395,6 +399,10 @@ mod tests {
         assert!(matches!(
             plan(&ctx, Request::RoceCapableNics),
             Dispatch::RoceCapableNics
+        ));
+        assert!(matches!(
+            plan(&ctx, Request::NicRdmaAdvice),
+            Dispatch::NicRdmaAdvice
         ));
         assert!(matches!(
             plan(&ctx, Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
