@@ -20,6 +20,14 @@ pkgs.testers.runNixOSTest {
     machine.wait_for_unit("greendot-web.service")
     machine.wait_for_open_port(8080)
 
+    # The helper must share the host (PID 1) mount namespace: a private mount
+    # namespace (PrivateTmp=/ProtectHome=/ProtectSystem=) confines its zfs/btrfs
+    # mounts to that namespace, so the host and greendot-web never see them.
+    machine.succeed(
+        'test "$(readlink /proc/$(systemctl show -p MainPID --value greendot-helper)/ns/mnt)"'
+        ' = "$(readlink /proc/1/ns/mnt)"'
+    )
+
     # configfs + a Soft-RoCE device so RDMA is real. eth1 is the deterministic
     # NixOS-test LAN (192.168.1.1); wait for its address before using it.
     machine.succeed("mountpoint -q /sys/kernel/config || mount -t configfs none /sys/kernel/config")

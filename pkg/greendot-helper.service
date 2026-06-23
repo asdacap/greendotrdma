@@ -11,12 +11,17 @@ Group=greendot
 ExecStart=/usr/libexec/greendotrdma/greendot-helper
 Restart=on-failure
 RestartSec=2
-# Must stay root for configfs/PAM/zfs, but lock down what we can. NOTE: the NFS
-# apply path writes /proc/fs/nfsd/portlist and runs `systemctl start nfs-server`,
-# so do NOT add ProtectKernelTunables=/ProtectControlGroups=/RestrictAddressFamilies=
-# here — they would silently break NFS-over-RDMA.
-ProtectHome=yes
-PrivateTmp=yes
+# Must stay root for configfs/PAM/zfs, and must run in the HOST mount namespace:
+# the helper mounts filesystems (`zfs mount`, the auto-mount of `zfs create`,
+# btrfs resize mounts) that the host and greendot-web have to see. Any
+# mount-namespace sandbox option — PrivateTmp=, ProtectHome=, ProtectSystem=,
+# ReadOnlyPaths=/ReadWritePaths= — gives the unit its own namespace with `slave`
+# propagation, so mounts it makes never reach the host: `zfs list` then shows the
+# dataset unmounted while a retry `zfs mount` fails "filesystem already mounted".
+# So do NOT add them. Likewise do NOT add ProtectKernelTunables=/
+# ProtectControlGroups=/RestrictAddressFamilies=: the NFS apply path writes
+# /proc/fs/nfsd/portlist and runs `systemctl start nfs-server`, which they would
+# silently break.
 RuntimeDirectory=greendotrdma
 RuntimeDirectoryMode=0750
 RuntimeDirectoryPreserve=yes

@@ -39,6 +39,15 @@ echo "== waiting for the web service"
 for _ in $(seq 1 60); do curl -fsk "$WEB/" >/dev/null 2>&1 && break || sleep 1; done
 curl -fsk "$WEB/" >/dev/null || fail "web service never came up"
 
+# The helper must share the host (PID 1) mount namespace: a private mount
+# namespace (from PrivateTmp=/ProtectHome=/ProtectSystem=) confines its `zfs
+# mount`/`zfs create` mounts to that namespace, so the host and greendot-web
+# never see them ("filesystem already mounted" on retry; dataset shows unmounted).
+echo "== helper must run in the host mount namespace"
+HPID=$(systemctl show -p MainPID --value greendot-helper)
+[ "$(readlink "/proc/$HPID/ns/mnt")" = "$(readlink /proc/1/ns/mnt)" ] \
+    || fail "greendot-helper is in a private mount namespace; its zfs mounts never reach the host"
+
 echo "== storage + Soft-RoCE"
 modprobe zfs rdma_rxe nvmet nvmet_rdma nvme_rdma nvme_fabrics \
     target_core_mod iscsi_target_mod ib_isert 2>/dev/null || true
