@@ -110,6 +110,9 @@ pub struct PartRow {
     pub device_path: String,
     /// What the partition is used for (ZFS/LVM/mount/export/available).
     pub usage: String,
+    /// ZFS pool this partition belongs to, when known — rendered as a link to
+    /// `/zfs/pool/<name>` in place of the plain `usage` text.
+    pub pool: Option<String>,
     /// Whether a new ZFS pool may be built from this partition.
     pub poolable: bool,
 }
@@ -119,6 +122,10 @@ pub struct DiskRow {
     pub size: String,
     pub model: String,
     pub serial: String,
+    /// Bus the disk is attached over (`"NVMe"`/`"SATA"`/`"SAS"`/…, `"—"` if unknown).
+    pub transport: String,
+    /// Stable `/dev/disk/by-id/<link>` path (empty when lsblk reports no link).
+    pub by_id: String,
     /// Approximate unallocated space (disk size minus the partition sizes).
     pub free: String,
     pub no_space: bool,
@@ -131,6 +138,9 @@ pub struct DiskRow {
     pub temp: String,
     /// What the disk is used for (ZFS/LVM/mount/partitioned/available).
     pub usage: String,
+    /// ZFS pool this disk belongs to, when known — rendered as a link to
+    /// `/zfs/pool/<name>` in place of the plain `usage` text.
+    pub pool: Option<String>,
     /// Whether a new ZFS pool may be built from the whole disk.
     pub poolable: bool,
 }
@@ -172,6 +182,29 @@ fn fs_display(fstype: Option<&str>) -> String {
         Some("LVM2_member") => "LVM".into(),
         Some(f) => f.into(),
     }
+}
+
+/// Human-friendly bus name for the `lsblk TRAN` value (generic transport, not
+/// vendor knowledge): `nvme` → `NVMe`, `sata` → `SATA`, …; `"—"` when unknown,
+/// uppercased otherwise.
+fn transport_display(tran: Option<&str>) -> String {
+    match tran {
+        None => "—".into(),
+        Some("nvme") => "NVMe".into(),
+        Some("sata") => "SATA".into(),
+        Some("sas") => "SAS".into(),
+        Some("usb") => "USB".into(),
+        Some(t) => t.to_uppercase(),
+    }
+}
+
+/// ZFS pool name for a device path, but only when the device's filesystem marks
+/// it a pool member — mirrors the `zfs_member` branch of [`usage_for`] so the
+/// pool link shows in exactly the cases that text resolves a pool name.
+fn pool_for(device_path: &str, fstype: Option<&str>, ctx: &DeviceContext) -> Option<String> {
+    (fstype == Some("zfs_member"))
+        .then(|| ctx.members.get(device_path).cloned())
+        .flatten()
 }
 
 #[derive(Template)]
@@ -216,16 +249,23 @@ fn disk_row(d: block::Disk, ctx: &DeviceContext) -> DiskRow {
         d.partitions.len(),
         ctx,
     );
+    let pool = pool_for(&device_path, d.fstype.as_deref(), ctx);
     DiskRow {
         size: human_bytes(d.size),
         model: d.model.unwrap_or_default(),
         serial: d.serial.unwrap_or_default(),
+        transport: transport_display(d.transport.as_deref()),
+        by_id: d
+            .id_link
+            .map(|l| format!("/dev/disk/by-id/{l}"))
+            .unwrap_or_default(),
         free: human_bytes(unallocated),
         no_space: unallocated < (1 << 20),
         dot_class: smart::dot_class(health),
         temp: smart::temp_display(health),
         poolable: ctx.poolable.contains(&device_path),
         usage,
+        pool,
         partitions: d.partitions.into_iter().map(|p| part_row(p, ctx)).collect(),
         device_path,
         name: d.name,
@@ -242,6 +282,7 @@ fn part_row(p: block::Partition, ctx: &DeviceContext) -> PartRow {
         ctx,
     );
     let poolable = ctx.poolable.contains(&device_path);
+    let pool = pool_for(&device_path, p.fstype.as_deref(), ctx);
     let mountpoint = p.mountpoint.unwrap_or_default();
     let mounted = !mountpoint.is_empty();
     let fstype = fs_display(p.fstype.as_deref());
@@ -259,6 +300,7 @@ fn part_row(p: block::Partition, ctx: &DeviceContext) -> PartRow {
         shrink_reason,
         poolable,
         usage,
+        pool,
         device_path,
         name: p.name,
     }
@@ -837,7 +879,7 @@ async fn part_shrink(
 
 #[cfg(test)]
 mod tests {
-    use super::{DeviceContext, Shrink, fs_display, shrinkability, usage_for};
+    use super::{DeviceContext, Shrink, fs_display, shrinkability, transport_display, usage_for};
     use crate::routes::testutil::{form_post, login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
@@ -889,6 +931,17 @@ mod tests {
     #[case(Some("LVM2_member"), "LVM")]
     fn fs_display_names_special_members(#[case] fstype: Option<&str>, #[case] expected: &str) {
         assert_eq!(fs_display(fstype), expected);
+    }
+
+    #[rstest]
+    #[case(None, "—")]
+    #[case(Some("nvme"), "NVMe")]
+    #[case(Some("sata"), "SATA")]
+    #[case(Some("sas"), "SAS")]
+    #[case(Some("usb"), "USB")]
+    #[case(Some("fc"), "FC")]
+    fn transport_display_names_known_buses(#[case] tran: Option<&str>, #[case] expected: &str) {
+        assert_eq!(transport_display(tran), expected);
     }
 
     #[rstest]

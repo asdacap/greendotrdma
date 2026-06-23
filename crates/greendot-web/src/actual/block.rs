@@ -12,6 +12,12 @@ pub struct Disk {
     pub size: u64,
     pub model: Option<String>,
     pub serial: Option<String>,
+    /// Bus the disk is attached over (`nvme`, `sata`, `sas`, …), as reported by
+    /// `lsblk TRAN`.
+    pub transport: Option<String>,
+    /// Shortest `/dev/disk/by-id` link *name* (e.g. `nvme-Samsung_980_S1`), from
+    /// `lsblk ID-LINK`; the full by-id path is composed in the view layer.
+    pub id_link: Option<String>,
     /// Set when the disk is formatted/used directly (no partition table).
     pub mountpoint: Option<String>,
     pub fstype: Option<String>,
@@ -69,6 +75,10 @@ struct LsblkDev {
     #[serde(default)]
     serial: Option<String>,
     #[serde(default)]
+    tran: Option<String>,
+    #[serde(rename = "id-link", default)]
+    id_link: Option<String>,
+    #[serde(default)]
     partlabel: Option<String>,
     #[serde(default)]
     mountpoint: Option<String>,
@@ -114,6 +124,8 @@ pub fn parse_lsblk(json: &str) -> Result<Vec<Disk>> {
             size: d.size,
             model: d.model.filter(|m| !m.trim().is_empty()),
             serial: d.serial.filter(|s| !s.trim().is_empty()),
+            transport: d.tran.filter(|t| !t.trim().is_empty()),
+            id_link: d.id_link.filter(|s| !s.trim().is_empty()),
             mountpoint: d.mountpoint.filter(|m| !m.trim().is_empty()),
             fstype: d.fstype.filter(|f| !f.trim().is_empty()),
         })
@@ -247,7 +259,7 @@ pub async fn disks() -> Result<Vec<Disk>> {
             "--json",
             "--bytes",
             "-o",
-            "NAME,TYPE,SIZE,FSTYPE,MODEL,SERIAL,PARTLABEL,MOUNTPOINT",
+            "NAME,TYPE,SIZE,FSTYPE,MODEL,SERIAL,TRAN,ID-LINK,PARTLABEL,MOUNTPOINT",
         ])
         .output()
         .await
@@ -278,12 +290,12 @@ mod tests {
     fn parses_lsblk_fixture_filtering_zvols_and_non_disks() {
         let json = r#"{
             "blockdevices": [
-                {"name":"sda","type":"disk","size":4000787030016,"fstype":null,"model":"WDC WD40EFRX","serial":"WD-X","partlabel":null,"mountpoint":null,
+                {"name":"sda","type":"disk","size":4000787030016,"fstype":null,"model":"WDC WD40EFRX","serial":"WD-X","tran":"sata","id-link":"ata-WDC_WD40EFRX_WD-X","partlabel":null,"mountpoint":null,
                  "children":[
                     {"name":"sda1","type":"part","size":536870912,"fstype":"vfat","model":null,"serial":null,"partlabel":"boot","mountpoint":"/boot"},
                     {"name":"sda2","type":"part","size":4000248159744,"fstype":"ext4","model":null,"serial":null,"partlabel":null,"mountpoint":null}
                  ]},
-                {"name":"nvme0n1","type":"disk","size":512110190592,"fstype":null,"model":"Samsung 980","serial":"S1","partlabel":null,"mountpoint":null,
+                {"name":"nvme0n1","type":"disk","size":512110190592,"fstype":null,"model":"Samsung 980","serial":"S1","tran":"nvme","id-link":"","partlabel":null,"mountpoint":null,
                  "children":[
                     {"name":"nvme0n1p2","type":"part","size":1024,"fstype":"zfs_member","model":null,"serial":null,"partlabel":"x","mountpoint":null}
                  ]},
@@ -295,6 +307,17 @@ mod tests {
         assert_eq!(disks.len(), 2, "zd0 and sr0 filtered out");
         assert_eq!(disks[0].name, "sda");
         assert_eq!(disks[0].model.as_deref(), Some("WDC WD40EFRX"));
+        assert_eq!(disks[0].transport.as_deref(), Some("sata"));
+        assert_eq!(
+            disks[0].id_link.as_deref(),
+            Some("ata-WDC_WD40EFRX_WD-X"),
+            "by-id link surfaced"
+        );
+        assert_eq!(disks[1].transport.as_deref(), Some("nvme"));
+        assert_eq!(
+            disks[1].id_link, None,
+            "empty id-link guarded to None like model/serial"
+        );
         assert_eq!(disks[0].partitions.len(), 2);
         assert_eq!(disks[0].partitions[0].number, Some(1));
         assert_eq!(disks[0].partitions[0].label.as_deref(), Some("boot"));
@@ -320,6 +343,8 @@ mod tests {
             size: 100 << 30,
             model: None,
             serial: None,
+            transport: None,
+            id_link: None,
             mountpoint: None,
             fstype: None,
             partitions,

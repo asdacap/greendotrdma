@@ -17,7 +17,7 @@
         <td>{{ part.fstype }}</td>
         <td>{{ part.label }}</td>
         <td>{{ part.mountpoint }}</td>
-        <td>{{ part.usage }}</td>
+        <td>{% if let Some(pool) = part.pool %}ZFS pool: <a href="/zfs/pool/{{ pool }}">{{ pool }}</a>{% else %}{{ part.usage }}{% endif %}</td>
       </tr>
     </tbody>
   </table>

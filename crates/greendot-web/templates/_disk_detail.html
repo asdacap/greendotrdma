@@ -10,18 +10,22 @@
   {% if let Some(disk) = view.disk %}
   <h2><span class="dot {{ disk.dot_class }}" title="SMART status"></span> /dev/{{ view.name }}</h2>
   <table>
-    <thead><tr><th>Size</th><th>Model</th><th>Serial</th><th>Temp</th><th>Used for</th><th>Free</th></tr></thead>
+    <thead><tr><th>Size</th><th>Model</th><th>Serial</th><th>Transport</th><th>Temp</th><th>Used for</th><th>Free</th></tr></thead>
     <tbody>
       <tr>
         <td>{{ disk.size }}</td>
         <td>{{ disk.model }}</td>
         <td>{{ disk.serial }}</td>
+        <td>{{ disk.transport }}</td>
         <td>{{ disk.temp }}</td>
-        <td>{{ disk.usage }}</td>
+        <td>{% if let Some(pool) = disk.pool %}ZFS pool: <a href="/zfs/pool/{{ pool }}">{{ pool }}</a>{% else %}{{ disk.usage }}{% endif %}</td>
         <td>{% if disk.no_space %}No space left{% else %}{{ disk.free }} (approx.){% endif %}</td>
       </tr>
     </tbody>
   </table>
+  {% if !disk.by_id.is_empty() %}
+  <p class="muted small">By-id path: {{ disk.by_id }}</p>
+  {% endif %}
   {% if disk.poolable %}
   <p><a href="/zfs/pool/create?device={{ disk.device_path }}">Create a ZFS pool with this whole disk →</a></p>
   {% endif %}
@@ -49,7 +53,7 @@
         <td>{{ p.fstype }}</td>
         <td>{{ p.label }}</td>
         <td>{{ p.mountpoint }}</td>
-        <td>{{ p.usage }}{% if p.poolable %} · <a href="/zfs/pool/create?device={{ p.device_path }}">create pool</a>{% endif %}</td>
+        <td>{% if let Some(pool) = p.pool %}ZFS pool: <a href="/zfs/pool/{{ pool }}">{{ pool }}</a>{% else %}{{ p.usage }}{% endif %}{% if p.poolable %} · <a href="/zfs/pool/create?device={{ p.device_path }}">create pool</a>{% endif %}</td>
         <td>
           {% if let Some(number) = p.number %}
           <a href="/disks/{{ view.name }}/part/{{ number }}">Manage</a>
