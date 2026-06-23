@@ -24,8 +24,9 @@
 
   {% if pv.in_vg %}
   <h2>Remove from VG</h2>
-  <form class="inline" hx-post="/lvm/vg/reduce"
-        hx-confirm="Remove {{ pv.name }} from {{ pv.vg }}? Fails if it still holds data.">
+  <form class="inline" hx-post="/lvm/vg/reduce" hx-target="#pv-detail-content" hx-swap="outerHTML"
+        hx-confirm="Remove {{ pv.name }} from {{ pv.vg }}? Fails if it still holds data."
+        data-confirm-path="{{ pv.name }}">
     <input type="hidden" name="vg" value="{{ pv.vg }}">
     <input type="hidden" name="device" value="{{ pv.name }}">
     <button class="danger">Remove from VG</button>

@@ -77,7 +77,8 @@
   {% endif %}
 
   <h2>Add partition</h2>
-  <form class="inline" hx-post="/disks/part/create" hx-target="#disk-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/disks/part/create" hx-target="#disk-detail-content" hx-swap="outerHTML"
+        hx-confirm="Add a partition to /dev/{{ view.name }}?">
     <input type="hidden" name="disk" value="{{ view.name }}">
     <input name="size" size="9" placeholder="fill space">
     <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
@@ -87,7 +88,8 @@
 
   <h2>Reset disk</h2>
   <form class="inline" hx-post="/disks/table" hx-target="#disk-detail-content" hx-swap="outerHTML"
-        hx-confirm="Write a brand-new empty GPT to /dev/{{ view.name }}? ALL existing partitions and data are lost.">
+        hx-confirm="Write a brand-new empty GPT to /dev/{{ view.name }}? ALL existing partitions and data are lost."
+        data-confirm-path="/dev/{{ view.name }}">
     <input type="hidden" name="disk" value="{{ view.name }}">
     <button class="danger">New GPT (wipe)</button>
   </form>

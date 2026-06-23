@@ -23,15 +23,16 @@
   </table>
 
   <h2>{% if policy.enabled %}Disable{% else %}Enable{% endif %} policy</h2>
-  <form class="inline" hx-post="/snapshots/policy/toggle" hx-target="#policy-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/snapshots/policy/toggle" hx-target="#policy-detail-content" hx-swap="outerHTML"
+        hx-confirm="{% if policy.enabled %}Disable{% else %}Enable{% endif %} the snapshot policy for {{ policy.dataset }}?">
     <input type="hidden" name="id" value="{{ policy.id }}">
     <input type="hidden" name="enable" value="{{ !policy.enabled }}">
     <button>{% if policy.enabled %}Disable{% else %}Enable{% endif %}</button>
   </form>
 
   <h2>Delete policy</h2>
-  <form class="inline" hx-post="/snapshots/policy/delete"
-        hx-confirm="Delete this policy?">
+  <form class="inline" hx-post="/snapshots/policy/delete" hx-target="#policy-detail-content" hx-swap="outerHTML"
+        hx-confirm="Delete the snapshot policy for {{ policy.dataset }}? Existing snapshots are kept.">
     <input type="hidden" name="id" value="{{ policy.id }}">
     <button class="danger">Delete</button>
   </form>

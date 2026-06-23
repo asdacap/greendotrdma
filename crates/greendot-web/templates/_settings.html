@@ -3,7 +3,8 @@
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
   {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
 
-  <form class="inline" hx-post="/settings/reconcile" hx-target="#settings-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/settings/reconcile" hx-target="#settings-content" hx-swap="outerHTML"
+        hx-confirm="Run a reconcile pass now?">
     <button>Reconcile now</button>
   </form>
   <p class="muted small">Reconciliation runs automatically on a timer; use this to force an immediate pass.</p>
@@ -24,7 +25,8 @@
     </tbody>
   </table>
   {% if !view.installable_packages.is_empty() %}
-  <form class="inline" hx-post="/settings/install" hx-target="#settings-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/settings/install" hx-target="#settings-content" hx-swap="outerHTML"
+        hx-confirm="Install {{ view.installable_packages }}?">
     <input type="hidden" name="packages" value="{{ view.installable_packages }}">
     <button>Install missing ({{ view.installable_packages }})</button>
   </form>
@@ -39,7 +41,8 @@
   {% endif %}
 
   <h2>Default target listen address</h2>
-  <form class="card" hx-post="/settings/listen" hx-target="#settings-content" hx-swap="outerHTML">
+  <form class="card" hx-post="/settings/listen" hx-target="#settings-content" hx-swap="outerHTML"
+        hx-confirm="Save the default listen address and reconcile?">
     <label>Default listen address — NVMe-oF and iSCSI targets bind here unless an export pins specific interfaces
       <input name="listen_addr" value="{{ view.listen_addr }}">
     </label>

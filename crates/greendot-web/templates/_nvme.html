@@ -31,8 +31,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>New NVMe-oF export</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>New NVMe-oF export</button>
+  <dialog>
+  <article>
+  <header>New NVMe-oF export</header>
   <form class="card" hx-post="/nvme/create" hx-target="#nvme-content" hx-swap="outerHTML">
     <label>Name <input name="name" placeholder="vm1" required></label>
     <label>Block device
@@ -60,7 +62,11 @@
     <label>Allowed initiator NQNs (one per line, empty = allow any host)
       <textarea name="initiators" rows="3" placeholder="nqn.2014-08.org.nvmexpress:..."></textarea>
     </label>
-    <button type="submit">Create export</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create export</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 </div>

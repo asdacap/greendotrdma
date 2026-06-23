@@ -31,7 +31,8 @@
   {% if view.extend_devices.is_empty() %}
   <p class="muted small">No free devices to extend this group.</p>
   {% else %}
-  <form class="inline" hx-post="/lvm/vg/extend" hx-target="#vg-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/lvm/vg/extend" hx-target="#vg-detail-content" hx-swap="outerHTML"
+        hx-confirm="Extend {{ view.name }} with the selected device?">
     <input type="hidden" name="vg" value="{{ view.name }}">
     <select name="device">
       {% for d in view.extend_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
@@ -41,8 +42,9 @@
   {% endif %}
 
   <h2>Remove volume group</h2>
-  <form class="inline" hx-post="/lvm/vg/delete"
-        hx-confirm="Remove volume group {{ view.name }}? Only an empty group can be removed.">
+  <form class="inline" hx-post="/lvm/vg/delete" hx-target="#vg-detail-content" hx-swap="outerHTML"
+        hx-confirm="Remove volume group {{ view.name }}? Only an empty group can be removed."
+        data-confirm-path="{{ view.name }}">
     <input type="hidden" name="vg" value="{{ view.name }}">
     <button class="danger">Remove VG</button>
   </form>
@@ -68,8 +70,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>Create logical volume</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>Create logical volume</button>
+  <dialog>
+  <article>
+  <header>Create logical volume</header>
   <form class="card" hx-post="/lvm/lv" hx-target="#vg-detail-content" hx-swap="outerHTML">
     <input type="hidden" name="vg" value="{{ view.name }}">
     <label>Name <input name="name" placeholder="data" required></label>
@@ -81,12 +85,18 @@
     <label>Thin pool
       <select name="pool">{% for p in view.thin_pools %}<option>{{ p }}</option>{% endfor %}</select>
     </label>
-    <button type="submit">Create</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 
-  <details>
-  <summary>Create thin pool</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>Create thin pool</button>
+  <dialog>
+  <article>
+  <header>Create thin pool</header>
   <form class="card" hx-post="/lvm/thinpool" hx-target="#vg-detail-content" hx-swap="outerHTML">
     <input type="hidden" name="vg" value="{{ view.name }}">
     <label>Name <input name="name" placeholder="pool0" required></label>
@@ -94,8 +104,12 @@
       <input name="size" size="6" required>
       <select name="unit"><option>GiB</option><option>MiB</option><option>TiB</option></select>
     </label>
-    <button type="submit">Create pool</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create pool</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
   {% endif %}
 </div>

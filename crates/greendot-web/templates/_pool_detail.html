@@ -30,20 +30,28 @@
   </table>
   {% endif %}
 
-  <details>
-    <summary>Add device</summary>
-    {% if view.add_devices.is_empty() %}
-    <p class="muted small">No free devices to add — free up an unmounted, empty partition or disk first.</p>
-    {% else %}
-    <form class="inline" hx-post="/zfs/pool/{{ view.name }}/add-device" hx-target="#pool-detail-content" hx-swap="outerHTML"
-          hx-confirm="Add a device to {{ view.name }}? A single-disk vdev is refused if it would reduce the pool's redundancy.">
-      <select name="device">
-        {% for d in view.add_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
-      </select>
-      <button>Add device</button>
-    </form>
-    {% endif %}
-  </details>
+  <button type="button" class="dialog-trigger" data-dialog-open>Add device</button>
+  <dialog>
+    <article>
+      <header>Add device — {{ view.name }}</header>
+      {% if view.add_devices.is_empty() %}
+      <p class="muted small">No free devices to add — free up an unmounted, empty partition or disk first.</p>
+      {% else %}
+      <form class="card" hx-post="/zfs/pool/{{ view.name }}/add-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
+        <label>Device
+          <select name="device">
+            {% for d in view.add_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+          </select>
+        </label>
+        <p class="muted small">A single-disk vdev is refused if it would reduce the pool's redundancy.</p>
+        <footer>
+          <button type="button" class="secondary" data-dialog-close>Cancel</button>
+          <button type="submit">Add device</button>
+        </footer>
+      </form>
+      {% endif %}
+    </article>
+  </dialog>
 
   <h2>Filesystems</h2>
   {% if view.fs_rows.is_empty() %}
@@ -64,33 +72,50 @@
         <td>
           <div class="rowactions">
             {% if f.mounted %}
-            <form class="inline" hx-post="/zfs/fs/unmount" hx-target="#pool-detail-content" hx-swap="outerHTML">
+            <form class="inline" hx-post="/zfs/fs/unmount" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                  hx-confirm="Unmount {{ f.name }}?">
               <input type="hidden" name="dataset" value="{{ f.name }}">
               <button>Unmount</button>
             </form>
             {% else if f.mountable %}
-            <form class="inline" hx-post="/zfs/fs/mount" hx-target="#pool-detail-content" hx-swap="outerHTML">
+            <form class="inline" hx-post="/zfs/fs/mount" hx-target="#pool-detail-content" hx-swap="outerHTML"
+                  hx-confirm="Mount {{ f.name }}?">
               <input type="hidden" name="dataset" value="{{ f.name }}">
               <button>Mount</button>
             </form>
             {% endif %}
-            <details>
-              <summary>Mountpoint</summary>
-              <form class="inline" hx-post="/zfs/fs/set-mountpoint" hx-target="#pool-detail-content" hx-swap="outerHTML">
-                <input type="hidden" name="dataset" value="{{ f.name }}">
-                <input name="mountpoint" size="16" placeholder="/srv/share" required>
-                <button>Set</button>
-              </form>
-            </details>
-            <details>
-              <summary>Destroy</summary>
-              <form class="inline" hx-post="/zfs/fs/destroy" hx-target="#pool-detail-content" hx-swap="outerHTML"
-                    hx-confirm="Destroy {{ f.name }}? This deletes the dataset and its data.">
-                <input type="hidden" name="dataset" value="{{ f.name }}">
-                <label class="checkbox"><input type="checkbox" name="recursive" value="1"> recursive (children + snapshots)</label>
-                <button class="danger">Destroy</button>
-              </form>
-            </details>
+            <button type="button" class="dialog-trigger" data-dialog-open>Mountpoint</button>
+            <dialog>
+              <article>
+                <header>Set mountpoint — {{ f.name }}</header>
+                <form class="card" hx-post="/zfs/fs/set-mountpoint" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="dataset" value="{{ f.name }}">
+                  <label>Mountpoint <input name="mountpoint" placeholder="/srv/share" required></label>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit">Set</button>
+                  </footer>
+                </form>
+              </article>
+            </dialog>
+            <button type="button" class="dialog-trigger" data-dialog-open>Destroy</button>
+            <dialog>
+              <article>
+                <header>Destroy {{ f.name }}</header>
+                <form class="card" hx-post="/zfs/fs/destroy" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="dataset" value="{{ f.name }}">
+                  <p class="muted small">This deletes the dataset and its data.</p>
+                  <label class="checkbox"><input type="checkbox" name="recursive" value="1"> recursive (children + snapshots)</label>
+                  <label>Type <code>{{ f.name }}</code> to confirm
+                    <input data-confirm-match="{{ f.name }}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                  </label>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit" class="danger" disabled>Destroy</button>
+                  </footer>
+                </form>
+              </article>
+            </dialog>
           </div>
         </td>
       </tr>
@@ -99,8 +124,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>Create filesystem</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>Create filesystem</button>
+  <dialog>
+  <article>
+  <header>Create filesystem</header>
   <form class="card" hx-post="/zfs/fs" hx-target="#pool-detail-content" hx-swap="outerHTML">
     <label>Parent dataset
       <select name="parent" required>
@@ -111,9 +138,13 @@
     <label>Mountpoint (optional — inherits the default if blank)
       <input name="mountpoint" placeholder="/srv/share">
     </label>
-    <button type="submit">Create</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
 
   <h2>Zvols</h2>
   {% if view.zvols.is_empty() %}
@@ -134,8 +165,10 @@
   </table>
   {% endif %}
 
-  <details>
-  <summary>Create zvol</summary>
+  <button type="button" class="dialog-trigger" data-dialog-open>Create zvol</button>
+  <dialog>
+  <article>
+  <header>Create zvol</header>
   <form class="card" hx-post="/zfs/zvol" hx-target="#pool-detail-content" hx-swap="outerHTML">
     <label>Parent dataset
       <select name="parent" required>
@@ -161,8 +194,12 @@
       </select>
     </label>
     <label class="checkbox"><input type="checkbox" name="sparse" value="1"> Sparse (thin-provisioned)</label>
-    <button type="submit">Create</button>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create</button>
+    </footer>
   </form>
-  </details>
+  </article>
+  </dialog>
   {% endif %}
 </div>

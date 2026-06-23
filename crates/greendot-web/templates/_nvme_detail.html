@@ -37,7 +37,8 @@
 
   {% if !view.interfaces.is_empty() %}
   <h2>Listen interfaces</h2>
-  <form class="card" hx-post="/nvme/interfaces" hx-target="#export-detail-content" hx-swap="outerHTML">
+  <form class="card" hx-post="/nvme/interfaces" hx-target="#export-detail-content" hx-swap="outerHTML"
+        hx-confirm="Update listen interfaces for {{ row.name }} and reconcile?">
     <input type="hidden" name="id" value="{{ row.id }}">
     <p class="muted small">Pin this export to specific physical ports; empty uses the default listen address. The selection follows the physical port across IP changes (DHCP) and NIC swaps. Selecting multiple serves the export on several paths (multipath).</p>
     {% for i in view.interfaces %}
@@ -49,13 +50,15 @@
 
   <h2>Manage</h2>
   {% if row.diagnose %}<p><a role="button" href="/nvme/{{ row.id }}/diagnose">Diagnose</a></p>{% endif %}
-  <form class="inline" hx-post="/nvme/toggle" hx-target="#export-detail-content" hx-swap="outerHTML">
+  <form class="inline" hx-post="/nvme/toggle" hx-target="#export-detail-content" hx-swap="outerHTML"
+        hx-confirm="{% if row.enabled %}Disable{% else %}Enable{% endif %} export {{ row.name }}?">
     <input type="hidden" name="id" value="{{ row.id }}">
     <input type="hidden" name="enable" value="{{ !row.enabled }}">
     <button>{% if row.enabled %}Disable{% else %}Enable{% endif %}</button>
   </form>
-  <form class="inline" hx-post="/nvme/delete"
-        hx-confirm="Delete export {{ row.name }}? Initiators will lose access.">
+  <form class="inline" hx-post="/nvme/delete" hx-target="#export-detail-content" hx-swap="outerHTML"
+        hx-confirm="Delete export {{ row.name }}? Initiators will lose access."
+        data-confirm-path="{{ row.name }}">
     <input type="hidden" name="id" value="{{ row.id }}">
     <button class="danger">Delete</button>
   </form>

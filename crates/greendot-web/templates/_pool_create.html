@@ -6,7 +6,8 @@
   {% if view.devices.is_empty() %}
   <p class="empty">No available block devices to build a pool from — free up an unmounted, non-pool partition first.</p>
   {% else %}
-  <form class="card" hx-post="/zfs/pool" hx-target="#pool-create-content" hx-swap="outerHTML">
+  <form class="card" hx-post="/zfs/pool" hx-target="#pool-create-content" hx-swap="outerHTML"
+        hx-confirm="Create the pool on the selected devices? Their existing data is overwritten.">
     <label>Pool name <input name="name" placeholder="tank" required></label>
     <label>Layout
       <select name="vdev">
