@@ -49,5 +49,27 @@
       });
     })();
   </script>
+  <script>
+    // A dispatched operation re-renders at once with a "view task" notice that
+    // carries data-task-watch. Watch that task's stream; if it finishes
+    // successfully within 5s, refresh to show the result — otherwise leave the
+    // link so the user can follow a slow/failed task on /tasks/{id}.
+    (function () {
+      function watch(a) {
+        if (a.dataset.watching) return;
+        a.dataset.watching = "1";
+        var es = new EventSource("/tasks/" + a.getAttribute("data-task-watch") + "/stream");
+        var timer = setTimeout(function () { es.close(); }, 5000);
+        es.addEventListener("done", function (e) {
+          clearTimeout(timer);
+          es.close();
+          if (e.data === "ok") location.reload();
+        });
+      }
+      function scan() { document.querySelectorAll("a[data-task-watch]").forEach(watch); }
+      document.body.addEventListener("htmx:afterSwap", scan);
+      scan();
+    })();
+  </script>
 </body>
 </html>

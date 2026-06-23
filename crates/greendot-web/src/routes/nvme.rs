@@ -12,7 +12,7 @@ use super::{AppState, page};
 use crate::actual;
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::dot::{external_nvme_dot, nvme_diagnostics, nvme_dot};
-use crate::reconcile::RECONCILE_ERROR_KEY;
+use crate::reconcile::{RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
 use crate::state::NewNvmeExport;
 use askama::Template;
 use axum::extract::{Form, Path, State};
@@ -109,6 +109,7 @@ fn foreign_nvme_rows(
                 diagnose: false,
                 client: vec![],
                 external: true,
+                task_id: None,
             }
         })
         .collect()
@@ -118,7 +119,11 @@ pub struct NvmeExportsView {
     pub rows: Vec<ExportRow>,
     pub devices: Vec<actual::block::AvailDevice>,
     pub banner: Option<String>,
+    /// The reconcile task to link from the banner (`/tasks/{id}`).
+    pub banner_task_id: Option<i64>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -126,14 +131,25 @@ pub async fn gather(
     state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> NvmeExportsView {
     let mut view = NvmeExportsView {
         rows: vec![],
         devices: vec![],
         banner: None,
+        banner_task_id: None,
         flash,
+        task_id,
         form_error,
     };
+    // The most recent reconcile task — linked from the banner and from the dots
+    // of any export it left unrealized.
+    let reconcile_task = state
+        .db
+        .get_setting(RECONCILE_TASK_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok());
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let rdma = actual::rdma::devices();
     let listen = listen_addr(state);
@@ -142,14 +158,16 @@ pub async fn gather(
             view.rows = exports
                 .iter()
                 .map(|e| {
-                    let (dot_class_, dot_reason, diagnose) = if !e.enabled {
-                        ("dot-gray", "disabled".to_owned(), false)
+                    let (dot_class_, dot_reason, diagnose, row_task) = if !e.enabled {
+                        ("dot-gray", "disabled".to_owned(), false, None)
                     } else {
                         let dot = nvme_dot(e, &actual_nvmet, &rdma);
+                        let not_green = dot.state != DotState::Green;
                         (
                             dot_class(dot.state),
                             dot.reason,
-                            e.want_rdma && dot.state != DotState::Green,
+                            e.want_rdma && not_green,
+                            not_green.then_some(reconcile_task).flatten(),
                         )
                     };
                     let mut transports = Vec::new();
@@ -179,6 +197,7 @@ pub async fn gather(
                         diagnose,
                         client: client_instructions(e, listen),
                         external: false,
+                        task_id: row_task,
                     }
                 })
                 .collect();
@@ -193,6 +212,7 @@ pub async fn gather(
         && !err.is_empty()
     {
         view.banner = Some(format!("reconcile problem: {err}"));
+        view.banner_task_id = reconcile_task;
     }
     let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
     view.devices = actual::block::available_block_devices(&state.helper, &in_use).await;
@@ -225,7 +245,11 @@ pub struct ExportDetailView {
     /// `None` when the export id is unknown (or belongs to a foreign export).
     pub row: Option<ExportRow>,
     pub banner: Option<String>,
+    /// The reconcile task to link from the banner (`/tasks/{id}`).
+    pub banner_task_id: Option<i64>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -249,8 +273,9 @@ async fn gather_detail(
     id: i64,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> ExportDetailView {
-    let view = gather(state, flash, form_error).await;
+    let view = gather(state, flash, form_error, task_id).await;
     let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
     ExportDetailView {
         name: row
@@ -258,7 +283,9 @@ async fn gather_detail(
             .map_or_else(|| id.to_string(), |r| r.name.clone()),
         row,
         banner: view.banner,
+        banner_task_id: view.banner_task_id,
         flash: view.flash,
+        task_id: view.task_id,
         form_error: view.form_error,
     }
 }
@@ -270,7 +297,7 @@ async fn detail_page(
 ) -> Response {
     page(NvmeDetailTemplate {
         user,
-        view: gather_detail(&state, id, None, None).await,
+        view: gather_detail(&state, id, None, None, None).await,
     })
 }
 
@@ -328,23 +355,29 @@ async fn nvme_page(
 ) -> Response {
     page(NvmeTemplate {
         user,
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
 async fn dots_partial(State(state): State<Arc<AppState>>) -> Response {
     page(NvmeDotsPartial {
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
-async fn finish(state: &AppState, result: anyhow::Result<()>, success: String) -> Response {
-    let (flash, error) = match result {
-        Ok(()) => (Some(success), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+/// Renders the list partial after a create: the reconcile (if any) runs in the
+/// background, so `result` carries its task id for the notice's "view task" link.
+async fn finish(
+    state: &AppState,
+    result: anyhow::Result<Option<i64>>,
+    success: String,
+) -> Response {
+    let (flash, error, task_id) = match result {
+        Ok(task_id) => (Some(success), None, task_id),
+        Err(e) => (None, Some(format!("{e:#}")), None),
     };
     page(NvmePartial {
-        view: gather(state, flash, error).await,
+        view: gather(state, flash, error, task_id).await,
     })
 }
 
@@ -367,7 +400,7 @@ struct CreateForm {
 async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
     let view_err = |msg: String| async {
         page(NvmePartial {
-            view: gather(&state, None, Some(msg)).await,
+            view: gather(&state, None, Some(msg), None).await,
         })
     };
     let Ok(name) = ExportName::new(form.name.trim()) else {
@@ -421,15 +454,15 @@ struct IdForm {
 async fn toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) -> Response {
     let enable = form.enable.unwrap_or(false);
     let success = format!("export {}", if enable { "enabled" } else { "disabled" });
-    let (flash, error) = match state.db.set_nvme_export_enabled(form.id, enable) {
+    let (flash, error, task_id) = match state.db.set_nvme_export_enabled(form.id, enable) {
         Ok(()) => match reconcile_state(&state).await {
-            Ok(()) => (Some(success), None),
-            Err(e) => (None, Some(format!("{e:#}"))),
+            Ok(task_id) => (Some(success), None, task_id),
+            Err(e) => (None, Some(format!("{e:#}")), None),
         },
-        Err(e) => (None, Some(format!("{e:#}"))),
+        Err(e) => (None, Some(format!("{e:#}")), None),
     };
     page(NvmeDetailPartial {
-        view: gather_detail(&state, form.id, flash, error).await,
+        view: gather_detail(&state, form.id, flash, error, task_id).await,
     })
 }
 
@@ -447,7 +480,7 @@ async fn delete(
             nav_redirect(&headers, "/nvme")
         }
         Err(e) => page(NvmeDetailPartial {
-            view: gather_detail(&state, form.id, None, Some(format!("{e:#}"))).await,
+            view: gather_detail(&state, form.id, None, Some(format!("{e:#}")), None).await,
         }),
     }
 }

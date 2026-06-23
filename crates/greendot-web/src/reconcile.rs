@@ -29,6 +29,10 @@ const NFS_FSID_BASE: u32 = 0x6700_0000;
 
 pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
 
+/// Setting holding the id of the most recent reconcile task, so the export
+/// banner and dots can link to it (`/tasks/{id}`). Empty when none has run.
+pub const RECONCILE_TASK_KEY: &str = "reconcile_task_id";
+
 const PORT_RDMA: u16 = 1;
 const PORT_TCP: u16 = 2;
 const PORT_LOOP: u16 = 3;

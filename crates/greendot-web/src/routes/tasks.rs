@@ -132,7 +132,8 @@ async fn task_detail(
 }
 
 /// SSE stream of a task's output: an initial `output` event with everything so
-/// far, then live `output` events, then a `done` event.
+/// far, then live `output` events, then a `done` event whose data is `ok` or
+/// `fail` (so a watcher can refresh only on success).
 async fn task_stream(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> Response {
     if let Some((stdout, stderr, rx)) = state.tasks.snapshot_and_subscribe(id) {
         let initial = output_event(format!("{stdout}{stderr}"));
@@ -140,7 +141,7 @@ async fn task_stream(State(state): State<Arc<AppState>>, Path(id): Path<i64>) ->
             Ok(TaskEvent::Stdout { data }) | Ok(TaskEvent::Stderr { data }) => {
                 Some(Ok(output_event(data)))
             }
-            Ok(TaskEvent::Finished { .. }) => Some(Ok(Event::default().event("done").data("done"))),
+            Ok(TaskEvent::Finished { ok, .. }) => Some(Ok(done_event(ok))),
             _ => None,
         });
         let stream = tokio_stream::once(Ok(initial)).chain(live);
@@ -151,7 +152,7 @@ async fn task_stream(State(state): State<Arc<AppState>>, Path(id): Path<i64>) ->
         Ok(Some(t)) => {
             let events = vec![
                 Ok(output_event(format!("{}{}", t.stdout, t.stderr))),
-                Ok(Event::default().event("done").data("done")),
+                Ok(done_event(t.status == TaskStatus::Success)),
             ];
             sse(tokio_stream::iter(events))
         }
@@ -162,6 +163,12 @@ async fn task_stream(State(state): State<Arc<AppState>>, Path(id): Path<i64>) ->
 
 fn output_event(data: String) -> Event {
     Event::default().event("output").data(data)
+}
+
+fn done_event(ok: bool) -> Event {
+    Event::default()
+        .event("done")
+        .data(if ok { "ok" } else { "fail" })
 }
 
 fn sse(stream: impl Stream<Item = Result<Event, Infallible>> + Send + 'static) -> Response {
@@ -194,7 +201,9 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Tasks"), "{body}");
 
-        // A zvol create runs through the task runner (fake helper => success).
+        // A zvol create dispatches a task through the task runner (fake helper =>
+        // success). Dispatch is non-blocking, so the run completes on a
+        // background task.
         let req = auth(form_post(
             "/zfs/zvol",
             "parent=tank&name=vm1&size=10&unit=GiB&volblocksize=",
@@ -202,9 +211,17 @@ mod tests {
         let (status, _, _) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
 
-        // It now appears on the tasks page, and its detail + stream are served.
-        let req = auth(HttpRequest::get("/tasks").body(Body::empty()).unwrap());
-        let (_, _, body) = send(&app, req).await;
+        // It appears on the tasks page; poll until the background run records it
+        // green (it then also shows on its detail + stream).
+        let mut body = String::new();
+        for _ in 0..100 {
+            let req = auth(HttpRequest::get("/tasks").body(Body::empty()).unwrap());
+            body = send(&app, req).await.2;
+            if body.contains("zvol-create") && body.contains("dot-green") {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
         assert!(body.contains("zvol-create"), "{body}");
         assert!(
             body.contains("dot-green"),

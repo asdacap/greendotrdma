@@ -130,6 +130,8 @@ pub struct PoolDetailView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -151,11 +153,13 @@ async fn gather_pool_detail(
     name: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> PoolDetailView {
     let mut view = PoolDetailView {
         name: name.to_owned(),
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match tokio::try_join!(zfs::pools(), zfs::datasets()) {
@@ -214,7 +218,7 @@ async fn pool_detail_page(
 ) -> Response {
     page(PoolDetailTemplate {
         user,
-        view: gather_pool_detail(&state, &name, None, None).await,
+        view: gather_pool_detail(&state, &name, None, None, None).await,
     })
 }
 
@@ -238,26 +242,31 @@ fn pool_of(dataset: &str) -> &str {
 /// Runs a pool/zvol request as a recorded task and re-renders the owning pool's
 /// detail partial with the outcome.
 async fn run_pool_op(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     kind: &str,
     title: &str,
-    success: String,
     pool: &str,
 ) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather_pool_detail(state, pool, flash, error).await
+    let view = match crate::task_runner::start(state, req, kind, title) {
+        Ok(id) => {
+            gather_pool_detail(
+                state,
+                pool,
+                Some(format!("started {title}")),
+                None,
+                Some(id),
+            )
+            .await
         }
-        Err(e) => gather_pool_detail(state, pool, None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_pool_detail(state, pool, None, Some(format!("{e:#}")), None).await,
     };
     page(PoolDetailPartial { view })
 }
 
 async fn pool_op_failed(state: &AppState, pool: &str, message: impl Into<String>) -> Response {
     page(PoolDetailPartial {
-        view: gather_pool_detail(state, pool, None, Some(message.into())).await,
+        view: gather_pool_detail(state, pool, None, Some(message.into()), None).await,
     })
 }
 
@@ -273,6 +282,8 @@ pub struct ZvolDetailView {
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -294,6 +305,7 @@ async fn gather_zvol_detail(
     rest: &str,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> ZvolDetailView {
     let dataset = format!("{pool}/{rest}");
     let mut view = ZvolDetailView {
@@ -301,6 +313,7 @@ async fn gather_zvol_detail(
         name: dataset.clone(),
         flash,
         form_error,
+        task_id,
         ..Default::default()
     };
     match zfs::datasets().await {
@@ -329,34 +342,32 @@ async fn zvol_detail_page(
 ) -> Response {
     page(ZvolDetailTemplate {
         user,
-        view: gather_zvol_detail(&pool, &rest, None, None).await,
+        view: gather_zvol_detail(&pool, &rest, None, None, None).await,
     })
 }
 
 /// Runs a zvol request as a recorded task and re-renders the owning zvol's
 /// detail partial with the outcome.
 async fn run_zvol_op(
-    state: &AppState,
+    state: &Arc<AppState>,
     req: Request,
     kind: &str,
     title: &str,
-    success: String,
     pool: &str,
     rest: &str,
 ) -> Response {
-    let view = match crate::task_runner::run(state, req, kind, title).await {
-        Ok(outcome) => {
-            let (flash, error) = outcome.message(&success);
-            gather_zvol_detail(pool, rest, flash, error).await
+    let view = match crate::task_runner::start(state, req, kind, title) {
+        Ok(id) => {
+            gather_zvol_detail(pool, rest, Some(format!("started {title}")), None, Some(id)).await
         }
-        Err(e) => gather_zvol_detail(pool, rest, None, Some(format!("{e:#}"))).await,
+        Err(e) => gather_zvol_detail(pool, rest, None, Some(format!("{e:#}")), None).await,
     };
     page(ZvolDetailPartial { view })
 }
 
 async fn zvol_detail_failed(pool: &str, rest: &str, message: impl Into<String>) -> Response {
     page(ZvolDetailPartial {
-        view: gather_zvol_detail(pool, rest, None, Some(message.into())).await,
+        view: gather_zvol_detail(pool, rest, None, Some(message.into()), None).await,
     })
 }
 
@@ -405,7 +416,6 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
         req,
         "zvol-create",
         &format!("create zvol {dataset}"),
-        format!("created zvol {dataset}"),
         &pool,
     )
     .await
@@ -436,7 +446,6 @@ async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<Resize
         req,
         "zvol-resize",
         &format!("resize {dataset}"),
-        format!("resized {dataset}"),
         &pool,
         &rest,
     )
@@ -461,13 +470,10 @@ async fn zvol_delete(
     let req = Request::ZvolDelete {
         dataset: dataset.clone(),
     };
-    // Removing the zvol means its page no longer applies — go back to the pool.
-    match crate::task_runner::run(&state, req, "zvol-delete", &format!("delete {dataset}")).await {
-        Ok(o) if o.ok => nav_redirect(&headers, &format!("/zfs/pool/{pool}")),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "delete failed".into());
-            zvol_detail_failed(&pool, &rest, msg).await
-        }
+    // Removing the zvol means its page no longer applies — go back to the pool;
+    // the delete task is viewable on /tasks.
+    match crate::task_runner::start(&state, req, "zvol-delete", &format!("delete {dataset}")) {
+        Ok(_) => nav_redirect(&headers, &format!("/zfs/pool/{pool}")),
         Err(e) => zvol_detail_failed(&pool, &rest, format!("{e:#}")).await,
     }
 }
@@ -510,7 +516,6 @@ async fn fs_create(State(state): State<Arc<AppState>>, Form(form): Form<FsCreate
         req,
         "fs-create",
         &format!("create filesystem {dataset}"),
-        format!("created filesystem {dataset}"),
         &pool,
     )
     .await
@@ -533,7 +538,6 @@ async fn fs_mount(State(state): State<Arc<AppState>>, Form(form): Form<FsDataset
         },
         "fs-mount",
         &format!("mount {dataset}"),
-        format!("mounted {dataset}"),
         &pool,
     )
     .await
@@ -554,7 +558,6 @@ async fn fs_unmount(
         },
         "fs-unmount",
         &format!("unmount {dataset}"),
-        format!("unmounted {dataset}"),
         &pool,
     )
     .await
@@ -590,7 +593,6 @@ async fn fs_set_mountpoint(
         },
         "fs-set-mountpoint",
         &format!("set {dataset} mountpoint={mountpoint}"),
-        format!("set {dataset} mountpoint to {mountpoint}"),
         &pool,
     )
     .await
@@ -620,7 +622,6 @@ async fn fs_destroy(
         req,
         "fs-destroy",
         &format!("destroy {dataset}"),
-        format!("destroyed {dataset}"),
         &pool,
     )
     .await
@@ -653,7 +654,6 @@ async fn pool_add_device(
         req,
         "pool-add",
         &format!("add {device} to {pool}"),
-        format!("added {device} to pool {pool}"),
         &name,
     )
     .await
@@ -806,12 +806,8 @@ async fn pool_create(
         devices: device_paths,
         ashift,
     };
-    match crate::task_runner::run(&state, req, "pool-create", &title).await {
-        Ok(o) if o.ok => nav_redirect(&headers, "/zfs"),
-        Ok(o) => {
-            let msg = o.error.unwrap_or_else(|| "pool creation failed".into());
-            pool_create_failed(&state, selected, msg).await
-        }
+    match crate::task_runner::start(&state, req, "pool-create", &title) {
+        Ok(_) => nav_redirect(&headers, "/zfs"),
         Err(e) => pool_create_failed(&state, selected, format!("{e:#}")).await,
     }
 }
@@ -894,7 +890,7 @@ mod tests {
                 .insert("x-greendot-csrf", csrf.parse().unwrap());
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
-            assert!(body.contains("created zvol tank/vm1"), "{body}");
+            assert!(body.contains("started create zvol tank/vm1"), "{body}");
 
             // Invalid name is rejected before reaching the helper.
             let mut req = form_post(
@@ -933,7 +929,7 @@ mod tests {
             let (status, _, body) = send(&app, req).await;
             assert_eq!(status, StatusCode::OK);
             assert!(
-                body.contains("zvol-detail-content") && body.contains("resized tank/vm1"),
+                body.contains("zvol-detail-content") && body.contains("started resize tank/vm1"),
                 "{body}"
             );
 
@@ -969,7 +965,10 @@ mod tests {
                 )),
             )
             .await;
-            assert!(body.contains("created filesystem tank/share"), "{body}");
+            assert!(
+                body.contains("started create filesystem tank/share"),
+                "{body}"
+            );
 
             // Mount / unmount route to the (fake) helper and report success.
             let (_, _, body) = send(
@@ -977,7 +976,7 @@ mod tests {
                 auth(form_post("/zfs/fs/mount", "dataset=tank%2Fshare")),
             )
             .await;
-            assert!(body.contains("mounted tank/share"), "{body}");
+            assert!(body.contains("started mount tank/share"), "{body}");
 
             // A relative mountpoint is rejected before the helper.
             let (_, _, body) = send(
@@ -999,7 +998,7 @@ mod tests {
                 )),
             )
             .await;
-            assert!(body.contains("destroyed tank/share"), "{body}");
+            assert!(body.contains("started destroy tank/share"), "{body}");
         }
 
         #[tokio::test]
@@ -1056,7 +1055,7 @@ mod tests {
                 "device=%2Fdev%2Fsdb",
             ));
             let (_, _, body) = send(&app, req).await;
-            assert!(body.contains("added /dev/sdb to pool tank"), "{body}");
+            assert!(body.contains("started add /dev/sdb to tank"), "{body}");
             let req = auth(form_post(
                 "/zfs/pool/mirror/add-device",
                 "device=%2Fdev%2Fsdb",

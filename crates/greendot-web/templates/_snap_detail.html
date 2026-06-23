@@ -2,6 +2,7 @@
   {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+  {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
 
   {% if view.snap.is_none() %}
   <p class="empty">Snapshot {{ view.name }} not found.</p>

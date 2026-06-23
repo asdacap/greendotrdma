@@ -6,7 +6,7 @@ use crate::routes::AppState;
 use greendot_proto::{Request, TaskEvent};
 use std::collections::HashMap;
 use std::process::Stdio;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
@@ -49,7 +49,7 @@ impl TaskHub {
         }
     }
 
-    fn unregister(&self, id: i64) {
+    pub(crate) fn unregister(&self, id: i64) {
         self.running.lock().unwrap().remove(&id);
     }
 
@@ -89,41 +89,48 @@ fn now() -> i64 {
     chrono::Utc::now().timestamp()
 }
 
+/// Records a new running task and registers it for live SSE streaming,
+/// returning its id. Shared by the blocking and fire-and-forget entry points.
+pub(crate) fn begin(state: &AppState, kind: &str, title: &str) -> anyhow::Result<i64> {
+    let id = state.db.insert_task(kind, title, now())?;
+    state.tasks.register(id);
+    Ok(id)
+}
+
+/// Dispatches helper request `req` as task `kind`/`title` and returns its id
+/// *without* waiting for it: the run is driven to completion — recorded and
+/// streamed — on a background task. Handlers respond at once and surface a link
+/// to /tasks/{id}.
+pub fn start(state: &Arc<AppState>, req: Request, kind: &str, title: &str) -> anyhow::Result<i64> {
+    let id = begin(state, kind, title)?;
+    let rx = state.helper.run_task(req);
+    let state = state.clone();
+    tokio::spawn(async move {
+        let _ = drive(&state, id, rx).await;
+        state.tasks.unregister(id);
+    });
+    Ok(id)
+}
+
 /// Runs helper request `req` as task `kind`/`title`, persisting and streaming
-/// it. Awaits completion (UX stays synchronous; the run is also viewable on
-/// /tasks).
+/// it, and awaits completion. For non-HTTP callers (the snapshot scheduler) and
+/// tests that need the outcome synchronously; HTTP handlers use [`start`].
 pub async fn run(
     state: &AppState,
     req: Request,
     kind: &str,
     title: &str,
 ) -> anyhow::Result<TaskOutcome> {
-    let id = state.db.insert_task(kind, title, now())?;
-    state.tasks.register(id);
+    let id = begin(state, kind, title)?;
     let outcome = drive(state, id, state.helper.run_task(req)).await?;
     state.tasks.unregister(id);
     Ok(outcome)
 }
 
-/// Runs the local command `argv` (e.g. `greendot-cli reconcile`) as a recorded,
-/// streamable task — the same record/broadcast machinery as [`run`], but the
-/// events come from a subprocess instead of the helper.
-pub async fn run_local(
-    state: &AppState,
-    argv: &[String],
-    kind: &str,
-    title: &str,
-) -> anyhow::Result<TaskOutcome> {
-    let id = state.db.insert_task(kind, title, now())?;
-    state.tasks.register(id);
-    let outcome = drive(state, id, spawn_command_events(argv)).await?;
-    state.tasks.unregister(id);
-    Ok(outcome)
-}
-
 /// Consumes a task's event stream: broadcasts each event to SSE subscribers and
-/// persists the terminal result. Shared by [`run`] and [`run_local`].
-async fn drive(
+/// persists the terminal result. Shared by [`run`], [`start`], and the
+/// background reconcile drive in `routes::block_export`.
+pub(crate) async fn drive(
     state: &AppState,
     id: i64,
     mut rx: mpsc::Receiver<TaskEvent>,
@@ -188,7 +195,7 @@ async fn drive(
 /// Spawns `argv` as a local subprocess and streams its output as task events,
 /// mirroring `HelperClient::run_task`: a `Started`, then line-buffered
 /// `Stdout`/`Stderr`, then exactly one `Finished` (synthetic on spawn failure).
-fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent> {
+pub(crate) fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent> {
     let (tx, rx) = mpsc::channel(128);
     let argv = argv.to_vec();
     tokio::spawn(async move {
@@ -275,6 +282,22 @@ mod tests {
         state.db.list_tasks(10).unwrap().into_iter().next().unwrap()
     }
 
+    /// Drives a local command to completion synchronously — the same path
+    /// `routes::block_export` now drives in the background — for assertions.
+    async fn run_local(
+        state: &crate::routes::AppState,
+        argv: &[String],
+        kind: &str,
+        title: &str,
+    ) -> super::TaskOutcome {
+        let id = super::begin(state, kind, title).unwrap();
+        let out = super::drive(state, id, super::spawn_command_events(argv))
+            .await
+            .unwrap();
+        state.tasks.unregister(id);
+        out
+    }
+
     #[tokio::test]
     async fn run_local_records_output_status_and_spawn_failure() {
         let state = test_state();
@@ -285,9 +308,7 @@ mod tests {
             "-c".into(),
             "printf 'hello\\n'; printf 'oops\\n' >&2".into(),
         ];
-        let out = super::run_local(&state, &argv, "test", "echo")
-            .await
-            .unwrap();
+        let out = run_local(&state, &argv, "test", "echo").await;
         assert!(out.ok);
         let task = latest(&state);
         assert_eq!(
@@ -298,16 +319,12 @@ mod tests {
         assert!(task.stderr.contains("oops"), "{}", task.stderr);
 
         // Non-zero exit → failed task.
-        let out = super::run_local(&state, &["false".into()], "test", "false")
-            .await
-            .unwrap();
+        let out = run_local(&state, &["false".into()], "test", "false").await;
         assert!(!out.ok);
         assert_eq!(latest(&state).status, TaskStatus::Failed);
 
         // A missing binary is a synthetic failed finish, not a panic.
-        let out = super::run_local(&state, &["gd-no-such-binary-xyz".into()], "test", "missing")
-            .await
-            .unwrap();
+        let out = run_local(&state, &["gd-no-such-binary-xyz".into()], "test", "missing").await;
         assert!(!out.ok);
         assert!(out.error.unwrap().contains("spawning"));
     }

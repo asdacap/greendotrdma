@@ -1,7 +1,9 @@
 <div id="export-detail-content">
   {% if let Some(banner) = view.banner %}<p class="error">{{ banner }}</p>{% endif %}
+  {% if let Some(id) = view.banner_task_id %}<p class="muted small"><a href="/tasks/{{ id }}">view reconcile task ↗</a></p>{% endif %}
   {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
   {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+  {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
 
   {% if view.row.is_none() %}
   <p class="empty">Export {{ view.name }} not found.</p>
@@ -12,7 +14,7 @@
     <tbody>
       <tr>
         <td><span class="dot {{ row.dot_class }}" title="{{ row.dot_reason }}"></span></td>
-        <td>{{ row.name }}<br><span class="muted small">{{ row.dot_reason }}</span></td>
+        <td>{{ row.name }}<br><span class="muted small">{{ row.dot_reason }}{% if let Some(id) = row.task_id %} · <a href="/tasks/{{ id }}">view task ↗</a>{% endif %}</span></td>
         <td>{{ row.device }}</td>
         <td>{{ row.transports }}</td>
         <td>{{ row.hosts }}</td>

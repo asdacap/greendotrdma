@@ -8,7 +8,7 @@ use super::{AppState, page};
 use crate::actual;
 use crate::auth::CurrentUser;
 use crate::dot::{Criterion, external_nfs_dot, nfs_diagnostics, nfs_dot};
-use crate::reconcile::RECONCILE_ERROR_KEY;
+use crate::reconcile::{RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
 use crate::routes::block_export::reconcile_state;
 use crate::state::{NewNfsExport, NfsClientEntry};
 use askama::Template;
@@ -45,6 +45,9 @@ pub struct NfsRow {
     pub mount_cmd: String,
     /// Present in the export table but not managed by greendot.
     pub external: bool,
+    /// The reconcile task to link from this share's dot when it isn't fully
+    /// realized (`/tasks/{id}`); `None` for green/disabled/foreign rows.
+    pub task_id: Option<i64>,
 }
 
 fn dot_class(state: DotState) -> &'static str {
@@ -86,7 +89,11 @@ fn nfs_client_cmd(path: &str, listen: IpAddr) -> String {
 pub struct NfsView {
     pub rows: Vec<NfsRow>,
     pub banner: Option<String>,
+    /// The reconcile task to link from the banner (`/tasks/{id}`).
+    pub banner_task_id: Option<i64>,
     pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
     pub form_error: Option<String>,
 }
 
@@ -104,13 +111,24 @@ pub async fn gather(
     state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
+    task_id: Option<i64>,
 ) -> NfsView {
     let mut view = NfsView {
         rows: vec![],
         banner: None,
+        banner_task_id: None,
         flash,
+        task_id,
         form_error,
     };
+    // The most recent reconcile task — linked from the banner and from the dots
+    // of any share it left unrealized.
+    let reconcile_task = state
+        .db
+        .get_setting(RECONCILE_TASK_KEY)
+        .ok()
+        .flatten()
+        .and_then(|s| s.parse::<i64>().ok());
     let actual_nfs = actual::nfs::read(&state.helper).await;
     let rdma = actual::rdma::devices();
     let listen = listen_addr(state);
@@ -122,14 +140,16 @@ pub async fn gather(
             view.rows = exports
                 .iter()
                 .map(|e| {
-                    let (dot_class, dot_reason, diagnose) = if !e.enabled {
-                        ("dot-gray", "disabled".to_owned(), false)
+                    let (dot_class, dot_reason, diagnose, row_task) = if !e.enabled {
+                        ("dot-gray", "disabled".to_owned(), false, None)
                     } else {
                         let dot = nfs_dot(e, &actual_nfs, &rdma, listen);
+                        let not_green = dot.state != DotState::Green;
                         (
                             dot_class(dot.state),
                             dot.reason,
-                            dot.state != DotState::Green,
+                            not_green,
+                            not_green.then_some(reconcile_task).flatten(),
                         )
                     };
                     NfsRow {
@@ -142,6 +162,7 @@ pub async fn gather(
                         diagnose,
                         mount_cmd: nfs_client_cmd(&e.path, listen),
                         external: false,
+                        task_id: row_task,
                     }
                 })
                 .collect();
@@ -170,6 +191,7 @@ pub async fn gather(
             diagnose: false,
             mount_cmd: nfs_client_cmd(&entry.path, listen),
             external: true,
+            task_id: None,
         });
     }
 
@@ -177,6 +199,7 @@ pub async fn gather(
         && !err.is_empty()
     {
         view.banner = Some(format!("reconcile problem: {err}"));
+        view.banner_task_id = reconcile_task;
     }
     view
 }
@@ -250,13 +273,13 @@ async fn nfs_page(
 ) -> Response {
     page(NfsTemplate {
         user,
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
 async fn dots_partial(State(state): State<Arc<AppState>>) -> Response {
     page(NfsPartial {
-        view: gather(&state, None, None).await,
+        view: gather(&state, None, None, None).await,
     })
 }
 
@@ -271,13 +294,20 @@ async fn diagnose_page(
     })
 }
 
-async fn finish(state: &AppState, result: anyhow::Result<()>, success: String) -> Response {
-    let (flash, error) = match result {
-        Ok(()) => (Some(success), None),
-        Err(e) => (None, Some(format!("{e:#}"))),
+/// Renders the list partial after a mutation: the desired-state change already
+/// succeeded; the reconcile (if any) runs in the background, so `result` carries
+/// its task id for the notice's "view task" link.
+async fn finish(
+    state: &AppState,
+    result: anyhow::Result<Option<i64>>,
+    success: String,
+) -> Response {
+    let (flash, error, task_id) = match result {
+        Ok(task_id) => (Some(success), None, task_id),
+        Err(e) => (None, Some(format!("{e:#}")), None),
     };
     page(NfsPartial {
-        view: gather(state, flash, error).await,
+        view: gather(state, flash, error, task_id).await,
     })
 }
 
@@ -293,7 +323,7 @@ struct CreateForm {
 async fn create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
     let view_err = |msg: String| async {
         page(NfsPartial {
-            view: gather(&state, None, Some(msg)).await,
+            view: gather(&state, None, Some(msg), None).await,
         })
     };
     let Ok(path) = NfsExportPath::new(form.path.trim()) else {
