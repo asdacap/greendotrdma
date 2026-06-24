@@ -505,26 +505,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
-name = "greendot-helper"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "greendot-proto",
- "nix",
- "pam",
- "rstest",
- "serde_json",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "greendot-proto"
 version = "0.1.1"
 dependencies = [
  "rstest",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "greendot-reconcile"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "greendot-proto",
+ "nix",
+ "rstest",
+ "serde",
+ "serde_json",
+ "toml",
 ]
 
 [[package]]
@@ -538,6 +537,7 @@ dependencies = [
  "chrono",
  "croner",
  "greendot-proto",
+ "greendot-reconcile",
  "http-body-util",
  "nix",
  "rand",
@@ -549,6 +549,21 @@ dependencies = [
  "tokio-stream",
  "toml",
  "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "greendotctl"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "greendot-proto",
+ "greendot-reconcile",
+ "nix",
+ "pam",
+ "rstest",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
 ]

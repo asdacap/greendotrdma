@@ -33,8 +33,7 @@ conf-files = ["/etc/greendotrdma/config.toml", "/etc/pam.d/greendotrdma"]
 maintainer-scripts = "../../pkg/debian"
 assets = [
     ["target/release/greendot-web", "usr/libexec/greendotrdma/", "755"],
-    ["target/release/greendot-cli", "usr/libexec/greendotrdma/", "755"],
-    ["target/release/greendot-helper", "usr/libexec/greendotrdma/", "755"],
+    ["target/release/greendotctl", "usr/libexec/greendotrdma/", "755"],
     ["../../pkg/sysusers.conf", "usr/lib/sysusers.d/greendotrdma.conf", "644"],
     ["../../pkg/tmpfiles.conf", "usr/lib/tmpfiles.d/greendotrdma.conf", "644"],
     ["../../pkg/pam.greendotrdma", "etc/pam.d/greendotrdma", "644"],
@@ -44,7 +43,7 @@ assets = [
 ]
 
 [[package.metadata.deb.systemd-units]]
-unit-name = "greendot-helper"
+unit-name = "greendotctl"
 unit-scripts = "../../pkg"
 enable = true
 start = true
@@ -58,6 +57,7 @@ start = true
 [dependencies]
 anyhow = { workspace = true }
 greendot-proto = { workspace = true }
+greendot-reconcile = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

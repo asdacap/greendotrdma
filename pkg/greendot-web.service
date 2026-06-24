@@ -1,8 +1,8 @@
 [Unit]
 Description=GreenDotRDMA web UI
 Documentation=https://github.com/asdacap/greendotrdma
-Wants=greendot-helper.service network-online.target
-After=greendot-helper.service network-online.target
+Wants=greendotctl.service network-online.target
+After=greendotctl.service network-online.target
 
 [Service]
 Type=simple

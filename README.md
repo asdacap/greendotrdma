@@ -31,11 +31,15 @@ Two systemd services:
   `greendot` user. Reads all system state directly (configfs, /sys, `zfs
   list`); desired state lives in SQLite and is reconciled to the kernel at
   startup and every minute.
-- **greendot-helper** — a small root daemon owning every privileged
-  operation. The wire protocol's request enum *is* the allowlist; every
-  string that becomes a path or argv element is a validated newtype, checked
-  again on deserialization. Only the `greendot` uid may connect
-  (SO_PEERCRED). It also runs the PAM login check.
+- **greendotctl** — a small root daemon (`greendotctl serve`) owning every
+  privileged operation. The wire protocol's request enum *is* the allowlist;
+  every string that becomes a path or argv element is a validated newtype,
+  checked again on deserialization. Only the `greendot` uid may connect
+  (SO_PEERCRED). It also runs the PAM login check. The same binary is the
+  standalone reconcile tool: `greendotctl reconcile [config.toml]` applies the
+  desired state from a TOML file — over the daemon socket when one is running,
+  or in-process as root with no daemon at all — so the web UI is optional and an
+  alternative frontend can drive it directly.
 
 Log in with any system account that is a member of the **greendot-admin**
 group:

@@ -1,7 +1,7 @@
 //! Best-effort OS / package-manager detection from `/etc/os-release`, so the
 //! installer can spawn the right install task — or refuse cleanly on a distro
 //! we don't know how to drive. Shared by greendot-web (panel display) and
-//! greendot-helper (the actual install task).
+//! greendotctl (the actual install task).
 
 use std::fs;
 

@@ -49,7 +49,7 @@ pub struct AppState {
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
     /// The command run (as a recorded task) to reconcile on drift — normally
-    /// the sibling `greendot-cli reconcile <config>`.
+    /// the sibling `greendotctl reconcile <config>`.
     pub reconcile_cmd: Vec<String>,
 }
 

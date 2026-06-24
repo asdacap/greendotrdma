@@ -4,80 +4,21 @@
 //! sync.
 
 use anyhow::{Context, Result};
-use greendot_proto::{Iqn, Nqn, PciAddress};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
-/// Every export we create lives under these prefixes; reconciliation never
-/// touches configfs objects outside them. Defined in the shared protocol crate
-/// so the helper scopes its configfs writes to the same prefix.
+/// The desired-state domain types (`NvmeExport`/`IscsiExport`/`NfsExport`/…),
+/// the listen-selector parser, and the read-only `read_desired` loader live in
+/// the shared `greendot-reconcile` crate so a standalone `greendotctl reconcile`
+/// shares them. Re-exported so existing `crate::state::*` paths keep working; the
+/// SQLite-backed `Db` (task history + the sole config writer) stays here.
 pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
-
-/// A block-device export served as an NVMe-oF subsystem. RDMA, TCP and the
-/// local loopback are all valid transports.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NvmeExport {
-    pub id: i64,
-    pub name: String,
-    pub device_path: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub want_rdma: bool,
-    pub want_tcp: bool,
-    #[serde(default)]
-    pub want_loop: bool,
-    #[serde(default = "default_true")]
-    pub allow_any_host: bool,
-    #[serde(default)]
-    pub initiators: Vec<String>,
-    /// Physical ports this export listens on, as scheme-tagged selectors
-    /// (`pci:0000:00:10.0`); empty means "the global default listen address".
-    #[serde(default)]
-    pub interfaces: Vec<String>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-impl NvmeExport {
-    pub fn nqn(&self) -> Nqn {
-        Nqn::new(format!("{OUR_NQN_PREFIX}{}", self.name))
-            .expect("validated name forms a valid NQN")
-    }
-}
-
-/// A block-device export served as an iSCSI target. RDMA is iSER; there is no
-/// loopback transport (so no `want_loop`), and connected sessions are tracked.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IscsiExport {
-    pub id: i64,
-    pub name: String,
-    pub device_path: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub want_rdma: bool,
-    pub want_tcp: bool,
-    #[serde(default = "default_true")]
-    pub allow_any_host: bool,
-    #[serde(default)]
-    pub initiators: Vec<String>,
-    /// Physical ports this export listens on, as scheme-tagged selectors
-    /// (`pci:0000:00:10.0`); empty means "the global default listen address".
-    #[serde(default)]
-    pub interfaces: Vec<String>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-impl IscsiExport {
-    pub fn iqn(&self) -> Iqn {
-        Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name))
-            .expect("validated name forms a valid IQN")
-    }
-}
+pub use greendot_reconcile::state::{
+    Desired, IscsiExport, NfsClientEntry, NfsExport, NvmeExport, parse_listen_iface, read_desired,
+};
 
 pub struct NewNvmeExport {
     pub name: String,
@@ -98,37 +39,6 @@ pub struct NewIscsiExport {
     pub allow_any_host: bool,
     pub initiators: Vec<String>,
     pub interfaces: Vec<String>,
-}
-
-/// Parses a stored listen-interface selector into the physical port it pins.
-/// The scheme prefix tags the identifier type so future schemes (`mac:`,
-/// `name:`) can be added without breaking saved configs; unknown schemes (and
-/// malformed addresses) parse to `None` and are skipped — graceful forward-compat.
-pub fn parse_listen_iface(s: &str) -> Option<PciAddress> {
-    s.strip_prefix("pci:")
-        .and_then(|addr| PciAddress::new(addr).ok())
-}
-
-/// A file-level NFS export of an absolute directory path, served over RDMA.
-/// Unlike a block-device export, this has a directory path and a list of
-/// client access specs — different enough to warrant its own type/table.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NfsExport {
-    pub id: i64,
-    pub path: String,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default)]
-    pub clients: Vec<NfsClientEntry>,
-    #[serde(default)]
-    pub last_error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NfsClientEntry {
-    pub client: String,
-    #[serde(default = "default_true")]
-    pub rw: bool,
 }
 
 pub struct NewNfsExport {
@@ -646,45 +556,6 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     })
 }
 
-/// The desired state needed to reconcile, read straight from the config TOML.
-pub struct Desired {
-    pub nvme_exports: Vec<NvmeExport>,
-    pub iscsi_exports: Vec<IscsiExport>,
-    pub nfs_exports: Vec<NfsExport>,
-    pub listen: IpAddr,
-}
-
-/// Reads the desired state from `state_path` with no side effects (no SQLite,
-/// no first-boot write), so `greendot-cli reconcile` only ever *reads* config —
-/// the web service stays the sole writer. Exports are normalized exactly as
-/// [`Db::list_nvme_exports`]/[`Db::list_iscsi_exports`] return them.
-pub fn read_desired(state_path: &Path) -> Result<Desired> {
-    let doc = load_config(state_path)?;
-    let mut nvme_exports = doc.nvme_export;
-    nvme_exports.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in &mut nvme_exports {
-        e.initiators.sort();
-    }
-    let mut iscsi_exports = doc.iscsi_export;
-    iscsi_exports.sort_by(|a, b| a.name.cmp(&b.name));
-    for e in &mut iscsi_exports {
-        e.initiators.sort();
-    }
-    let mut nfs_exports = doc.nfs_export;
-    nfs_exports.sort_by(|a, b| a.path.cmp(&b.path));
-    let listen = doc
-        .settings
-        .get("listen_addr")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(std::net::Ipv4Addr::UNSPECIFIED.into());
-    Ok(Desired {
-        nvme_exports,
-        iscsi_exports,
-        nfs_exports,
-        listen,
-    })
-}
-
 /// Reads the desired-state config from `path`, or the default document if the
 /// file does not exist yet (first boot / hand-deleted). A pre-split unified
 /// `export` table is migrated forward in place (see [`migrate_legacy_exports`]),
@@ -777,20 +648,6 @@ mod tests {
             initiators: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
             interfaces: vec![],
         }
-    }
-
-    #[test]
-    fn parse_listen_iface_accepts_pci_scheme_only() {
-        // A `pci:`-tagged valid address parses to its bare PCI address.
-        assert_eq!(
-            parse_listen_iface("pci:0000:00:10.0").map(|p| p.to_string()),
-            Some("0000:00:10.0".to_owned())
-        );
-        // An unknown scheme, a missing scheme, and a malformed address all reject
-        // (so future schemes stay forward-compatible and bad input is skipped).
-        assert!(parse_listen_iface("mac:00:11:22:33:44:55").is_none());
-        assert!(parse_listen_iface("0000:00:10.0").is_none());
-        assert!(parse_listen_iface("pci:nonsense").is_none());
     }
 
     #[test]

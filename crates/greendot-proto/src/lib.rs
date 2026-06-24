@@ -1,4 +1,4 @@
-//! Wire protocol between greendot-web (unprivileged) and greendot-helper (root).
+//! Wire protocol between greendot-web (unprivileged) and greendotctl (root).
 //!
 //! Every request variant is one allowlisted privileged operation. All strings
 //! that end up as path components or command arguments are validated newtypes;
@@ -262,6 +262,14 @@ impl Response {
             message: message.into(),
         }
     }
+}
+
+/// Receives task events as they happen — the socket writer in the daemon, a
+/// stdout writer in the standalone CLI, or a collector in tests. Returning `Err`
+/// aborts streaming. Lives here, next to [`TaskEvent`], so both the helper's
+/// apply functions and the transport-agnostic reconciler can name one trait.
+pub trait EventSink {
+    fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

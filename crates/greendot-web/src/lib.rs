@@ -1,5 +1,7 @@
-//! Library crate shared by the `greendot-web` server binary and the
-//! `greendot-cli` command-line tool (e.g. `greendot-cli reconcile`).
+//! Library crate for the `greendot-web` server binary. The reconcile CLI now
+//! lives in the `greendotctl` binary (which merges the helper daemon and the
+//! reconcile tool); the transport-agnostic reconcile logic both share is in the
+//! `greendot-reconcile` crate.
 
 pub mod actual;
 pub mod auth;

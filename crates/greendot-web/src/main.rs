@@ -3,15 +3,17 @@ use greendot_web::{auth, config, helper_client, metrics, routes, snapshots, stat
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The argv the web service runs to reconcile: the sibling `greendot-cli`
+/// The argv the web service runs to reconcile: the sibling `greendotctl`
 /// (installed next to this binary) with the same config file, so it reads the
-/// same desired state and helper socket.
+/// same desired state and helper socket. Run unprivileged here, `greendotctl
+/// reconcile` finds the helper socket reachable and proxies the apply to the
+/// running daemon — exactly as the old `greendot-cli` did.
 fn reconcile_cmd(config_arg: Option<String>) -> Vec<String> {
     let cli = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("greendot-cli")))
+        .and_then(|exe| exe.parent().map(|dir| dir.join("greendotctl")))
         .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "greendot-cli".into());
+        .unwrap_or_else(|| "greendotctl".into());
     let mut cmd = vec![cli, "reconcile".into()];
     cmd.extend(config_arg);
     cmd

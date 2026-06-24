@@ -16,7 +16,7 @@ pkgs.testers.runNixOSTest {
   nodes.machine = common.mkGreendotNode { inherit greendot; };
 
   testScript = ''
-    machine.wait_for_unit("greendot-helper.service")
+    machine.wait_for_unit("greendotctl.service")
     machine.wait_for_unit("greendot-web.service")
     machine.wait_for_open_port(8080)
 
@@ -24,7 +24,7 @@ pkgs.testers.runNixOSTest {
     # namespace (PrivateTmp=/ProtectHome=/ProtectSystem=) confines its zfs/btrfs
     # mounts to that namespace, so the host and greendot-web never see them.
     machine.succeed(
-        'test "$(readlink /proc/$(systemctl show -p MainPID --value greendot-helper)/ns/mnt)"'
+        'test "$(readlink /proc/$(systemctl show -p MainPID --value greendotctl)/ns/mnt)"'
         ' = "$(readlink /proc/1/ns/mnt)"'
     )
 

@@ -1,5 +1,10 @@
-//! Root helper daemon: executes allowlisted privileged operations on behalf
-//! of greendot-web. Only the configured uid may connect (SO_PEERCRED).
+//! `greendotctl`: the GreenDotRDMA root daemon and standalone reconcile tool.
+//!
+//! `greendotctl serve` (the default, no subcommand) runs the daemon that
+//! executes allowlisted privileged operations on behalf of greendot-web; only
+//! the configured uid may connect (SO_PEERCRED). `greendotctl reconcile
+//! [config.toml]` applies the desired state — in-process as root with no daemon,
+//! or over the helper socket when one is running (see [`reconcile_cli`]).
 
 mod cmd;
 mod dispatch;
@@ -13,6 +18,7 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
+mod reconcile_cli;
 mod smart;
 mod zfs;
 
@@ -77,7 +83,21 @@ impl Opts {
 
 fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
-    let opts = Opts::parse(std::env::args().skip(1))?;
+    // Subcommands: `reconcile [config]` runs the one-shot reconcile; `serve` (or
+    // no subcommand, for back-compat with the flags-only invocation) runs the
+    // daemon. The token is consumed here; daemon flags follow.
+    let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        Some("reconcile") => {
+            args.next();
+            return reconcile_cli::run(args.next());
+        }
+        Some("serve") => {
+            args.next();
+        }
+        _ => {}
+    }
+    let opts = Opts::parse(args)?;
     let (allowed_uid, socket_gid) = opts.resolve_allowed_ids()?;
 
     if let Some(dir) = opts.socket.parent() {

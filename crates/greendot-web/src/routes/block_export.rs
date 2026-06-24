@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 /// Serialized full reconcile against current desired state. A cheap in-process
 /// drift pre-check keeps the steady state (and the 60 s timer) silent; on drift
-/// it dispatches `greendot-cli reconcile` as a recorded, streamable task and
+/// it dispatches `greendotctl reconcile` as a recorded, streamable task and
 /// returns its id *without waiting* — the outcome is surfaced on the export dots
 /// and the settings banner once it finishes (in the background). The web stays
 /// the sole writer of the config — the CLI only reads it.

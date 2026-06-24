@@ -1,12 +1,14 @@
 [package]
-name = "greendot-helper"
+name = "greendotctl"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "GreenDotRDMA root daemon (serve) and standalone reconcile tool"
 
 [dependencies]
 anyhow = { workspace = true }
 greendot-proto = { workspace = true }
+greendot-reconcile = { workspace = true }
 nix = { workspace = true }
 pam = "0.7"
 serde_json = { workspace = true }

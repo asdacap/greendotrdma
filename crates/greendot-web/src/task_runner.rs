@@ -1,4 +1,4 @@
-//! Runs a helper request — or a local command, e.g. `greendot-cli reconcile` —
+//! Runs a helper request — or a local command, e.g. `greendotctl reconcile` —
 //! as a recorded, streamable task: persists it to the store, mirrors live
 //! output to SSE subscribers, and returns the outcome.
 

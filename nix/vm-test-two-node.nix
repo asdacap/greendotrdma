@@ -35,7 +35,7 @@ pkgs.testers.runNixOSTest {
     netdev = "eth1"
 
     start_all()
-    target.wait_for_unit("greendot-helper.service")
+    target.wait_for_unit("greendotctl.service")
     target.wait_for_unit("greendot-web.service")
     target.wait_for_open_port(8080)
 

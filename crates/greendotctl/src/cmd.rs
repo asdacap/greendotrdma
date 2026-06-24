@@ -2,6 +2,7 @@
 //! child's stdout/stderr back as [`TaskEvent`]s and maps a missing binary to
 //! an actionable "not installed" message.
 
+pub use greendot_proto::EventSink;
 use greendot_proto::{TaskEvent, package_for_cli};
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
@@ -65,12 +66,6 @@ impl Drop for TempInput {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.0);
     }
-}
-
-/// Receives task events as they happen (the socket writer in production, a
-/// collector in tests). Returning `Err` aborts streaming.
-pub trait EventSink {
-    fn emit(&mut self, ev: TaskEvent) -> io::Result<()>;
 }
 
 fn spawn_error(command: &str, e: &io::Error) -> String {

@@ -33,7 +33,7 @@ apt-get install -y "linux-modules-extra-$(uname -r)" 2>/dev/null \
 
 # The admin login must be a member of greendot-admin (created by the postinst).
 usermod -aG greendot-admin gdadmin
-systemctl restart greendot-helper greendot-web
+systemctl restart greendotctl greendot-web
 
 echo "== waiting for the web service"
 for _ in $(seq 1 60); do curl -fsk "$WEB/" >/dev/null 2>&1 && break || sleep 1; done
@@ -44,9 +44,9 @@ curl -fsk "$WEB/" >/dev/null || fail "web service never came up"
 # mount`/`zfs create` mounts to that namespace, so the host and greendot-web
 # never see them ("filesystem already mounted" on retry; dataset shows unmounted).
 echo "== helper must run in the host mount namespace"
-HPID=$(systemctl show -p MainPID --value greendot-helper)
+HPID=$(systemctl show -p MainPID --value greendotctl)
 [ "$(readlink "/proc/$HPID/ns/mnt")" = "$(readlink /proc/1/ns/mnt)" ] \
-    || fail "greendot-helper is in a private mount namespace; its zfs mounts never reach the host"
+    || fail "greendotctl is in a private mount namespace; its zfs mounts never reach the host"
 
 echo "== storage + Soft-RoCE"
 modprobe zfs rdma_rxe nvmet nvmet_rdma nvme_rdma nvme_fabrics \

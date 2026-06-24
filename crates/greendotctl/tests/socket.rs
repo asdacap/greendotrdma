@@ -18,7 +18,7 @@ impl Helper {
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("helper.sock");
         let uid = nix::unistd::getuid().to_string();
-        let child = std::process::Command::new(env!("CARGO_BIN_EXE_greendot-helper"))
+        let child = std::process::Command::new(env!("CARGO_BIN_EXE_greendotctl"))
             .args(["--socket", socket.to_str().unwrap(), "--allow-uid", &uid])
             .spawn()
             .unwrap();

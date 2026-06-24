@@ -99,12 +99,12 @@ let
       # PAM service the helper authenticates against (matches pam_service default).
       security.pam.services.greendotrdma = { };
 
-      systemd.services.greendot-helper = {
-        description = "GreenDotRDMA privileged helper";
+      systemd.services.greendotctl = {
+        description = "GreenDotRDMA privileged daemon";
         wantedBy = [ "multi-user.target" ];
         path = tools;
         serviceConfig = {
-          ExecStart = "${greendot}/bin/greendot-helper";
+          ExecStart = "${greendot}/bin/greendotctl serve";
           Restart = "on-failure";
           RuntimeDirectory = "greendotrdma";
           RuntimeDirectoryMode = "0755";
@@ -114,7 +114,7 @@ let
       systemd.services.greendot-web = {
         description = "GreenDotRDMA web UI";
         wantedBy = [ "multi-user.target" ];
-        after = [ "greendot-helper.service" ];
+        after = [ "greendotctl.service" ];
         path = tools;
         serviceConfig = {
           User = "greendot";
