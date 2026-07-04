@@ -1,15 +1,32 @@
-//! Wire protocol between greendot-web (unprivileged) and greendotctl (root).
+//! Protocol between greendot-web (unprivileged) and greendotctl (root).
 //!
-//! Every request variant is one allowlisted privileged operation. All strings
-//! that end up as path components or command arguments are validated newtypes;
-//! validation runs on construction *and* on deserialization, so the helper
-//! re-validates everything it receives by merely decoding it.
+//! This module holds the *validated domain model* — `Request`/`Response`/
+//! `TaskEvent` and the newtypes in `types`. Every request variant is one
+//! allowlisted privileged operation, and all strings that end up as path
+//! components or command arguments are validated newtypes.
+//!
+//! The transport is gRPC (tonic): the generated protobuf types live in [`pb`],
+//! and [`convert`] provides the conversions. Crucially, protobuf messages are
+//! plain strings that prost does *not* validate on decode, so the daemon must
+//! convert every incoming `pb::Request` via `TryFrom` (in `convert`), which
+//! re-runs the validators — that conversion is the security choke point the
+//! serde `Deserialize` impls used to provide for free.
 
+pub mod client;
+mod convert;
 mod osdetect;
 mod types;
 mod validate;
-pub mod wire;
 
+/// Generated protobuf/gRPC transport types. Kept separate from the validated
+/// domain model (`Request`/`Response`/`TaskEvent` below); see `convert` for the
+/// validating conversions between the two.
+pub mod pb {
+    #![allow(clippy::all, clippy::pedantic, clippy::nursery, missing_docs)]
+    tonic::include_proto!("greendot.helper.v1");
+}
+
+pub use convert::ConvertError;
 pub use osdetect::*;
 pub use types::*;
 

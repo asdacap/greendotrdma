@@ -144,188 +144,141 @@ pub(crate) mod testutil {
     use crate::auth::Sessions;
     use axum::body::Body;
     use axum::http::Request;
-    use greendot_proto::{ErrKind, Request as HelperRequest, Response as HelperResponse, wire};
+    use greendot_proto::pb;
+    use greendot_proto::pb::helper_server::{Helper, HelperServer};
+    use greendot_proto::{
+        ErrKind, LvmReport, Request as HelperRequest, Response as HelperResponse, TaskEvent,
+    };
     use http_body_util::BodyExt;
-    use std::io::BufReader;
+    use std::pin::Pin;
     use std::time::Duration;
+    use tokio_stream::wrappers::UnixListenerStream;
     use tower::ServiceExt;
 
-    /// A fake helper accepting alice/secret, answering Ok to everything else.
+    /// A fake helper — a real in-process tonic server — accepting alice/secret
+    /// and answering Ok to everything else, with canned reads for the report
+    /// ops so the pages build real rows.
+    struct FakeHelper;
+
+    /// Canned task-event stream for a request (the read ops carry the JSON the
+    /// pages parse; everything else is a Started + successful Finished).
+    fn fake_events(req: &HelperRequest) -> Vec<TaskEvent> {
+        let started = TaskEvent::Started {
+            command: "fake".into(),
+            args: vec![],
+            stdin: None,
+        };
+        let ok_finished = TaskEvent::Finished {
+            exit: 0,
+            ok: true,
+            error: None,
+        };
+        let stdout = |data: &str| TaskEvent::Stdout { data: data.into() };
+        match req {
+            HelperRequest::LvmReport { what } => {
+                let json = match what {
+                    LvmReport::Vgs => {
+                        r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
+                    }
+                    LvmReport::Lvs => {
+                        r#"{"report":[{"lv":[{"vg_name":"vg0","lv_name":"data","lv_size":"10737418240","lv_attr":"-wi-a-----","pool_lv":"","data_percent":""},{"vg_name":"vg0","lv_name":"pool0","lv_size":"53687091200","lv_attr":"twi-aotz--","pool_lv":"","data_percent":"5.00"}]}]}"#
+                    }
+                    LvmReport::Pvs => {
+                        r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
+                    }
+                };
+                vec![started, stdout(json), ok_finished]
+            }
+            // RoCE-capable NIC inventory: eth0 with a sample vendor so the NIC
+            // table shows a capable-disabled row (the web renders it opaquely).
+            HelperRequest::RoceCapableNics => {
+                vec![
+                    started,
+                    stdout(r#"[{"netdev":"eth0","vendor":"Acme"}]"#),
+                    ok_finished,
+                ]
+            }
+            // SMART batch health: a small canned inventory (dot + temperature).
+            HelperRequest::SmartHealth { .. } => {
+                vec![
+                    started,
+                    stdout(r#"[{"device":"sda","passed":true,"temp_c":38}]"#),
+                    ok_finished,
+                ]
+            }
+            // SMART full report: smartctl exits nonzero on healthy drives, so
+            // Finished is ok:false to prove the web shows stdout regardless.
+            HelperRequest::SmartReport { .. } => vec![
+                started,
+                stdout("smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n"),
+                TaskEvent::Finished {
+                    exit: 4,
+                    ok: false,
+                    error: None,
+                },
+            ],
+            // Everything else (incl. EnableRoce, EnsureModules) is a task.
+            _ => vec![started, ok_finished],
+        }
+    }
+
+    #[tonic::async_trait]
+    impl Helper for FakeHelper {
+        async fn call(
+            &self,
+            request: tonic::Request<pb::Request>,
+        ) -> std::result::Result<tonic::Response<pb::Response>, tonic::Status> {
+            let req = HelperRequest::try_from(request.into_inner())
+                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+            let resp = match req {
+                HelperRequest::Ping => HelperResponse::Ok,
+                HelperRequest::Authenticate { username, password } => {
+                    if username.as_str() == "alice" && password.0 == "secret" {
+                        HelperResponse::OkAuth {
+                            username: username.to_string(),
+                        }
+                    } else {
+                        HelperResponse::err(ErrKind::AuthFailed, "invalid username or password")
+                    }
+                }
+                _ => HelperResponse::Ok,
+            };
+            Ok(tonic::Response::new(resp.into()))
+        }
+
+        type RunTaskStream = Pin<
+            Box<
+                dyn tokio_stream::Stream<Item = std::result::Result<pb::TaskEvent, tonic::Status>>
+                    + Send,
+            >,
+        >;
+
+        #[allow(clippy::result_large_err)] // tonic::Status is large; fine for a test stub
+        async fn run_task(
+            &self,
+            request: tonic::Request<pb::Request>,
+        ) -> std::result::Result<tonic::Response<Self::RunTaskStream>, tonic::Status> {
+            let req = HelperRequest::try_from(request.into_inner())
+                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+            let events: Vec<std::result::Result<pb::TaskEvent, tonic::Status>> = fake_events(&req)
+                .into_iter()
+                .map(|e| Ok(pb::TaskEvent::from(e)))
+                .collect();
+            Ok(tonic::Response::new(Box::pin(tokio_stream::iter(events))))
+        }
+    }
+
+    /// Binds a fake helper on a fresh unix socket and returns its path.
     fn fake_helper_socket() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("gd-fake{}", rand::random::<u32>()));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("helper.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        std::thread::spawn(move || {
-            for stream in listener.incoming() {
-                let stream = stream.unwrap();
-                let mut reader = BufReader::new(stream.try_clone().unwrap());
-                let mut writer = stream;
-                while let Ok(Some(req)) = wire::read_msg::<HelperRequest, _>(&mut reader) {
-                    use greendot_proto::TaskEvent;
-                    let ok = |w: &mut std::os::unix::net::UnixStream| match req {
-                        // One-shot replies.
-                        HelperRequest::Ping => wire::write_msg(w, &HelperResponse::Ok),
-                        HelperRequest::Authenticate {
-                            ref username,
-                            ref password,
-                        } => {
-                            let resp = if username.as_str() == "alice" && password.0 == "secret" {
-                                HelperResponse::OkAuth {
-                                    username: username.to_string(),
-                                }
-                            } else {
-                                HelperResponse::err(
-                                    ErrKind::AuthFailed,
-                                    "invalid username or password",
-                                )
-                            };
-                            wire::write_msg(w, &resp)
-                        }
-                        // LVM reporting reads go through the helper; answer with
-                        // a small fixed inventory so the page builds real rows.
-                        HelperRequest::LvmReport { what } => {
-                            use greendot_proto::LvmReport;
-                            let json = match what {
-                                LvmReport::Vgs => {
-                                    r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
-                                }
-                                LvmReport::Lvs => {
-                                    r#"{"report":[{"lv":[{"vg_name":"vg0","lv_name":"data","lv_size":"10737418240","lv_attr":"-wi-a-----","pool_lv":"","data_percent":""},{"vg_name":"vg0","lv_name":"pool0","lv_size":"53687091200","lv_attr":"twi-aotz--","pool_lv":"","data_percent":"5.00"}]}]}"#
-                                }
-                                LvmReport::Pvs => {
-                                    r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
-                                }
-                            };
-                            wire::write_msg(
-                                w,
-                                &TaskEvent::Started {
-                                    command: "fake".into(),
-                                    args: vec![],
-                                    stdin: None,
-                                },
-                            )
-                            .and_then(|()| {
-                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
-                            })
-                            .and_then(|()| {
-                                wire::write_msg(
-                                    w,
-                                    &TaskEvent::Finished {
-                                        exit: 0,
-                                        ok: true,
-                                        error: None,
-                                    },
-                                )
-                            })
-                        }
-                        // RoCE-capable NIC inventory: report eth0 with a sample
-                        // vendor so the NIC table shows a capable-disabled row.
-                        // The web renders the label opaquely — the real vendor
-                        // set lives in the helper's NetworkHardware registry.
-                        HelperRequest::RoceCapableNics => {
-                            let json = r#"[{"netdev":"eth0","vendor":"Acme"}]"#;
-                            wire::write_msg(
-                                w,
-                                &TaskEvent::Started {
-                                    command: "fake".into(),
-                                    args: vec![],
-                                    stdin: None,
-                                },
-                            )
-                            .and_then(|()| {
-                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
-                            })
-                            .and_then(|()| {
-                                wire::write_msg(
-                                    w,
-                                    &TaskEvent::Finished {
-                                        exit: 0,
-                                        ok: true,
-                                        error: None,
-                                    },
-                                )
-                            })
-                        }
-                        // SMART batch health: a small canned inventory so the
-                        // device list renders a real dot + temperature.
-                        HelperRequest::SmartHealth { .. } => {
-                            let json = r#"[{"device":"sda","passed":true,"temp_c":38}]"#;
-                            wire::write_msg(
-                                w,
-                                &TaskEvent::Started {
-                                    command: "fake".into(),
-                                    args: vec![],
-                                    stdin: None,
-                                },
-                            )
-                            .and_then(|()| {
-                                wire::write_msg(w, &TaskEvent::Stdout { data: json.into() })
-                            })
-                            .and_then(|()| {
-                                wire::write_msg(
-                                    w,
-                                    &TaskEvent::Finished {
-                                        exit: 0,
-                                        ok: true,
-                                        error: None,
-                                    },
-                                )
-                            })
-                        }
-                        // SMART full report: a short canned dump. smartctl exits
-                        // nonzero on healthy drives, so Finished is ok:false to
-                        // prove the web shows stdout regardless.
-                        HelperRequest::SmartReport { .. } => {
-                            let dump = "smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n";
-                            wire::write_msg(
-                                w,
-                                &TaskEvent::Started {
-                                    command: "fake".into(),
-                                    args: vec![],
-                                    stdin: None,
-                                },
-                            )
-                            .and_then(|()| {
-                                wire::write_msg(w, &TaskEvent::Stdout { data: dump.into() })
-                            })
-                            .and_then(|()| {
-                                wire::write_msg(
-                                    w,
-                                    &TaskEvent::Finished {
-                                        exit: 4,
-                                        ok: false,
-                                        error: None,
-                                    },
-                                )
-                            })
-                        }
-                        // Everything else (incl. EnableRoce) is a task: stream
-                        // Started + a successful Finished.
-                        _ => wire::write_msg(
-                            w,
-                            &TaskEvent::Started {
-                                command: "fake".into(),
-                                args: vec![],
-                                stdin: None,
-                            },
-                        )
-                        .and_then(|()| {
-                            wire::write_msg(
-                                w,
-                                &TaskEvent::Finished {
-                                    exit: 0,
-                                    ok: true,
-                                    error: None,
-                                },
-                            )
-                        }),
-                    };
-                    if ok(&mut writer).is_err() {
-                        break;
-                    }
-                }
-            }
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        tokio::spawn(async move {
+            let _ = tonic::transport::Server::builder()
+                .add_service(HelperServer::new(FakeHelper))
+                .serve_with_incoming(UnixListenerStream::new(listener))
+                .await;
         });
         socket
     }

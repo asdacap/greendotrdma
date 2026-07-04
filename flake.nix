@@ -21,6 +21,7 @@
             rustfmt
             rust-analyzer
             pkg-config
+            protobuf # protoc, for tonic-build codegen (greendot-proto/build.rs)
             cargo-deb
             cargo-tarpaulin # line coverage (CI gates at --fail-under 65)
             patchelf # retarget release binaries onto Ubuntu's loader for the .deb
@@ -41,7 +42,8 @@
           version = "0.1.0";
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
-          nativeBuildInputs = [ pkgs.pkg-config ];
+          # protobuf provides protoc for tonic-build's codegen step.
+          nativeBuildInputs = [ pkgs.pkg-config pkgs.protobuf ];
           buildInputs = [ pkgs.linux-pam ];
           doCheck = false; # unit tests run in the dev shell; this is just the binaries
         };

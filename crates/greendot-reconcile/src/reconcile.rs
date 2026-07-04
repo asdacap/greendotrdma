@@ -16,12 +16,10 @@ use greendot_proto::{
     EventSink, KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec,
     LioTargetSpec, NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath,
     NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request,
-    TaskEvent, Transport, wire,
+    TaskEvent, Transport, pb,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::BufReader;
 use std::net::IpAddr;
-use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
 /// greendot's NFS `fsid`s are offset into a reserved high range so they don't
@@ -463,36 +461,56 @@ impl EventSink for StdoutSink {
 /// (unprivileged) `greendotctl reconcile` takes, identical to the old greendot-cli.
 pub struct SocketExecutor {
     socket: PathBuf,
+    /// The `greendotctl reconcile` binary is synchronous, so we drive the async
+    /// gRPC client on a private current-thread runtime (this runs outside any
+    /// ambient runtime — `main` keeps the reconcile path off the daemon's).
+    runtime: tokio::runtime::Runtime,
 }
 
 impl SocketExecutor {
     pub fn new(socket: PathBuf) -> Self {
-        SocketExecutor { socket }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build reconcile runtime");
+        SocketExecutor { socket, runtime }
     }
 
-    /// Sends `req` and streams the helper's events to `on_event` until the
-    /// terminal `Finished`, returning its `ok`.
+    /// Sends `req` over the helper's `RunTask` gRPC stream and forwards each
+    /// event to `on_event` until the terminal `Finished`, returning its `ok`.
     fn stream(
         &self,
         req: Request,
         mut on_event: impl FnMut(TaskEvent) -> std::io::Result<()>,
     ) -> std::io::Result<bool> {
-        let stream = UnixStream::connect(&self.socket)?;
-        let mut reader = BufReader::new(stream.try_clone()?);
-        let mut writer = stream;
-        wire::write_msg(&mut writer, &req)?;
-        let mut ok = false;
-        while let Some(ev) = wire::read_msg::<TaskEvent, _>(&mut reader)? {
-            let done = matches!(ev, TaskEvent::Finished { .. });
-            if let TaskEvent::Finished { ok: f, .. } = &ev {
-                ok = *f;
+        let socket = self.socket.clone();
+        self.runtime.block_on(async move {
+            let mut client = greendot_proto::client::connect_uds(socket)
+                .map_err(|e| std::io::Error::other(format!("helper endpoint: {e}")))?;
+            let mut stream = client
+                .run_task(pb::Request::from(req))
+                .await
+                .map_err(|e| std::io::Error::other(format!("helper run_task: {e}")))?
+                .into_inner();
+            let mut ok = false;
+            while let Some(pb_ev) = stream
+                .message()
+                .await
+                .map_err(|e| std::io::Error::other(format!("helper stream: {e}")))?
+            {
+                let ev = TaskEvent::try_from(pb_ev)
+                    .map_err(|e| std::io::Error::other(format!("bad task event: {e}")))?;
+                let done = matches!(ev, TaskEvent::Finished { .. });
+                if let TaskEvent::Finished { ok: f, .. } = &ev {
+                    ok = *f;
+                }
+                on_event(ev)?;
+                if done {
+                    break;
+                }
             }
-            on_event(ev)?;
-            if done {
-                break;
-            }
-        }
-        Ok(ok)
+            Ok(ok)
+        })
     }
 }
 
@@ -542,7 +560,12 @@ pub fn run(cfg: &Config, exec: &dyn Executor, sink: &mut dyn EventSink) -> anyho
     modules.extend(iscsi_modules(&iscsi_exports));
     modules.extend(nfs_modules(&nfs_exports));
     if !modules.is_empty() {
-        ok &= step(exec, sink, Request::EnsureModules { modules }, "Load kernel modules")?;
+        ok &= step(
+            exec,
+            sink,
+            Request::EnsureModules { modules },
+            "Load kernel modules",
+        )?;
     }
     if !nvmet_ok {
         let req = Request::NvmetApply {

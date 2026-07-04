@@ -7,6 +7,14 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+prost = { workspace = true }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+
+[build-dependencies]
+tonic-build = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

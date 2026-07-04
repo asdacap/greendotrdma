@@ -1,10 +1,15 @@
-//! End-to-end test against the real helper binary over a unix socket.
+//! End-to-end test against the real helper binary over gRPC on a unix socket.
+//!
+//! Linux-only: the daemon authorizes connections by SO_PEERCRED, which only
+//! exists on Linux, so this spawns a real Linux binary and is skipped elsewhere.
+#![cfg(target_os = "linux")]
 
-use greendot_proto::{DatasetName, ErrKind, KernelModule, Request, Response, TaskEvent, wire};
-use std::io::{BufReader, Write};
-use std::os::unix::net::UnixStream;
+use greendot_proto::pb;
+use greendot_proto::pb::helper_client::HelperClient;
+use greendot_proto::{DatasetName, KernelModule, Request, Response, TaskEvent};
 use std::path::PathBuf;
 use std::time::Duration;
+use tonic::transport::Channel;
 
 struct Helper {
     child: std::process::Child,
@@ -31,9 +36,8 @@ impl Helper {
         Helper { child, socket }
     }
 
-    fn connect(&self) -> (BufReader<UnixStream>, UnixStream) {
-        let stream = UnixStream::connect(&self.socket).unwrap();
-        (BufReader::new(stream.try_clone().unwrap()), stream)
+    fn client(&self) -> HelperClient<Channel> {
+        greendot_proto::client::connect_uds(self.socket.clone()).unwrap()
     }
 }
 
@@ -45,86 +49,78 @@ impl Drop for Helper {
 }
 
 /// Sends a task request and collects the streamed events up to Finished.
-fn run_task(helper: &Helper, req: &Request) -> Vec<TaskEvent> {
-    let (mut r, mut w) = helper.connect();
-    wire::write_msg(&mut w, req).unwrap();
+async fn run_task(client: &mut HelperClient<Channel>, req: pb::Request) -> Vec<TaskEvent> {
+    let mut stream = client.run_task(req).await.unwrap().into_inner();
     let mut events = Vec::new();
-    while let Some(ev) = wire::read_msg::<TaskEvent, _>(&mut r).unwrap() {
-        let done = matches!(ev, TaskEvent::Finished { .. });
-        events.push(ev);
-        if done {
-            break;
-        }
+    while let Some(ev) = stream.message().await.unwrap() {
+        events.push(TaskEvent::try_from(ev).unwrap());
     }
     events
 }
 
-#[test]
-fn ping_streamed_task_and_garbage_handling() {
+#[tokio::test]
+async fn ping_streamed_task_oneshot_and_validation() {
     let helper = Helper::start();
+    let mut client = helper.client();
 
-    // Ping is one-shot and works twice on one connection.
-    let (mut r, mut w) = helper.connect();
+    // Ping is one-shot (unary Call) and works repeatedly on one channel.
     for _ in 0..2 {
-        wire::write_msg(&mut w, &Request::Ping).unwrap();
-        assert_eq!(
-            wire::read_msg::<Response, _>(&mut r).unwrap(),
-            Some(Response::Ok)
-        );
+        let resp = client
+            .call(pb::Request::from(Request::Ping))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(Response::try_from(resp).unwrap(), Response::Ok);
     }
 
     // A task op streams Started..Finished. `zfs` is absent in the dev shell,
     // so this exercises the missing-binary install hint over the real socket.
     let events = run_task(
-        &helper,
-        &Request::ZvolDelete {
+        &mut client,
+        pb::Request::from(Request::ZvolDelete {
             dataset: DatasetName::new("tank/x").unwrap(),
-        },
-    );
+        }),
+    )
+    .await;
     assert!(matches!(events.first(), Some(TaskEvent::Started { command, .. }) if command == "zfs"));
     match events.last() {
         Some(TaskEvent::Finished {
             ok: false,
             error: Some(msg),
             ..
-        }) => {
-            assert!(msg.contains("zfs is not installed"), "{msg}");
-        }
+        }) => assert!(msg.contains("zfs is not installed"), "{msg}"),
         other => panic!("expected Finished with install hint, got {other:?}"),
     }
 
-    // EnsureModules with an empty set is a one-shot Ok (no command to run).
-    let (mut r, mut w) = helper.connect();
-    wire::write_msg(
-        &mut w,
-        &Request::EnsureModules {
+    // EnsureModules with an empty set is a one-shot Ok: over RunTask it becomes a
+    // terminal successful Finished (no command to run).
+    let events = run_task(
+        &mut client,
+        pb::Request::from(Request::EnsureModules {
             modules: Vec::<KernelModule>::new(),
-        },
+        }),
     )
-    .unwrap();
-    assert_eq!(
-        wire::read_msg::<Response, _>(&mut r).unwrap(),
-        Some(Response::Ok)
-    );
+    .await;
+    assert!(matches!(
+        events.last(),
+        Some(TaskEvent::Finished { ok: true, .. })
+    ));
 
-    // Garbage gets a validation error and the connection is closed.
-    let (mut r, mut w) = helper.connect();
-    w.write_all(b"{\"op\":\"zvol_delete\",\"dataset\":\"../etc\"}\nnot json\n")
-        .unwrap();
-    let first: Response = wire::read_msg(&mut r).unwrap().unwrap();
-    assert!(
-        matches!(
-            first,
-            Response::Err {
-                kind: ErrKind::Validation,
-                ..
-            }
-        ),
-        "{first:?}"
-    );
-    assert_eq!(
-        wire::read_msg::<Response, _>(&mut r).unwrap(),
-        None,
-        "connection should be closed"
-    );
+    // A request that fails validation at the proto->domain boundary is reported
+    // as a failed task (the daemon re-validates every field on ingress). Build
+    // the protobuf directly, since the domain type would refuse to construct it.
+    let bad = pb::Request {
+        op: Some(pb::request::Op::ZvolDelete(pb::ZvolDelete {
+            dataset: "../etc".into(),
+        })),
+    };
+    let events = run_task(&mut client, bad).await;
+    match events.last() {
+        Some(TaskEvent::Finished {
+            ok: false,
+            error: Some(msg),
+            ..
+        }) => assert!(msg.contains("invalid request"), "{msg}"),
+        other => panic!("expected rejected task, got {other:?}"),
+    }
 }

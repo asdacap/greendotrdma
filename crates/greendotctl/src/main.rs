@@ -1,10 +1,16 @@
 //! `greendotctl`: the GreenDotRDMA root daemon and standalone reconcile tool.
 //!
-//! `greendotctl serve` (the default, no subcommand) runs the daemon that
+//! `greendotctl serve` (the default, no subcommand) runs the gRPC daemon that
 //! executes allowlisted privileged operations on behalf of greendot-web; only
-//! the configured uid may connect (SO_PEERCRED). `greendotctl reconcile
-//! [config.toml]` applies the desired state — in-process as root with no daemon,
-//! or over the helper socket when one is running (see [`reconcile_cli`]).
+//! the configured uid may connect (SO_PEERCRED, enforced on each accepted Unix
+//! socket). `greendotctl reconcile [config.toml]` applies the desired state —
+//! in-process as root with no daemon, or over the helper socket when one is
+//! running (see [`reconcile_cli`]).
+//!
+//! Transport is gRPC (tonic) over the Unix socket. Every incoming `pb::Request`
+//! is converted to the validated domain [`greendot_proto::Request`] via
+//! `TryFrom`, which re-runs the validators — the daemon's second line of
+//! defense (prost does not validate on decode the way serde did).
 
 mod cmd;
 mod dispatch;
@@ -24,17 +30,26 @@ mod zfs;
 
 use anyhow::{Context, Result, bail};
 use cmd::EventSink;
-use dispatch::Dispatch;
-use greendot_proto::{ErrKind, Request, Response, TaskEvent, wire};
-use std::io::BufReader;
+use dispatch::{Ctx, Dispatch};
+use greendot_proto::pb::helper_server::{Helper, HelperServer};
+use greendot_proto::{ErrKind, Request as GdRequest, Response as GdResponse, TaskEvent, pb};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use tokio::net::UnixStream;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
+use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
 use tracing::{info, warn};
 
+/// Ceiling on in-flight requests per gRPC connection. Mutations are further
+/// serialized by `Ctx::mutate_lock`; this just bounds concurrent reads/spawns.
 const MAX_CONNECTIONS: usize = 8;
+
+/// Upper bound on a single decoded request, mirroring the old NDJSON `MAX_LINE`.
+const MAX_MESSAGE: usize = 256 * 1024;
 
 struct Opts {
     socket: PathBuf,
@@ -85,7 +100,8 @@ fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
     // Subcommands: `reconcile [config]` runs the one-shot reconcile; `serve` (or
     // no subcommand, for back-compat with the flags-only invocation) runs the
-    // daemon. The token is consumed here; daemon flags follow.
+    // daemon. `reconcile` runs OUTSIDE any tokio runtime — it builds its own via
+    // the socket executor — so we only spin up the async runtime for `serve`.
     let mut args = std::env::args().skip(1).peekable();
     match args.peek().map(String::as_str) {
         Some("reconcile") => {
@@ -98,13 +114,20 @@ fn main() -> Result<()> {
         _ => {}
     }
     let opts = Opts::parse(args)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(serve_forever(opts))
+}
+
+async fn serve_forever(opts: Opts) -> Result<()> {
     let (allowed_uid, socket_gid) = opts.resolve_allowed_ids()?;
 
     if let Some(dir) = opts.socket.parent() {
         std::fs::create_dir_all(dir)?;
     }
     let _ = std::fs::remove_file(&opts.socket);
-    let listener = UnixListener::bind(&opts.socket)
+    let listener = tokio::net::UnixListener::bind(&opts.socket)
         .with_context(|| format!("binding {}", opts.socket.display()))?;
     std::fs::set_permissions(&opts.socket, std::fs::Permissions::from_mode(0o660))?;
     if socket_gid.is_some() {
@@ -125,187 +148,221 @@ fn main() -> Result<()> {
         )),
         mutate_lock: std::sync::Mutex::new(()),
     });
-    let active = Arc::new(AtomicUsize::new(0));
-    for stream in listener.incoming() {
-        let stream = match stream {
-            Ok(s) => s,
-            Err(e) => {
-                warn!(error = %e, "accept failed");
-                continue;
-            }
-        };
-        match peer_uid(&stream) {
-            Ok(uid) if uid == allowed_uid => {}
+
+    // SO_PEERCRED authorization: only the configured uid may connect. Rejected
+    // and errored connections are dropped so the daemon keeps serving (mirrors
+    // the old accept loop's `continue`).
+    let incoming = UnixListenerStream::new(listener).filter_map(move |conn| match conn {
+        Ok(stream) => match peer_uid(&stream) {
+            Ok(uid) if uid == allowed_uid => Some(Ok::<_, io::Error>(stream)),
             Ok(uid) => {
                 warn!(uid, "rejecting connection from unauthorized uid");
-                continue;
+                None
             }
             Err(e) => {
                 warn!(error = %e, "could not read peer credentials");
-                continue;
+                None
             }
+        },
+        Err(e) => {
+            warn!(error = %e, "accept failed");
+            None
         }
-        if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
-            warn!("rejecting connection: too many concurrent connections");
-            continue;
-        }
-        active.fetch_add(1, Ordering::Relaxed);
-        let active = Arc::clone(&active);
-        let ctx = Arc::clone(&ctx);
-        std::thread::spawn(move || {
-            serve(&ctx, stream);
-            active.fetch_sub(1, Ordering::Relaxed);
-        });
-    }
-    Ok(())
+    });
+
+    let svc = HelperServer::new(HelperSvc { ctx })
+        .max_decoding_message_size(MAX_MESSAGE)
+        .max_encoding_message_size(MAX_MESSAGE);
+
+    tonic::transport::Server::builder()
+        .concurrency_limit_per_connection(MAX_CONNECTIONS)
+        .add_service(svc)
+        .serve_with_incoming(incoming)
+        .await
+        .context("gRPC server terminated")
 }
 
-fn peer_uid(stream: &UnixStream) -> Result<u32> {
+/// The connecting peer's uid, via SO_PEERCRED. This is the whole authorization
+/// model: only the configured uid may drive the root helper. Linux-only (the
+/// daemon only ever runs there); the fallback lets non-Linux dev hosts build.
+#[cfg(target_os = "linux")]
+fn peer_uid(stream: &UnixStream) -> nix::Result<u32> {
     let creds = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials)?;
     Ok(creds.uid())
 }
 
-/// Writes each task event to the socket as a framed line.
-struct SocketSink<'a>(&'a mut UnixStream);
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(_stream: &UnixStream) -> nix::Result<u32> {
+    Err(nix::errno::Errno::ENOSYS)
+}
 
-impl EventSink for SocketSink<'_> {
-    fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()> {
-        wire::write_msg(self.0, &ev)
+/// The gRPC service. Holds the shared dispatch context; each call converts the
+/// incoming protobuf request to the validated domain model and runs it.
+struct HelperSvc {
+    ctx: Arc<Ctx>,
+}
+
+/// An [`EventSink`] that forwards task events into the gRPC response stream.
+/// `blocking_send` is safe here because the sink only ever runs inside
+/// `spawn_blocking`. A send failure means the client hung up — surfaced as an
+/// `io::Error` so the streaming apply/command code stops (as it did when a
+/// socket write failed).
+struct ChannelSink(mpsc::Sender<std::result::Result<pb::TaskEvent, Status>>);
+
+impl EventSink for ChannelSink {
+    fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {
+        self.0
+            .blocking_send(Ok(pb::TaskEvent::from(ev)))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected"))
     }
 }
 
-fn serve(ctx: &dispatch::Ctx, stream: UnixStream) {
-    let Ok(read_half) = stream.try_clone() else {
-        return;
-    };
-    let mut reader = BufReader::new(read_half);
-    let mut writer = stream;
-    loop {
-        match wire::read_msg::<Request, _>(&mut reader) {
-            Ok(Some(req)) => match dispatch::plan(ctx, req) {
-                Dispatch::OneShot(resp) => {
-                    if wire::write_msg(&mut writer, &resp).is_err() {
-                        return;
-                    }
-                }
-                Dispatch::Task(spec) => {
-                    let _guard = ctx.mutate_lock.lock().unwrap();
-                    let mut sink = SocketSink(&mut writer);
-                    if cmd::run_task(&spec, &mut sink).is_err() {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::NvmetApply(desired) => {
-                    let _guard = ctx.mutate_lock.lock().unwrap();
-                    let mut sink = SocketSink(&mut writer);
-                    let root = std::path::Path::new(nvmet::NVMET_ROOT);
-                    if nvmet::apply(&desired, root, &mut sink).is_err() {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::NfsApply(desired) => {
-                    let _guard = ctx.mutate_lock.lock().unwrap();
-                    let mut sink = SocketSink(&mut writer);
-                    if nfs::apply(
-                        &desired,
-                        std::path::Path::new(nfs::NFS_EXPORTS_FILE),
-                        std::path::Path::new(nfs::NFSD_PORTLIST),
-                        &mut sink,
-                    )
-                    .is_err()
-                    {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::NfsReport => {
-                    // A read: no mutate_lock (mirrors how reads stream).
-                    let mut sink = SocketSink(&mut writer);
-                    if nfs::report_into(
-                        std::path::Path::new(nfs::NFSD_PORTLIST),
-                        std::path::Path::new(nfs::NFS_EXPORTS_FILE),
-                        &mut sink,
-                    )
-                    .is_err()
-                    {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::RoceCapableNics => {
-                    // A read: no mutate_lock (mirrors how reads stream).
-                    let mut sink = SocketSink(&mut writer);
-                    if hardware::report_capable_into(
-                        std::path::Path::new(hardware::NET_ROOT),
-                        &mut sink,
-                    )
-                    .is_err()
-                    {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::SmartHealth(devices) => {
-                    // A read: no mutate_lock (mirrors how reads stream).
-                    let mut sink = SocketSink(&mut writer);
-                    if smart::report_health_into(&devices, &mut sink).is_err() {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::NicRdmaAdvice => {
-                    // A read: no mutate_lock (mirrors how reads stream).
-                    let mut sink = SocketSink(&mut writer);
-                    if hardware::report_nic_advice_into(
-                        std::path::Path::new(hardware::NET_ROOT),
-                        &mut sink,
-                    )
-                    .is_err()
-                    {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::EnableRoce(netdev) => {
-                    let _guard = ctx.mutate_lock.lock().unwrap();
-                    let mut sink = SocketSink(&mut writer);
-                    if hardware::enable_into(
-                        std::path::Path::new(hardware::NET_ROOT),
-                        &netdev,
-                        &mut sink,
-                    )
-                    .is_err()
-                    {
-                        return; // socket write failed; client gone
-                    }
-                }
-                Dispatch::FailedTask(msg) => {
-                    // Record a refused operation as a failed task so its reason
-                    // streams to the UI like any other task.
-                    let mut sink = SocketSink(&mut writer);
-                    let events = [
-                        TaskEvent::Started {
-                            command: "install".into(),
-                            args: Vec::new(),
-                            stdin: None,
-                        },
-                        TaskEvent::Stderr {
-                            data: format!("{msg}\n"),
-                        },
-                        TaskEvent::Finished {
-                            exit: 1,
-                            ok: false,
-                            error: Some(msg),
-                        },
-                    ];
-                    for ev in events {
-                        if sink.emit(ev).is_err() {
-                            return;
-                        }
-                    }
-                }
-            },
-            Ok(None) => return,
+#[tonic::async_trait]
+impl Helper for HelperSvc {
+    async fn call(
+        &self,
+        request: TonicRequest<pb::Request>,
+    ) -> std::result::Result<TonicResponse<pb::Response>, Status> {
+        let domain = match GdRequest::try_from(request.into_inner()) {
+            Ok(r) => r,
             Err(e) => {
-                let resp = Response::err(ErrKind::Validation, format!("bad request: {e}"));
-                let _ = wire::write_msg(&mut writer, &resp);
-                return;
+                return Ok(TonicResponse::new(
+                    GdResponse::err(ErrKind::Validation, e.to_string()).into(),
+                ));
             }
+        };
+        let ctx = Arc::clone(&self.ctx);
+        // `Authenticate` runs PAM, which can block; do it off the reactor.
+        let resp = tokio::task::spawn_blocking(move || match dispatch::plan(&ctx, domain) {
+            Dispatch::OneShot(resp) => resp,
+            _ => GdResponse::err(
+                ErrKind::Validation,
+                "Call expects a one-shot request (Ping/Authenticate); use RunTask",
+            ),
+        })
+        .await
+        .map_err(|e| Status::internal(format!("worker panicked: {e}")))?;
+        Ok(TonicResponse::new(resp.into()))
+    }
+
+    type RunTaskStream = ReceiverStream<std::result::Result<pb::TaskEvent, Status>>;
+
+    async fn run_task(
+        &self,
+        request: TonicRequest<pb::Request>,
+    ) -> std::result::Result<TonicResponse<Self::RunTaskStream>, Status> {
+        let (tx, rx) = mpsc::channel::<std::result::Result<pb::TaskEvent, Status>>(128);
+        let pbreq = request.into_inner();
+        let ctx = Arc::clone(&self.ctx);
+        // All privileged work (commands, configfs, /proc writes) is blocking;
+        // run it on a blocking thread and stream its events back via the sink.
+        tokio::task::spawn_blocking(move || {
+            let mut sink = ChannelSink(tx);
+            let domain = match GdRequest::try_from(pbreq) {
+                Ok(r) => r,
+                Err(e) => {
+                    // A rejected request still surfaces as a failed task so its
+                    // reason reaches the UI (the web records the stream).
+                    let _ = emit_reject(&mut sink, format!("invalid request: {e}"));
+                    return;
+                }
+            };
+            let _ = run_dispatch(&ctx, domain, &mut sink);
+        });
+        Ok(TonicResponse::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// Executes a planned request, streaming its output to `sink`. This is the old
+/// synchronous `serve` match body, unchanged except that a one-shot response is
+/// translated into terminal task events (RunTask always yields a stream).
+fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Result<()> {
+    match dispatch::plan(ctx, req) {
+        Dispatch::OneShot(resp) => emit_oneshot(sink, resp),
+        Dispatch::Task(spec) => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            cmd::run_task(&spec, sink)
+        }
+        Dispatch::NvmetApply(desired) => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), sink)
+        }
+        Dispatch::NfsApply(desired) => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            nfs::apply(
+                &desired,
+                Path::new(nfs::NFS_EXPORTS_FILE),
+                Path::new(nfs::NFSD_PORTLIST),
+                sink,
+            )
+        }
+        // Reads: no mutate_lock (they stream like the old serve loop).
+        Dispatch::NfsReport => nfs::report_into(
+            Path::new(nfs::NFSD_PORTLIST),
+            Path::new(nfs::NFS_EXPORTS_FILE),
+            sink,
+        ),
+        Dispatch::RoceCapableNics => {
+            hardware::report_capable_into(Path::new(hardware::NET_ROOT), sink)
+        }
+        Dispatch::SmartHealth(devices) => smart::report_health_into(&devices, sink),
+        Dispatch::NicRdmaAdvice => {
+            hardware::report_nic_advice_into(Path::new(hardware::NET_ROOT), sink)
+        }
+        Dispatch::EnableRoce(netdev) => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, sink)
+        }
+        Dispatch::FailedTask(msg) => {
+            // A refused operation (e.g. install on an unsupported distro)
+            // recorded as a failed task carrying its reason.
+            sink.emit(TaskEvent::Started {
+                command: "install".into(),
+                args: Vec::new(),
+                stdin: None,
+            })?;
+            sink.emit(TaskEvent::Stderr {
+                data: format!("{msg}\n"),
+            })?;
+            sink.emit(TaskEvent::Finished {
+                exit: 1,
+                ok: false,
+                error: Some(msg),
+            })
         }
     }
+}
+
+/// Translate a one-shot response into the terminal task events RunTask must
+/// still emit (e.g. `EnsureModules` when every module is already loaded).
+fn emit_oneshot(sink: &mut dyn EventSink, resp: GdResponse) -> io::Result<()> {
+    match resp {
+        GdResponse::Ok | GdResponse::OkAuth { .. } => sink.emit(TaskEvent::Finished {
+            exit: 0,
+            ok: true,
+            error: None,
+        }),
+        GdResponse::Err { message, .. } => {
+            sink.emit(TaskEvent::Stderr {
+                data: format!("{message}\n"),
+            })?;
+            sink.emit(TaskEvent::Finished {
+                exit: 1,
+                ok: false,
+                error: Some(message),
+            })
+        }
+    }
+}
+
+/// Emit a rejected (unvalidatable) request as a failed task.
+fn emit_reject(sink: &mut dyn EventSink, msg: String) -> io::Result<()> {
+    sink.emit(TaskEvent::Stderr {
+        data: format!("{msg}\n"),
+    })?;
+    sink.emit(TaskEvent::Finished {
+        exit: 1,
+        ok: false,
+        error: Some(msg),
+    })
 }

@@ -1,17 +1,17 @@
-//! Client for the root helper's unix socket. One short-lived connection per
-//! request keeps this trivially correct; traffic is a handful of calls per
-//! UI action.
+//! Client for the root helper over gRPC on its unix socket. The tonic channel
+//! is lazy and reconnects on its own, so a cloned `HelperClient` is cheap and
+//! survives helper restarts. Traffic is a handful of calls per UI action.
 
-use anyhow::{Context, Result};
-use greendot_proto::{Request, Response, TaskEvent, wire};
-use std::io::BufReader;
-use std::os::unix::net::UnixStream;
+use anyhow::{Context, Result, anyhow};
+use greendot_proto::pb::helper_client::HelperClient as GrpcClient;
+use greendot_proto::{Request, Response, TaskEvent, pb};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
+use tonic::transport::Channel;
 
 #[derive(Clone)]
 pub struct HelperClient {
-    socket: PathBuf,
+    inner: GrpcClient<Channel>,
 }
 
 /// Output of a task run drained by [`HelperClient::collect`].
@@ -23,22 +23,32 @@ pub struct HelperOutput {
     pub error: Option<String>,
 }
 
+/// A terminal failure event synthesized when the transport itself fails, so a
+/// consumer of [`HelperClient::run_task`] always sees a `Finished`.
+fn transport_failure(msg: String) -> TaskEvent {
+    TaskEvent::Finished {
+        exit: -1,
+        ok: false,
+        error: Some(msg),
+    }
+}
+
 impl HelperClient {
     pub fn new(socket: PathBuf) -> Self {
-        HelperClient { socket }
+        // `connect_uds` only fails on an invalid static endpoint URI, never here.
+        let inner = greendot_proto::client::connect_uds(socket)
+            .expect("helper endpoint should always be constructible");
+        HelperClient { inner }
     }
 
     pub async fn call(&self, req: Request) -> Result<Response> {
-        let socket = self.socket.clone();
-        tokio::task::spawn_blocking(move || {
-            let stream = UnixStream::connect(&socket)
-                .with_context(|| format!("connecting to helper at {}", socket.display()))?;
-            let mut reader = BufReader::new(stream.try_clone()?);
-            let mut writer = stream;
-            wire::write_msg(&mut writer, &req)?;
-            wire::read_msg(&mut reader)?.context("helper closed connection without a response")
-        })
-        .await?
+        let mut client = self.inner.clone();
+        let resp = client
+            .call(pb::Request::from(req))
+            .await
+            .context("helper call failed")?
+            .into_inner();
+        Response::try_from(resp).map_err(|e| anyhow!("bad response from helper: {e}"))
     }
 
     /// Runs a task request to completion, collecting its output without
@@ -66,38 +76,46 @@ impl HelperClient {
     /// returned channel. A synthetic `Finished` is always sent (even on
     /// transport failure) so the consumer can rely on a terminal event.
     pub fn run_task(&self, req: Request) -> mpsc::Receiver<TaskEvent> {
-        let socket = self.socket.clone();
+        let mut client = self.inner.clone();
         let (tx, rx) = mpsc::channel(128);
-        tokio::task::spawn_blocking(move || {
-            let fail = |tx: &mpsc::Sender<TaskEvent>, msg: String| {
-                let _ = tx.blocking_send(TaskEvent::Finished {
-                    exit: -1,
-                    ok: false,
-                    error: Some(msg),
-                });
+        tokio::spawn(async move {
+            let mut stream = match client.run_task(pb::Request::from(req)).await {
+                Ok(resp) => resp.into_inner(),
+                Err(e) => {
+                    let _ = tx
+                        .send(transport_failure(format!("helper unavailable: {e}")))
+                        .await;
+                    return;
+                }
             };
-            let stream = match UnixStream::connect(&socket) {
-                Ok(s) => s,
-                Err(e) => return fail(&tx, format!("helper unavailable: {e}")),
-            };
-            let mut reader = BufReader::new(match stream.try_clone() {
-                Ok(s) => s,
-                Err(e) => return fail(&tx, format!("helper socket error: {e}")),
-            });
-            let mut writer = stream;
-            if let Err(e) = wire::write_msg(&mut writer, &req) {
-                return fail(&tx, format!("helper write failed: {e}"));
-            }
             loop {
-                match wire::read_msg::<TaskEvent, _>(&mut reader) {
-                    Ok(Some(ev)) => {
-                        let done = matches!(ev, TaskEvent::Finished { .. });
-                        if tx.blocking_send(ev).is_err() || done {
+                match stream.message().await {
+                    Ok(Some(pb_ev)) => match TaskEvent::try_from(pb_ev) {
+                        Ok(ev) => {
+                            let done = matches!(ev, TaskEvent::Finished { .. });
+                            if tx.send(ev).await.is_err() || done {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(transport_failure(format!("helper protocol error: {e}")))
+                                .await;
                             break;
                         }
+                    },
+                    Ok(None) => {
+                        let _ = tx
+                            .send(transport_failure("helper closed the connection".into()))
+                            .await;
+                        break;
                     }
-                    Ok(None) => return fail(&tx, "helper closed the connection".into()),
-                    Err(e) => return fail(&tx, format!("helper protocol error: {e}")),
+                    Err(e) => {
+                        let _ = tx
+                            .send(transport_failure(format!("helper protocol error: {e}")))
+                            .await;
+                        break;
+                    }
                 }
             }
         });

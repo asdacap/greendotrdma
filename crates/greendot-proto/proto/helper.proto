@@ -1,0 +1,293 @@
+syntax = "proto3";
+
+// gRPC transport for the greendot-web (unprivileged) <-> greendotctl (root)
+// helper protocol. These messages are a "dumb string" transport layer: unlike
+// the validated newtypes in the domain model, prost decoding does NOT re-run
+// the validators, so the daemon MUST convert every incoming Request through
+// `TryFrom<pb::Request> for Request` (src/convert.rs), which re-validates every
+// field. That conversion is the single security choke point.
+package greendot.helper.v1;
+
+// The privileged helper. `Call` is the unary path (Ping / Authenticate);
+// `RunTask` streams task output (Started/Stdout/Stderr/Finished) for every
+// mutating operation and privileged read.
+service Helper {
+  rpc Call(Request) returns (Response);
+  rpc RunTask(Request) returns (stream TaskEvent);
+}
+
+// Placeholder for unit request variants (Ping, NfsReport, ...). A oneof arm
+// needs a message type; this carries no data.
+message Empty {}
+
+// ---- Enums (each mirrors a domain enum; the _UNSPECIFIED zero value is an
+// invalid sentinel rejected on ingress). ----
+
+enum Transport {
+  TRANSPORT_UNSPECIFIED = 0;
+  TRANSPORT_RDMA = 1;
+  TRANSPORT_TCP = 2;
+  TRANSPORT_LOOP = 3;
+}
+
+enum VdevLayout {
+  VDEV_LAYOUT_UNSPECIFIED = 0;
+  VDEV_LAYOUT_STRIPE = 1;
+  VDEV_LAYOUT_MIRROR = 2;
+  VDEV_LAYOUT_RAIDZ1 = 3;
+  VDEV_LAYOUT_RAIDZ2 = 4;
+  VDEV_LAYOUT_RAIDZ3 = 5;
+}
+
+enum LvmReportKind {
+  LVM_REPORT_KIND_UNSPECIFIED = 0;
+  LVM_REPORT_KIND_VGS = 1;
+  LVM_REPORT_KIND_LVS = 2;
+  LVM_REPORT_KIND_PVS = 3;
+}
+
+enum KernelModule {
+  KERNEL_MODULE_UNSPECIFIED = 0;
+  KERNEL_MODULE_NVMET_LOOP = 1;
+  KERNEL_MODULE_NVMET_TCP = 2;
+  KERNEL_MODULE_NVMET_RDMA = 3;
+  KERNEL_MODULE_ISCSI = 4;
+  KERNEL_MODULE_ISER = 5;
+  KERNEL_MODULE_RXE = 6;
+  KERNEL_MODULE_RPCRDMA = 7;
+}
+
+enum ErrKind {
+  ERR_KIND_UNSPECIFIED = 0;
+  ERR_KIND_AUTH_FAILED = 1;
+  ERR_KIND_NOT_IN_ADMIN_GROUP = 2;
+  ERR_KIND_VALIDATION = 3;
+  ERR_KIND_BUSY = 4;
+  ERR_KIND_SYS = 5;
+  ERR_KIND_CMD_FAILED = 6;
+  ERR_KIND_UNSUPPORTED = 7;
+}
+
+// ---- Desired-state documents (nested payloads). ----
+
+message NvmetDesired {
+  repeated NvmetSubsysSpec subsystems = 1;
+  repeated NvmetPortSpec ports = 2;
+}
+message NvmetSubsysSpec {
+  string nqn = 1;
+  bool allow_any_host = 2;
+  repeated string allowed_hosts = 3;
+  repeated NvmetNsSpec namespaces = 4;
+}
+message NvmetNsSpec {
+  uint32 nsid = 1;
+  string device_path = 2;
+}
+message NvmetPortSpec {
+  uint32 id = 1;          // u16
+  Transport trtype = 2;
+  string traddr = 3;      // IpAddr
+  uint32 trsvcid = 4;     // u16
+  repeated string subsystems = 5;
+}
+
+message LioDesired {
+  repeated LioBackstoreSpec backstores = 1;
+  repeated LioTargetSpec targets = 2;
+}
+message LioBackstoreSpec {
+  string name = 1;
+  string device_path = 2;
+}
+message LioTargetSpec {
+  string iqn = 1;
+  bool enabled = 2;
+  bool demo_mode = 3;
+  repeated LioLunSpec luns = 4;
+  repeated LioPortalSpec portals = 5;
+  repeated string acls = 6;
+}
+message LioLunSpec {
+  uint32 lun = 1;
+  string backstore = 2;
+}
+message LioPortalSpec {
+  string addr = 1;        // IpAddr
+  uint32 port = 2;        // u16
+  bool iser = 3;
+}
+
+message NfsDesired {
+  repeated NfsExportSpec exports = 1;
+  uint32 rdma_port = 2;   // u16
+}
+message NfsExportSpec {
+  string path = 1;
+  uint32 fsid = 2;
+  repeated NfsClientSpec clients = 3;
+}
+message NfsClientSpec {
+  string client = 1;
+  bool rw = 2;
+}
+
+// ---- Request variants (one message per domain Request variant). ----
+
+message Authenticate { string username = 1; string password = 2; }
+
+message ZvolCreate {
+  string dataset = 1;
+  uint64 size = 2;
+  optional uint32 volblocksize = 3;
+  bool sparse = 4;
+}
+message ZvolDelete { string dataset = 1; }
+message ZvolResize { string dataset = 1; uint64 new_size = 2; }
+message SnapshotCreate { string dataset = 1; string snap = 2; }
+message SnapshotDestroy { string dataset = 1; string snap = 2; }
+
+message ZfsFsCreate { string dataset = 1; optional string mountpoint = 2; }
+message ZfsSetMountpoint { string dataset = 1; string mountpoint = 2; }
+message ZfsMount { string dataset = 1; }
+message ZfsUnmount { string dataset = 1; }
+message ZfsDestroy { string dataset = 1; bool recursive = 2; }
+
+message PartitionTableCreate { string disk = 1; }
+message PartitionCreate {
+  string disk = 1;
+  optional uint64 start_sector = 2;
+  optional uint64 size_sectors = 3;
+  string label = 4;
+}
+message PartitionDelete { string disk = 1; uint32 number = 2; }
+message PartitionResize { string disk = 1; uint32 number = 2; uint64 size_sectors = 3; }
+
+message Fsck { string device = 1; }
+message ResizeExt { string device = 1; uint64 new_size_sectors = 2; }
+message BtrfsMount { string device = 1; string mount_path = 2; }
+message BtrfsResize { string mount_path = 1; uint64 new_size = 2; }
+message Umount { string mount_path = 1; }
+
+message PoolCreate {
+  string name = 1;
+  VdevLayout vdev = 2;
+  repeated string devices = 3;
+  optional uint32 ashift = 4;   // u8
+}
+message PoolDeviceAdd { string pool = 1; string device = 2; }
+
+message SmartReport { string device = 1; }
+message SmartHealth { repeated string devices = 1; }
+
+message LvmReport { LvmReportKind what = 1; }
+message VgCreate { string name = 1; repeated string devices = 2; }
+message VgExtend { string vg = 1; string device = 2; }
+message VgReduce { string vg = 1; string device = 2; }
+message VgRemove { string vg = 1; }
+message LvCreate { string vg = 1; string name = 2; uint64 size = 3; }
+message ThinPoolCreate { string vg = 1; string name = 2; uint64 size = 3; }
+message ThinLvCreate { string vg = 1; string pool = 2; string name = 3; uint64 virtual_size = 4; }
+message LvResize { string vg = 1; string name = 2; uint64 new_size = 3; }
+message LvShrink { string vg = 1; string name = 2; uint64 new_size = 3; }
+message LvRename { string vg = 1; string name = 2; string new_name = 3; }
+message LvDelete { string vg = 1; string name = 2; }
+
+message NvmetApply { NvmetDesired desired = 1; }
+message LioApply { LioDesired desired = 1; }
+message NfsApply { NfsDesired desired = 1; }
+
+message EnsureModules { repeated KernelModule modules = 1; }
+message RxeLinkAdd { string netdev = 1; }
+message EnableRoce { string netdev = 1; }
+message InstallPackages { repeated string packages = 1; }
+
+// The tagged request. Exactly one arm is set.
+message Request {
+  oneof op {
+    Empty ping = 1;
+    Authenticate authenticate = 2;
+    ZvolCreate zvol_create = 3;
+    ZvolDelete zvol_delete = 4;
+    ZvolResize zvol_resize = 5;
+    SnapshotCreate snapshot_create = 6;
+    SnapshotDestroy snapshot_destroy = 7;
+    ZfsFsCreate zfs_fs_create = 8;
+    ZfsSetMountpoint zfs_set_mountpoint = 9;
+    ZfsMount zfs_mount = 10;
+    ZfsUnmount zfs_unmount = 11;
+    ZfsDestroy zfs_destroy = 12;
+    PartitionTableCreate partition_table_create = 13;
+    PartitionCreate partition_create = 14;
+    PartitionDelete partition_delete = 15;
+    PartitionResize partition_resize = 16;
+    Fsck fsck = 17;
+    ResizeExt resize_ext = 18;
+    BtrfsMount btrfs_mount = 19;
+    BtrfsResize btrfs_resize = 20;
+    Umount umount = 21;
+    PoolCreate pool_create = 22;
+    PoolDeviceAdd pool_device_add = 23;
+    SmartReport smart_report = 24;
+    SmartHealth smart_health = 25;
+    LvmReport lvm_report = 26;
+    VgCreate vg_create = 27;
+    VgExtend vg_extend = 28;
+    VgReduce vg_reduce = 29;
+    VgRemove vg_remove = 30;
+    LvCreate lv_create = 31;
+    ThinPoolCreate thin_pool_create = 32;
+    ThinLvCreate thin_lv_create = 33;
+    LvResize lv_resize = 34;
+    LvShrink lv_shrink = 35;
+    LvRename lv_rename = 36;
+    LvDelete lv_delete = 37;
+    NvmetApply nvmet_apply = 38;
+    LioApply lio_apply = 39;
+    NfsApply nfs_apply = 40;
+    Empty nfs_report = 41;
+    EnsureModules ensure_modules = 42;
+    RxeLinkAdd rxe_link_add = 43;
+    Empty roce_capable_nics = 44;
+    EnableRoce enable_roce = 45;
+    Empty nic_rdma_advice = 46;
+    Empty rdma_resources = 47;
+    InstallPackages install_packages = 48;
+  }
+}
+
+// ---- Response (reply to Call). ----
+
+message OkAuth { string username = 1; }
+message ErrResponse { ErrKind kind = 1; string message = 2; }
+
+message Response {
+  oneof result {
+    Empty ok = 1;
+    OkAuth ok_auth = 2;
+    ErrResponse err = 3;
+  }
+}
+
+// ---- Task streaming (RunTask response). Terminated by exactly one Finished. ----
+
+message Started {
+  string command = 1;
+  repeated string args = 2;
+  optional string stdin = 3;
+}
+message Output { string data = 1; }
+message Finished {
+  int32 exit = 1;
+  bool ok = 2;
+  optional string error = 3;
+}
+
+message TaskEvent {
+  oneof event {
+    Started started = 1;
+    Output stdout = 2;
+    Output stderr = 3;
+    Finished finished = 4;
+  }
+}
