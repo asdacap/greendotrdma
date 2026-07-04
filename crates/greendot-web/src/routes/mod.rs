@@ -147,7 +147,8 @@ pub(crate) mod testutil {
     use greendot_proto::pb;
     use greendot_proto::pb::helper_server::{Helper, HelperServer};
     use greendot_proto::{
-        ErrKind, LvmReport, Request as HelperRequest, Response as HelperResponse, TaskEvent,
+        ErrKind, LvmReport, Request as HelperRequest, Response as HelperResponse, SubStatus,
+        TaskEvent,
     };
     use http_body_util::BodyExt;
     use std::pin::Pin;
@@ -163,14 +164,19 @@ pub(crate) mod testutil {
     /// Canned task-event stream for a request (the read ops carry the JSON the
     /// pages parse; everything else is a Started + successful Finished).
     fn fake_events(req: &HelperRequest) -> Vec<TaskEvent> {
-        let started = TaskEvent::Started {
-            command: "fake".into(),
+        let started = TaskEvent::SubtaskStarted {
+            name: "fake".into(),
+            command: Some("fake".into()),
             args: vec![],
             stdin: None,
         };
-        let ok_finished = TaskEvent::Finished {
+        let sub_ok = TaskEvent::SubtaskFinished {
+            status: SubStatus::Success,
             exit: 0,
-            ok: true,
+            error: None,
+        };
+        let ok_finished = TaskEvent::Finished {
+            status: SubStatus::Success,
             error: None,
         };
         let stdout = |data: &str| TaskEvent::Stdout { data: data.into() };
@@ -187,7 +193,7 @@ pub(crate) mod testutil {
                         r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
                     }
                 };
-                vec![started, stdout(json), ok_finished]
+                vec![started, stdout(json), sub_ok, ok_finished]
             }
             // RoCE-capable NIC inventory: eth0 with a sample vendor so the NIC
             // table shows a capable-disabled row (the web renders it opaquely).
@@ -195,6 +201,7 @@ pub(crate) mod testutil {
                 vec![
                     started,
                     stdout(r#"[{"netdev":"eth0","vendor":"Acme"}]"#),
+                    sub_ok,
                     ok_finished,
                 ]
             }
@@ -203,22 +210,27 @@ pub(crate) mod testutil {
                 vec![
                     started,
                     stdout(r#"[{"device":"sda","passed":true,"temp_c":38}]"#),
+                    sub_ok,
                     ok_finished,
                 ]
             }
-            // SMART full report: smartctl exits nonzero on healthy drives, so
-            // Finished is ok:false to prove the web shows stdout regardless.
+            // SMART full report: smartctl exits nonzero on healthy drives, so the
+            // subtask/task finish Failed to prove the web shows stdout regardless.
             HelperRequest::SmartReport { .. } => vec![
                 started,
                 stdout("smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n"),
-                TaskEvent::Finished {
+                TaskEvent::SubtaskFinished {
+                    status: SubStatus::Failed,
                     exit: 4,
-                    ok: false,
+                    error: None,
+                },
+                TaskEvent::Finished {
+                    status: SubStatus::Failed,
                     error: None,
                 },
             ],
             // Everything else (incl. EnableRoce, EnsureModules) is a task.
-            _ => vec![started, ok_finished],
+            _ => vec![started, sub_ok, ok_finished],
         }
     }
 

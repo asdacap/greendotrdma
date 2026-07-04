@@ -358,14 +358,44 @@ pub struct NfsClientSpec {
 
 // ---- Task streaming ----
 
-/// Frames the helper streams back while running a task (one CLI command).
-/// Terminated by exactly one `Finished`.
+/// Terminal status of a subtask (and, folded, of the whole task). `Skipped`
+/// makes an already-satisfied reconcile step visible (a grey dot) instead of
+/// silently absent.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubStatus {
+    Success,
+    Failed,
+    Skipped,
+}
+
+impl SubStatus {
+    /// Task-level fold: `Failed` dominates; `Success` beats `Skipped`; an
+    /// all-`Skipped` run stays `Skipped`. This is *not* a plain max —
+    /// `fold(Some(Skipped), Success) == Success` and
+    /// `fold(Some(Success), Failed) == Failed`.
+    pub fn fold(acc: Option<SubStatus>, s: SubStatus) -> SubStatus {
+        match (acc, s) {
+            (Some(SubStatus::Failed), _) | (_, SubStatus::Failed) => SubStatus::Failed,
+            (Some(SubStatus::Success), _) | (_, SubStatus::Success) => SubStatus::Success,
+            _ => SubStatus::Skipped,
+        }
+    }
+}
+
+/// Frames a task as it runs: a sequence of subtasks, each with its own recorded
+/// output and terminal status. Subtasks are sequential, so `Stdout`/`Stderr`
+/// attribute to the most-recent still-open subtask. Terminated by exactly one
+/// `Finished` whose status is the worst child.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "ev", rename_all = "snake_case")]
 pub enum TaskEvent {
-    /// The exact command being run; `stdin` is the input fed to it, if any.
-    Started {
-        command: String,
+    /// Opens a subtask. `command`/`args`/`stdin` are set only when the subtask
+    /// wraps a single process (rendered as a `$ cmd` header); a plain multi-step
+    /// subtask leaves them empty.
+    SubtaskStarted {
+        name: String,
+        command: Option<String>,
         args: Vec<String>,
         stdin: Option<String>,
     },
@@ -375,11 +405,17 @@ pub enum TaskEvent {
     Stderr {
         data: String,
     },
-    /// `error` is set for spawn failures (e.g. the CLI is not installed) and
-    /// carries a human-actionable message; `ok` is the overall success.
-    Finished {
+    /// Closes the current subtask. `exit` is the wrapped process's exit code (0
+    /// for non-command subtasks); `error` carries a spawn/human message.
+    SubtaskFinished {
+        status: SubStatus,
         exit: i32,
-        ok: bool,
+        error: Option<String>,
+    },
+    /// Terminal, exactly once. `status` is the worst child; `error` the first
+    /// subtask error seen.
+    Finished {
+        status: SubStatus,
         error: Option<String>,
     },
 }

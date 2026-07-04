@@ -3,13 +3,74 @@
 //! output to SSE subscribers, and returns the outcome.
 
 use crate::routes::AppState;
-use greendot_proto::{Request, TaskEvent};
+use crate::state::{SubTaskRecord, TaskStatus};
+use greendot_proto::{Request, SubStatus, TaskEvent};
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, BufReader};
 use tokio::process::Command;
 use tokio::sync::{broadcast, mpsc};
+
+/// Folds one task event into the running list of subtask records. Shared by the
+/// live broadcast snapshot ([`TaskHub::broadcast`]) and the persisted reducer
+/// ([`drive`]) so they can't drift. Stray output before any `SubtaskStarted`
+/// synthesizes an `"output"` subtask (never lose bytes). The task-terminal
+/// `Finished` drives persistence in `drive` and is not folded here.
+pub(crate) fn apply(subs: &mut Vec<SubTaskRecord>, ev: &TaskEvent) {
+    match ev {
+        TaskEvent::SubtaskStarted {
+            name,
+            command,
+            args,
+            stdin,
+        } => subs.push(SubTaskRecord {
+            name: name.clone(),
+            command: command.clone(),
+            args: args.clone(),
+            stdin: stdin.clone(),
+            ..Default::default()
+        }),
+        TaskEvent::Stdout { data } => current(subs).stdout.push_str(data),
+        TaskEvent::Stderr { data } => current(subs).stderr.push_str(data),
+        TaskEvent::SubtaskFinished {
+            status,
+            exit,
+            error,
+        } => {
+            let sub = current(subs);
+            sub.status = Some(*status);
+            sub.exit_code = Some(i64::from(*exit));
+            sub.error = error.clone();
+        }
+        TaskEvent::Finished { .. } => {}
+    }
+}
+
+/// The current (last-open) subtask, synthesizing an `"output"` one for stray
+/// output that arrived before any `SubtaskStarted`.
+fn current(subs: &mut Vec<SubTaskRecord>) -> &mut SubTaskRecord {
+    if subs.is_empty() {
+        subs.push(SubTaskRecord {
+            name: "output".into(),
+            ..Default::default()
+        });
+    }
+    subs.last_mut().unwrap()
+}
+
+/// The flat stdout/stderr mirror (concatenated across subtasks) kept on the task
+/// row as a backstop for `helper_client::collect` and old-row rendering.
+fn flat_output(subs: &[SubTaskRecord]) -> (String, String) {
+    let mut out = String::new();
+    let mut err = String::new();
+    for s in subs {
+        out.push_str(&s.stdout);
+        err.push_str(&s.stderr);
+    }
+    (out, err)
+}
 
 /// Live state of running tasks, for SSE streaming.
 #[derive(Default)]
@@ -19,8 +80,7 @@ pub struct TaskHub {
 
 struct Running {
     tx: broadcast::Sender<TaskEvent>,
-    stdout: String,
-    stderr: String,
+    subs: Vec<SubTaskRecord>,
 }
 
 impl TaskHub {
@@ -30,21 +90,16 @@ impl TaskHub {
             id,
             Running {
                 tx,
-                stdout: String::new(),
-                stderr: String::new(),
+                subs: Vec::new(),
             },
         );
     }
 
-    /// Appends output to the live buffer and broadcasts the event, atomically
-    /// so a subscriber can't miss or duplicate output around its join.
+    /// Folds the event into the live subtask snapshot and broadcasts it,
+    /// atomically so a subscriber can't miss or duplicate output around its join.
     fn broadcast(&self, id: i64, ev: &TaskEvent) {
         if let Some(r) = self.running.lock().unwrap().get_mut(&id) {
-            match ev {
-                TaskEvent::Stdout { data } => r.stdout.push_str(data),
-                TaskEvent::Stderr { data } => r.stderr.push_str(data),
-                _ => {}
-            }
+            apply(&mut r.subs, ev);
             let _ = r.tx.send(ev.clone());
         }
     }
@@ -53,15 +108,16 @@ impl TaskHub {
         self.running.lock().unwrap().remove(&id);
     }
 
-    /// For a running task: its current output plus a receiver for subsequent
-    /// events (snapshot and subscribe happen under one lock, so no gap/dup).
+    /// For a running task: its current subtask snapshot plus a receiver for
+    /// subsequent events (snapshot and subscribe happen under one lock, so no
+    /// gap/dup).
     pub fn snapshot_and_subscribe(
         &self,
         id: i64,
-    ) -> Option<(String, String, broadcast::Receiver<TaskEvent>)> {
+    ) -> Option<(Vec<SubTaskRecord>, broadcast::Receiver<TaskEvent>)> {
         let running = self.running.lock().unwrap();
         let r = running.get(&id)?;
-        Some((r.stdout.clone(), r.stderr.clone(), r.tx.subscribe()))
+        Some((r.subs.clone(), r.tx.subscribe()))
     }
 }
 
@@ -135,54 +191,74 @@ pub(crate) async fn drive(
     id: i64,
     mut rx: mpsc::Receiver<TaskEvent>,
 ) -> anyhow::Result<TaskOutcome> {
-    let (mut stdout, mut stderr) = (String::new(), String::new());
+    let mut subs: Vec<SubTaskRecord> = Vec::new();
     let mut outcome: Option<TaskOutcome> = None;
 
     while let Some(ev) = rx.recv().await {
         state.tasks.broadcast(id, &ev);
-        match ev {
-            TaskEvent::Started {
+        match &ev {
+            TaskEvent::SubtaskStarted {
+                name,
                 command,
                 args,
                 stdin,
             } => {
-                state
-                    .db
-                    .set_task_command(id, &command, &args, stdin.as_deref())?;
+                // Publish the task's summary command line off the first subtask.
+                if subs.is_empty() {
+                    match command {
+                        Some(c) => state.db.set_task_command(id, c, args, stdin.as_deref())?,
+                        None => state.db.set_task_command(id, name, &[], stdin.as_deref())?,
+                    }
+                }
+                apply(&mut subs, &ev);
             }
-            TaskEvent::Stdout { data } => stdout.push_str(&data),
-            TaskEvent::Stderr { data } => stderr.push_str(&data),
-            TaskEvent::Finished { exit, ok, error } => {
-                let status = if ok {
-                    crate::state::TaskStatus::Success
-                } else {
-                    crate::state::TaskStatus::Failed
+            TaskEvent::Finished { status, error } => {
+                // Success or Skipped is "ok" — an all-skipped reconcile must not
+                // flash the dot red or block the 5 s success watcher.
+                let task_status = match status {
+                    SubStatus::Failed => TaskStatus::Failed,
+                    _ => TaskStatus::Success,
                 };
+                let (stdout, stderr) = flat_output(&subs);
+                let exit = subs.last().and_then(|s| s.exit_code);
                 state.db.finish_task(
                     id,
-                    status,
-                    Some(i64::from(exit)),
+                    task_status,
+                    exit,
                     error.as_deref(),
                     &stdout,
                     &stderr,
+                    &subs,
                     now(),
                 )?;
-                outcome = Some(TaskOutcome { ok, error });
+                outcome = Some(TaskOutcome {
+                    ok: task_status != TaskStatus::Failed,
+                    error: error.clone(),
+                });
                 break;
             }
+            _ => apply(&mut subs, &ev),
         }
     }
 
     Ok(outcome.unwrap_or_else(|| {
-        // Channel closed without Finished — should not happen (both producers
-        // always emit one), but keep the store consistent.
+        // Channel closed without Finished — mark the open subtask and the task
+        // Failed, so a crashed producer doesn't leave a task "running" forever.
+        if let Some(open) = subs.last_mut()
+            && open.status.is_none()
+        {
+            open.status = Some(SubStatus::Failed);
+            open.error = Some("task ended without a result".into());
+        }
+        let (stdout, stderr) = flat_output(&subs);
         let _ = state.db.finish_task(
             id,
-            crate::state::TaskStatus::Failed,
+            TaskStatus::Failed,
             None,
             Some("task ended without a result"),
             &stdout,
             &stderr,
+            &subs,
             now(),
         );
         TaskOutcome {
@@ -192,9 +268,12 @@ pub(crate) async fn drive(
     }))
 }
 
-/// Spawns `argv` as a local subprocess and streams its output as task events,
-/// mirroring `HelperClient::run_task`: a `Started`, then line-buffered
-/// `Stdout`/`Stderr`, then exactly one `Finished` (synthetic on spawn failure).
+/// Spawns `argv` (the `greendotctl reconcile` subprocess) and streams its output
+/// as task events. Its **stdout is a JSONL `TaskEvent` frame** (one event per
+/// line) which we decode; a non-JSON stdout line falls back to `Stdout{data}` so
+/// bytes are never lost. stderr is out-of-band and forwarded as `Stderr`. The
+/// child emits its own terminal `Finished`; we synthesize one only if it crashed
+/// without emitting it.
 pub(crate) fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent> {
     let (tx, rx) = mpsc::channel(128);
     let argv = argv.to_vec();
@@ -202,20 +281,12 @@ pub(crate) fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent>
         let Some((command, args)) = argv.split_first() else {
             let _ = tx
                 .send(TaskEvent::Finished {
-                    exit: -1,
-                    ok: false,
+                    status: SubStatus::Failed,
                     error: Some("empty reconcile command".into()),
                 })
                 .await;
             return;
         };
-        let _ = tx
-            .send(TaskEvent::Started {
-                command: command.clone(),
-                args: args.to_vec(),
-                stdin: None,
-            })
-            .await;
         let mut child = match Command::new(command)
             .args(args)
             .stdin(Stdio::null())
@@ -227,8 +298,7 @@ pub(crate) fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent>
             Err(e) => {
                 let _ = tx
                     .send(TaskEvent::Finished {
-                        exit: -1,
-                        ok: false,
+                        status: SubStatus::Failed,
                         error: Some(format!("spawning {command} failed: {e}")),
                     })
                     .await;
@@ -239,35 +309,69 @@ pub(crate) fn spawn_command_events(argv: &[String]) -> mpsc::Receiver<TaskEvent>
         // reap the child for its exit status.
         let out = BufReader::new(child.stdout.take().expect("stdout piped"));
         let err = BufReader::new(child.stderr.take().expect("stderr piped"));
-        tokio::join!(pump(out, tx.clone(), true), pump(err, tx.clone(), false),);
-        let (exit, ok, error) = match child.wait().await {
-            Ok(status) => (
-                status.code().unwrap_or(-1),
-                status.success(),
-                (!status.success()).then(|| format!("reconcile exited with {status}")),
-            ),
-            Err(e) => (-1, false, Some(format!("waiting on reconcile failed: {e}"))),
-        };
-        let _ = tx.send(TaskEvent::Finished { exit, ok, error }).await;
+        let saw_finished = Arc::new(AtomicBool::new(false));
+        tokio::join!(
+            pump_jsonl(out, tx.clone(), saw_finished.clone()),
+            pump_stderr(err, tx.clone()),
+        );
+        // Only synthesize a terminal event if the child never emitted its own.
+        let wait = child.wait().await;
+        if !saw_finished.load(Ordering::SeqCst) {
+            let (status, error) = match wait {
+                Ok(s) if s.success() => (SubStatus::Success, None),
+                Ok(s) => (
+                    SubStatus::Failed,
+                    Some(format!("reconcile exited with {s}")),
+                ),
+                Err(e) => (
+                    SubStatus::Failed,
+                    Some(format!("waiting on reconcile failed: {e}")),
+                ),
+            };
+            let _ = tx.send(TaskEvent::Finished { status, error }).await;
+        }
     });
     rx
 }
 
-/// Forwards each line a subprocess writes as a `Stdout`/`Stderr` task event.
-async fn pump<R: tokio::io::AsyncRead + Unpin>(
+/// Decodes the subprocess's stdout JSONL: each line is a `TaskEvent`, with a
+/// non-JSON line degraded to `Stdout{data}`. Records whether a terminal
+/// `Finished` was seen so the caller doesn't double it.
+async fn pump_jsonl<R: AsyncRead + Unpin>(
     reader: BufReader<R>,
     tx: mpsc::Sender<TaskEvent>,
-    is_stdout: bool,
+    saw_finished: Arc<AtomicBool>,
 ) {
     let mut lines = reader.lines();
     while let Ok(Some(line)) = lines.next_line().await {
-        let data = format!("{line}\n");
-        let ev = if is_stdout {
-            TaskEvent::Stdout { data }
-        } else {
-            TaskEvent::Stderr { data }
+        let ev = match serde_json::from_str::<TaskEvent>(&line) {
+            Ok(ev) => {
+                if matches!(ev, TaskEvent::Finished { .. }) {
+                    saw_finished.store(true, Ordering::SeqCst);
+                }
+                ev
+            }
+            Err(_) => TaskEvent::Stdout {
+                data: format!("{line}\n"),
+            },
         };
         if tx.send(ev).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Forwards each subprocess stderr line as a `Stderr` task event.
+async fn pump_stderr<R: AsyncRead + Unpin>(reader: BufReader<R>, tx: mpsc::Sender<TaskEvent>) {
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if tx
+            .send(TaskEvent::Stderr {
+                data: format!("{line}\n"),
+            })
+            .await
+            .is_err()
+        {
             break;
         }
     }
@@ -311,12 +415,15 @@ mod tests {
         let out = run_local(&state, &argv, "test", "echo").await;
         assert!(out.ok);
         let task = latest(&state);
-        assert_eq!(
-            (task.status, task.exit_code),
-            (TaskStatus::Success, Some(0))
-        );
+        // Non-JSON stdout falls back to Stdout events, so there is no per-command
+        // exit code to surface at the task level (exits live on the subtasks in a
+        // real JSONL reconcile stream); the run is still Success.
+        assert_eq!((task.status, task.exit_code), (TaskStatus::Success, None));
         assert!(task.stdout.contains("hello"), "{}", task.stdout);
         assert!(task.stderr.contains("oops"), "{}", task.stderr);
+        // The fallback bytes attribute to a synthesized subtask.
+        assert_eq!(task.subtasks.len(), 1);
+        assert!(task.subtasks[0].stdout.contains("hello"));
 
         // Non-zero exit → failed task.
         let out = run_local(&state, &["false".into()], "test", "false").await;

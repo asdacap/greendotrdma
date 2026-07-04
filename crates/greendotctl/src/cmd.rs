@@ -1,9 +1,11 @@
-//! Task execution: one task = one CLI command. The executor streams the
-//! child's stdout/stderr back as [`TaskEvent`]s and maps a missing binary to
-//! an actionable "not installed" message.
+//! Task execution: runs one CLI command as a subtask. The executor streams the
+//! child's stdout/stderr into the subtask's pipes and maps a missing binary to
+//! an actionable "not installed" message. Two entry points share [`stream_child`]:
+//! [`run`] opens its own single-process subtask; [`run_into`] streams one command
+//! into an already-open (multi-step) subtask.
 
 pub use greendot_proto::EventSink;
-use greendot_proto::{TaskEvent, package_for_cli};
+use greendot_proto::{SubStatus, SubTask, Task, TaskEvent, package_for_cli};
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 
@@ -81,10 +83,17 @@ fn spawn_error(command: &str, e: &io::Error) -> String {
     }
 }
 
-/// Runs the command, emitting Started, then Stdout/Stderr as they stream, then
-/// exactly one Finished.
-pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
-    // Materialize stdin to a temp file when the tool wants a path argument.
+/// The materialized command: `args` may have a temp-file path appended, in which
+/// case `pipe_stdin` is cleared (the tool reads the file, not the pipe).
+struct Prepared {
+    args: Vec<String>,
+    pipe_stdin: Option<String>,
+    _temp: Option<TempInput>,
+}
+
+/// Materializes stdin to a temp file when the tool wants a path argument. `Err`
+/// carries a human message on a write failure.
+fn prepare_stdin(spec: &TaskSpec) -> Result<Prepared, String> {
     let mut args = spec.args.clone();
     let mut _temp = None;
     let mut pipe_stdin = spec.stdin.clone();
@@ -109,27 +118,86 @@ pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
             spec.command,
             SEQ.fetch_add(1, Ordering::Relaxed)
         ));
-        if let Err(e) = std::fs::write(&path, content) {
-            return sink.emit(TaskEvent::Finished {
-                exit: -1,
-                ok: false,
-                error: Some(format!("writing config for {}: {e}", spec.command)),
-            });
-        }
+        std::fs::write(&path, content)
+            .map_err(|e| format!("writing config for {}: {e}", spec.command))?;
         args.push(path.to_string_lossy().into_owned());
         _temp = Some(TempInput(path));
         pipe_stdin = None; // the tool reads the file, not the pipe
     }
+    Ok(Prepared {
+        args,
+        pipe_stdin,
+        _temp,
+    })
+}
 
-    sink.emit(TaskEvent::Started {
-        command: spec.command.clone(),
-        args: args.clone(),
-        stdin: spec.stdin.clone(),
-    })?;
-    tracing::info!(cmd = %spec.command, args = ?args, "running task");
+/// Runs `spec` as its own single-process subtask: opens a `begin_command`
+/// subtask (the `$ cmd` header lives in its fields), streams the child, and
+/// completes with the exit-derived status. Returns that status; `Err` only when
+/// the sink fails (the client is gone).
+pub fn run(task: &mut Task, name: impl Into<String>, spec: &TaskSpec) -> io::Result<SubStatus> {
+    let prepared = match prepare_stdin(spec) {
+        Ok(p) => p,
+        Err(msg) => {
+            let mut sub = task.begin_command(
+                name,
+                spec.command.clone(),
+                spec.args.clone(),
+                spec.stdin.clone(),
+            );
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(-1, Some(msg));
+            sub.complete(SubStatus::Failed);
+            return Ok(SubStatus::Failed);
+        }
+    };
+    let mut sub = task.begin_command(
+        name,
+        spec.command.clone(),
+        prepared.args.clone(),
+        spec.stdin.clone(),
+    );
+    let (status, exit, error) = stream_child(&mut sub, spec, &prepared)?;
+    sub.set_result(exit, error);
+    sub.complete(status);
+    Ok(status)
+}
 
+/// Streams one command **into an already-open subtask** (for multi-step subtasks
+/// like NFS apply / RoCE enable): echoes `$ cmd args`, streams the child, and —
+/// on failure only, so a later success can't clobber an earlier command's error
+/// — records the exit/message on the subtask. Never opens or closes the subtask;
+/// the caller folds the returned status. A missing binary maps to the same
+/// install hint as [`run`].
+pub(crate) fn run_into(sub: &mut SubTask, spec: &TaskSpec) -> io::Result<SubStatus> {
+    writeln!(sub.stdout(), "$ {} {}", spec.command, spec.args.join(" "))?;
+    let prepared = match prepare_stdin(spec) {
+        Ok(p) => p,
+        Err(msg) => {
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(-1, Some(msg));
+            return Ok(SubStatus::Failed);
+        }
+    };
+    let (status, exit, error) = stream_child(sub, spec, &prepared)?;
+    if status == SubStatus::Failed {
+        sub.set_result(exit, error);
+    }
+    Ok(status)
+}
+
+/// Spawns the command, streams stdout/stderr into `sub`'s pipes, waits, and
+/// returns `(status, exit, error)`. A spawn failure echoes the install hint to
+/// the subtask's stderr and returns `(Failed, -1, hint)`. `Err` only when the
+/// sink fails.
+fn stream_child(
+    sub: &mut SubTask,
+    spec: &TaskSpec,
+    prepared: &Prepared,
+) -> io::Result<(SubStatus, i32, Option<String>)> {
+    tracing::info!(cmd = %spec.command, args = ?prepared.args, "running task");
     let mut cmd = Command::new(&spec.command);
-    cmd.args(&args)
+    cmd.args(&prepared.args)
         .envs(spec.env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -137,17 +205,16 @@ pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
-            return sink.emit(TaskEvent::Finished {
-                exit: -1,
-                ok: false,
-                error: Some(spawn_error(&spec.command, &e)),
-            });
+            let msg = spawn_error(&spec.command, &e);
+            writeln!(sub.stderr(), "{msg}")?;
+            return Ok((SubStatus::Failed, -1, Some(msg)));
         }
     };
 
     // Feed stdin from its own thread so a large payload can't deadlock against
     // the child filling its stdout pipe.
     let mut stdin_handle = child.stdin.take();
+    let pipe_stdin = prepared.pipe_stdin.clone();
     let stdin_thread = std::thread::spawn(move || {
         // Writing the data (if any) then dropping the handle closes the pipe so
         // the child sees EOF.
@@ -165,7 +232,12 @@ pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
 
     let mut sink_err = None;
     for ev in rx {
-        if let Err(e) = sink.emit(ev) {
+        let res = match ev {
+            TaskEvent::Stdout { data } => sub.stdout().write_all(data.as_bytes()),
+            TaskEvent::Stderr { data } => sub.stderr().write_all(data.as_bytes()),
+            _ => Ok(()),
+        };
+        if let Err(e) = res {
             sink_err = Some(e);
             break;
         }
@@ -179,65 +251,13 @@ pub fn run_task(spec: &TaskSpec, sink: &mut dyn EventSink) -> io::Result<()> {
 
     let status = child.wait()?;
     let exit = status.code().unwrap_or(-1);
-    sink.emit(TaskEvent::Finished {
-        exit,
-        ok: status.success(),
-        error: (!status.success()).then(|| format!("{} exited with status {exit}", spec.command)),
-    })
-}
-
-/// Runs one command to completion, echoing its command line + output to the task
-/// stream — for multi-step tasks (NFS apply, RoCE enable) that emit a single
-/// Started/Finished around several commands. Returns `Ok((success, error))`;
-/// `Err` only when the sink fails (the client is gone). A missing binary maps to
-/// the same install hint as `run_task`.
-pub(crate) fn run_cmd(
-    command: &str,
-    args: &[String],
-    sink: &mut dyn EventSink,
-) -> io::Result<(bool, String)> {
-    sink.emit(TaskEvent::Stdout {
-        data: format!("$ {command} {}\n", args.join(" ")),
-    })?;
-    let output = match Command::new(command).args(args).output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let msg = match package_for_cli(command) {
-                Some(pkg) => format!(
-                    "{command} is not installed — install the {pkg} package (Tasks → Install dependencies)"
-                ),
-                None => format!("{command} is not installed"),
-            };
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
-            return Ok((false, msg));
-        }
-        Err(e) => {
-            let msg = format!("failed to start {command}: {e}");
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
-            return Ok((false, msg));
-        }
-    };
-    if !output.stdout.is_empty() {
-        sink.emit(TaskEvent::Stdout {
-            data: String::from_utf8_lossy(&output.stdout).into_owned(),
-        })?;
-    }
-    if !output.stderr.is_empty() {
-        sink.emit(TaskEvent::Stderr {
-            data: String::from_utf8_lossy(&output.stderr).into_owned(),
-        })?;
-    }
-    let exit = output.status.code().unwrap_or(-1);
-    let msg = if output.status.success() {
-        String::new()
+    let error = (!status.success()).then(|| format!("{} exited with status {exit}", spec.command));
+    let sub_status = if status.success() {
+        SubStatus::Success
     } else {
-        format!("{command} exited with status {exit}")
+        SubStatus::Failed
     };
-    Ok((output.status.success(), msg))
+    Ok((sub_status, exit, error))
 }
 
 /// Streams a child pipe to the channel in chunks (partial lines included).
@@ -282,6 +302,14 @@ pub mod test {
         fn started(&self) -> &TaskEvent {
             &self.events[0]
         }
+        /// The subtask-terminal event (`exit`/subtask `status` live here now).
+        fn subtask_finished(&self) -> &TaskEvent {
+            self.events
+                .iter()
+                .find(|e| matches!(e, TaskEvent::SubtaskFinished { .. }))
+                .unwrap()
+        }
+        /// The task-terminal event (worst-child `status`, first error).
         fn finished(&self) -> &TaskEvent {
             self.events.last().unwrap()
         }
@@ -305,9 +333,14 @@ pub mod test {
         }
     }
 
-    fn run(spec: &TaskSpec) -> Collector {
+    /// Runs `spec` as a one-subtask task and collects the whole event stream.
+    fn run_spec(spec: &TaskSpec) -> Collector {
         let mut c = Collector::default();
-        run_task(spec, &mut c).unwrap();
+        {
+            let mut task = Task::new(&mut c);
+            super::run(&mut task, "test", spec).unwrap();
+            task.complete().unwrap();
+        }
         c
     }
 
@@ -319,15 +352,24 @@ pub mod test {
                 .map(String::from)
                 .to_vec(),
         );
-        let c = run(&spec);
-        assert!(matches!(c.started(), TaskEvent::Started { command, .. } if command == "sh"));
+        let c = run_spec(&spec);
+        assert!(
+            matches!(c.started(), TaskEvent::SubtaskStarted { command: Some(cmd), .. } if cmd == "sh")
+        );
         assert_eq!(c.stdout(), "out");
         assert_eq!(c.stderr(), "err");
         assert!(matches!(
+            c.subtask_finished(),
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Failed,
+                exit: 3,
+                ..
+            }
+        ));
+        assert!(matches!(
             c.finished(),
             TaskEvent::Finished {
-                exit: 3,
-                ok: false,
+                status: SubStatus::Failed,
                 ..
             }
         ));
@@ -336,19 +378,25 @@ pub mod test {
     #[test]
     fn feeds_stdin() {
         let spec = TaskSpec::with_stdin("cat", vec![], "hello world".into());
-        let c = run(&spec);
+        let c = run_spec(&spec);
         assert_eq!(c.stdout(), "hello world");
-        assert!(matches!(c.finished(), TaskEvent::Finished { ok: true, .. }));
+        assert!(matches!(
+            c.finished(),
+            TaskEvent::Finished {
+                status: SubStatus::Success,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn config_file_mode_passes_a_real_path() {
         // `cat <tempfile>` should print the materialized content.
         let spec = TaskSpec::with_config_file("cat", vec![], "rendered config".into());
-        let c = run(&spec);
+        let c = run_spec(&spec);
         assert_eq!(c.stdout(), "rendered config");
         match c.started() {
-            TaskEvent::Started { args, stdin, .. } => {
+            TaskEvent::SubtaskStarted { args, stdin, .. } => {
                 assert_eq!(args.len(), 1, "the temp path is appended as an arg");
                 assert!(args[0].contains("greendot-cat"), "{args:?}");
                 assert_eq!(
@@ -357,24 +405,35 @@ pub mod test {
                     "content kept for display"
                 );
             }
-            other => panic!("expected Started, got {other:?}"),
+            other => panic!("expected SubtaskStarted, got {other:?}"),
         }
-        assert!(matches!(c.finished(), TaskEvent::Finished { ok: true, .. }));
+        assert!(matches!(
+            c.finished(),
+            TaskEvent::Finished {
+                status: SubStatus::Success,
+                ..
+            }
+        ));
     }
 
     #[test]
     fn missing_binary_reports_install_hint() {
-        let c = run(&TaskSpec::new("targetctl", vec!["restore".into()]));
+        let c = run_spec(&TaskSpec::new("targetctl", vec!["restore".into()]));
+        // The install hint is both the task-terminal error and echoed to stderr.
         match c.finished() {
             TaskEvent::Finished {
-                ok: false,
+                status: SubStatus::Failed,
                 error: Some(msg),
-                ..
             } => {
                 assert!(msg.contains("targetctl is not installed"), "{msg}");
                 assert!(msg.contains("targetcli-fb package"), "{msg}");
             }
             other => panic!("expected install hint, got {other:?}"),
         }
+        assert!(
+            c.stderr().contains("targetctl is not installed"),
+            "{}",
+            c.stderr()
+        );
     }
 }

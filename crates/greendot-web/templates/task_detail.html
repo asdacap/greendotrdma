@@ -9,9 +9,6 @@
 
 {% if let Some(error) = error %}<p class="error">{{ error }}</p>{% endif %}
 
-<h2>Command</h2>
-<pre class="log">{{ task.command_line }}</pre>
-
 {% if let Some(stdin) = stdin %}
 <details>
   <summary>stdin ({{ stdin.len() }} bytes)</summary>
@@ -19,16 +16,63 @@
 </details>
 {% endif %}
 
-<h2>Output</h2>
-<pre class="log" id="task-log"></pre>
+<h2>Steps</h2>
+<div id="subtasks">
+  {% for s in subtasks %}
+  <section class="subtask" data-index="{{ s.index }}">
+    <h3><span class="dot {{ s.dot_class }}"></span> {{ s.name }}</h3>
+    {% if let Some(cmd) = s.command_line %}<pre class="log cmd">{{ cmd }}</pre>{% endif %}
+    <pre class="log out"></pre>
+  </section>
+  {% endfor %}
+</div>
 
 <script>
+  // Each SSE event carries JSON keyed by subtask `index`; `ensure(index)` adopts
+  // the server-rendered block (finished task) or creates one (running task), so
+  // live output never duplicates a pre-rendered section.
   (function () {
-    const log = document.getElementById("task-log");
+    const container = document.getElementById("subtasks");
+    const DOT = { success: "dot-green", failed: "dot-red", skipped: "dot-gray" };
+
+    function ensure(index, name, command) {
+      let sec = container.querySelector('[data-index="' + index + '"]');
+      if (sec) return sec;
+      sec = document.createElement("section");
+      sec.className = "subtask";
+      sec.dataset.index = index;
+      const h = document.createElement("h3");
+      h.innerHTML = '<span class="dot dot-yellow"></span> ';
+      h.appendChild(document.createTextNode(name || "output"));
+      sec.appendChild(h);
+      if (command) {
+        const c = document.createElement("pre");
+        c.className = "log cmd";
+        c.textContent = command;
+        sec.appendChild(c);
+      }
+      const out = document.createElement("pre");
+      out.className = "log out";
+      sec.appendChild(out);
+      container.appendChild(sec);
+      return sec;
+    }
+
     const es = new EventSource("/tasks/{{ task.id }}/stream");
+    es.addEventListener("subtask", (e) => {
+      const d = JSON.parse(e.data);
+      ensure(d.index, d.name, d.command);
+    });
     es.addEventListener("output", (e) => {
-      log.textContent += e.data;
-      log.scrollTop = log.scrollHeight;
+      const d = JSON.parse(e.data);
+      const out = ensure(d.index).querySelector("pre.out");
+      out.textContent += d.data;
+      out.scrollTop = out.scrollHeight;
+    });
+    es.addEventListener("substatus", (e) => {
+      const d = JSON.parse(e.data);
+      const dot = ensure(d.index).querySelector(".dot");
+      dot.className = "dot " + (DOT[d.status] || "dot-yellow");
     });
     es.addEventListener("done", () => {
       es.close();

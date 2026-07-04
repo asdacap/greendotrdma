@@ -2,9 +2,9 @@
 //! web collects verbatim; the batch health read runs `smartctl -Hj -A` per
 //! device and streams one merged JSON line, like `hardware::report_capable_into`.
 
-use crate::cmd::{EventSink, TaskSpec};
-use greendot_proto::{BlockDev, TaskEvent};
-use std::io;
+use crate::cmd::TaskSpec;
+use greendot_proto::{BlockDev, SubStatus, SubTask};
+use std::io::{self, Write};
 use std::process::Command;
 
 fn dev(device: &BlockDev) -> String {
@@ -42,12 +42,7 @@ pub fn parse_health(stdout: &str) -> (Option<bool>, Option<i32>) {
 /// web collects: `[{"device":"sda","passed":true,"temp_c":38}, …]`. Runs
 /// `smartctl` once per device; a missing binary or unreadable device degrades
 /// that entry to `passed:null,temp_c:null` (the web renders it gray).
-pub fn report_health_into(devices: &[BlockDev], sink: &mut dyn EventSink) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "smartctl".into(),
-        args: vec!["health".into()],
-        stdin: None,
-    })?;
+pub fn report_health_into(devices: &[BlockDev], sub: &mut SubTask) -> io::Result<SubStatus> {
     let rows: Vec<serde_json::Value> = devices
         .iter()
         .map(|device| {
@@ -64,14 +59,8 @@ pub fn report_health_into(devices: &[BlockDev], sink: &mut dyn EventSink) -> io:
             })
         })
         .collect();
-    sink.emit(TaskEvent::Stdout {
-        data: serde_json::Value::Array(rows).to_string(),
-    })?;
-    sink.emit(TaskEvent::Finished {
-        exit: 0,
-        ok: true,
-        error: None,
-    })
+    write!(sub.stdout(), "{}", serde_json::Value::Array(rows))?;
+    Ok(SubStatus::Success)
 }
 
 #[cfg(test)]
@@ -115,10 +104,18 @@ mod tests {
     #[test]
     fn report_health_into_emits_one_json_array() {
         use crate::cmd::test::Collector;
+        use greendot_proto::{Task, TaskEvent};
         // A device whose smartctl call fails (binary may be absent in CI) still
         // produces a row with null health — the array shape is what matters.
         let mut c = Collector::default();
-        report_health_into(&[BlockDev::new("sda").unwrap()], &mut c).unwrap();
+        let status = {
+            let mut task = Task::new(&mut c);
+            let mut sub = task.begin_subtask("Read SMART health");
+            let s = report_health_into(&[BlockDev::new("sda").unwrap()], &mut sub).unwrap();
+            sub.complete(s);
+            task.complete().unwrap();
+            s
+        };
         let stdout: String = c
             .events
             .iter()
@@ -130,9 +127,13 @@ mod tests {
         let rows: serde_json::Value = serde_json::from_str(&stdout).unwrap();
         assert_eq!(rows.as_array().unwrap().len(), 1);
         assert_eq!(rows[0]["device"], "sda");
+        assert_eq!(status, SubStatus::Success);
         assert!(matches!(
             c.events.last().unwrap(),
-            TaskEvent::Finished { ok: true, .. }
+            TaskEvent::Finished {
+                status: SubStatus::Success,
+                ..
+            }
         ));
     }
 }

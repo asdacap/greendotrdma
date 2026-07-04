@@ -6,11 +6,11 @@
 
 use crate::cmd::EventSink;
 use crate::dispatch::{self, Ctx, Dispatch};
-use crate::{nfs, nvmet, pam};
+use crate::{cmd, nfs, nvmet, pam};
 use anyhow::Result;
-use greendot_proto::{Request, Response, TaskEvent};
+use greendot_proto::{Request, Response, SubStatus, SubTask, Task, TaskEvent};
 use greendot_reconcile::actual::nfs::{ActualNfs, from_report};
-use greendot_reconcile::reconcile::{Executor, SocketExecutor, StdoutSink};
+use greendot_reconcile::reconcile::{Executor, JsonlSink, SocketExecutor};
 use std::io;
 use std::path::Path;
 
@@ -19,7 +19,8 @@ use std::path::Path;
 /// propagate as `Err`.
 pub fn run(cfg_path: Option<String>) -> Result<()> {
     let cfg = greendot_reconcile::config::Config::load(cfg_path)?;
-    let mut sink = StdoutSink;
+    let mut sink = JsonlSink;
+    let mut task = Task::new(&mut sink);
 
     // Prefer the running daemon whenever its socket is reachable: that is the
     // path the unprivileged, web-spawned invocation takes, and it keeps a single
@@ -28,11 +29,11 @@ pub fn run(cfg_path: Option<String>) -> Result<()> {
     // standalone, daemon-less case (an alternative frontend, or recovery).
     let ok = if std::os::unix::net::UnixStream::connect(&cfg.helper_socket).is_ok() {
         let exec = SocketExecutor::new(cfg.helper_socket.clone());
-        greendot_reconcile::reconcile::run(&cfg, &exec, &mut sink)?
+        greendot_reconcile::reconcile::run(&cfg, &exec, &mut task)?
     } else if nix::unistd::geteuid().is_root() {
         let ctx = reconcile_ctx();
         let exec = InProcessExecutor { ctx: &ctx };
-        greendot_reconcile::reconcile::run(&cfg, &exec, &mut sink)?
+        greendot_reconcile::reconcile::run(&cfg, &exec, &mut task)?
     } else {
         anyhow::bail!(
             "no helper daemon at {} and not running as root — start the daemon \
@@ -40,6 +41,7 @@ pub fn run(cfg_path: Option<String>) -> Result<()> {
             cfg.helper_socket.display()
         );
     };
+    task.complete()?;
     if !ok {
         std::process::exit(1);
     }
@@ -72,22 +74,20 @@ struct InProcessExecutor<'a> {
 }
 
 impl Executor for InProcessExecutor<'_> {
-    fn apply(&self, req: Request, sink: &mut dyn EventSink) -> io::Result<bool> {
-        let mut tap = OkTap {
-            inner: sink,
-            ok: true,
-        };
+    /// Applies into the caller-opened `sub` (reconcile's `step()` owns it) and
+    /// returns the status directly — no framing to unwrap, unlike the socket path.
+    fn apply(&self, req: Request, sub: &mut SubTask) -> io::Result<SubStatus> {
         match dispatch::plan(self.ctx, req) {
             // Empty EnsureModules — nothing to load.
-            Dispatch::OneShot(Response::Ok) => {}
+            Dispatch::OneShot(Response::Ok) => Ok(SubStatus::Success),
             // EnsureModules (modprobe) and LioApply (targetctl) are commands.
             Dispatch::Task(spec) => {
                 let _guard = self.ctx.mutate_lock.lock().unwrap();
-                crate::cmd::run_task(&spec, &mut tap)?;
+                cmd::run_into(sub, &spec)
             }
             Dispatch::NvmetApply(desired) => {
                 let _guard = self.ctx.mutate_lock.lock().unwrap();
-                nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), &mut tap)?;
+                nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), sub)
             }
             Dispatch::NfsApply(desired) => {
                 let _guard = self.ctx.mutate_lock.lock().unwrap();
@@ -95,39 +95,27 @@ impl Executor for InProcessExecutor<'_> {
                     &desired,
                     Path::new(nfs::NFS_EXPORTS_FILE),
                     Path::new(nfs::NFSD_PORTLIST),
-                    &mut tap,
-                )?;
+                    sub,
+                )
             }
             _ => unreachable!("reconcile issues only module/nvmet/lio/nfs applies"),
         }
-        Ok(tap.ok)
     }
 
     fn nfs_report(&self) -> ActualNfs {
+        // A throwaway task/subtask just to satisfy `report_into`'s handle API;
+        // the `CaptureSink` keeps the streamed report payload for parsing.
         let mut cap = CaptureSink::default();
-        let _ = nfs::report_into(
-            Path::new(nfs::NFSD_PORTLIST),
-            Path::new(nfs::NFS_EXPORTS_FILE),
-            &mut cap,
-        );
-        from_report(&cap.stdout)
-    }
-}
-
-/// Forwards every event to the wrapped sink and remembers the terminal
-/// `Finished { ok }`, so the driver learns per-step success without changing the
-/// `EventSink` contract.
-struct OkTap<'a> {
-    inner: &'a mut dyn EventSink,
-    ok: bool,
-}
-
-impl EventSink for OkTap<'_> {
-    fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {
-        if let TaskEvent::Finished { ok, .. } = &ev {
-            self.ok = *ok;
+        {
+            let mut task = Task::new(&mut cap);
+            let mut sub = task.begin_subtask("Read NFS exports");
+            let _ = nfs::report_into(
+                Path::new(nfs::NFSD_PORTLIST),
+                Path::new(nfs::NFS_EXPORTS_FILE),
+                &mut sub,
+            );
         }
-        self.inner.emit(ev)
+        from_report(&cap.stdout)
     }
 }
 

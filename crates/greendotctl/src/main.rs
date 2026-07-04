@@ -32,7 +32,9 @@ use anyhow::{Context, Result, bail};
 use cmd::EventSink;
 use dispatch::{Ctx, Dispatch};
 use greendot_proto::pb::helper_server::{Helper, HelperServer};
-use greendot_proto::{ErrKind, Request as GdRequest, Response as GdResponse, TaskEvent, pb};
+use greendot_proto::{
+    ErrKind, Request as GdRequest, Response as GdResponse, SubStatus, Task, TaskEvent, pb,
+};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -97,7 +99,12 @@ impl Opts {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt().init();
+    // Tracing goes to stderr, never stdout: `greendotctl reconcile` streams its
+    // task events as a JSONL frame on stdout, and a stray log line there would
+    // land in the web's task output. (The daemon's stderr is captured by systemd.)
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .init();
     // Subcommands: `reconcile [config]` runs the one-shot reconcile; `serve` (or
     // no subcommand, for back-compat with the flags-only invocation) runs the
     // daemon. `reconcile` runs OUTSIDE any tokio runtime — it builds its own via
@@ -277,92 +284,83 @@ impl Helper for HelperSvc {
 /// synchronous `serve` match body, unchanged except that a one-shot response is
 /// translated into terminal task events (RunTask always yields a stream).
 fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Result<()> {
+    let mut task = Task::new(sink);
     match dispatch::plan(ctx, req) {
-        Dispatch::OneShot(resp) => emit_oneshot(sink, resp),
+        Dispatch::OneShot(resp) => emit_oneshot(&mut task, resp),
         Dispatch::Task(spec) => {
             let _guard = ctx.mutate_lock.lock().unwrap();
-            cmd::run_task(&spec, sink)
+            cmd::run(&mut task, spec.command.clone(), &spec)?;
         }
         Dispatch::NvmetApply(desired) => {
             let _guard = ctx.mutate_lock.lock().unwrap();
-            nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), sink)
+            let mut sub = task.begin_subtask("Apply NVMe-oF configuration");
+            let status = nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), &mut sub)?;
+            sub.complete(status);
         }
         Dispatch::NfsApply(desired) => {
             let _guard = ctx.mutate_lock.lock().unwrap();
-            nfs::apply(
+            let mut sub = task.begin_subtask("Apply NFS configuration");
+            let status = nfs::apply(
                 &desired,
                 Path::new(nfs::NFS_EXPORTS_FILE),
                 Path::new(nfs::NFSD_PORTLIST),
-                sink,
-            )
+                &mut sub,
+            )?;
+            sub.complete(status);
         }
         // Reads: no mutate_lock (they stream like the old serve loop).
-        Dispatch::NfsReport => nfs::report_into(
-            Path::new(nfs::NFSD_PORTLIST),
-            Path::new(nfs::NFS_EXPORTS_FILE),
-            sink,
-        ),
-        Dispatch::RoceCapableNics => {
-            hardware::report_capable_into(Path::new(hardware::NET_ROOT), sink)
+        Dispatch::NfsReport => {
+            let mut sub = task.begin_subtask("Read NFS state");
+            let status = nfs::report_into(
+                Path::new(nfs::NFSD_PORTLIST),
+                Path::new(nfs::NFS_EXPORTS_FILE),
+                &mut sub,
+            )?;
+            sub.complete(status);
         }
-        Dispatch::SmartHealth(devices) => smart::report_health_into(&devices, sink),
+        Dispatch::RoceCapableNics => {
+            let mut sub = task.begin_subtask("Read RoCE-capable NICs");
+            let status = hardware::report_capable_into(Path::new(hardware::NET_ROOT), &mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::SmartHealth(devices) => {
+            let mut sub = task.begin_subtask("Read SMART health");
+            let status = smart::report_health_into(&devices, &mut sub)?;
+            sub.complete(status);
+        }
         Dispatch::NicRdmaAdvice => {
-            hardware::report_nic_advice_into(Path::new(hardware::NET_ROOT), sink)
+            let mut sub = task.begin_subtask("Read NIC RDMA advice");
+            let status = hardware::report_nic_advice_into(Path::new(hardware::NET_ROOT), &mut sub)?;
+            sub.complete(status);
         }
         Dispatch::EnableRoce(netdev) => {
             let _guard = ctx.mutate_lock.lock().unwrap();
-            hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, sink)
+            let mut sub = task.begin_subtask(format!("Enable RoCE on {netdev}"));
+            let status = hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, &mut sub)?;
+            sub.complete(status);
         }
         Dispatch::FailedTask(msg) => {
             // A refused operation (e.g. install on an unsupported distro)
-            // recorded as a failed task carrying its reason.
-            sink.emit(TaskEvent::Started {
-                command: "install".into(),
-                args: Vec::new(),
-                stdin: None,
-            })?;
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
-            sink.emit(TaskEvent::Finished {
-                exit: 1,
-                ok: false,
-                error: Some(msg),
-            })
+            // recorded as a failed subtask carrying its reason.
+            task.begin_subtask("install").fail(msg);
         }
     }
+    task.complete()
 }
 
-/// Translate a one-shot response into the terminal task events RunTask must
-/// still emit (e.g. `EnsureModules` when every module is already loaded).
-fn emit_oneshot(sink: &mut dyn EventSink, resp: GdResponse) -> io::Result<()> {
+/// Translate a one-shot response into the one-subtask task RunTask must still
+/// emit (e.g. `EnsureModules` when every module is already loaded).
+fn emit_oneshot(task: &mut Task, resp: GdResponse) {
+    let sub = task.begin_subtask("Apply");
     match resp {
-        GdResponse::Ok | GdResponse::OkAuth { .. } => sink.emit(TaskEvent::Finished {
-            exit: 0,
-            ok: true,
-            error: None,
-        }),
-        GdResponse::Err { message, .. } => {
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{message}\n"),
-            })?;
-            sink.emit(TaskEvent::Finished {
-                exit: 1,
-                ok: false,
-                error: Some(message),
-            })
-        }
+        GdResponse::Ok | GdResponse::OkAuth { .. } => sub.complete(SubStatus::Success),
+        GdResponse::Err { message, .. } => sub.fail(message),
     }
 }
 
 /// Emit a rejected (unvalidatable) request as a failed task.
 fn emit_reject(sink: &mut dyn EventSink, msg: String) -> io::Result<()> {
-    sink.emit(TaskEvent::Stderr {
-        data: format!("{msg}\n"),
-    })?;
-    sink.emit(TaskEvent::Finished {
-        exit: 1,
-        ok: false,
-        error: Some(msg),
-    })
+    let mut task = Task::new(sink);
+    task.begin_subtask("Validate request").fail(msg);
+    task.complete()
 }

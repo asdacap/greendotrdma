@@ -4,43 +4,30 @@
 //! untouched. Creating a `ports/<id>/subsystems/<nqn>` symlink is what binds the
 //! RDMA/TCP listener — its failure (e.g. no usable RDMA) surfaces as a task error.
 
-use crate::cmd::EventSink;
 use greendot_proto::{
-    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, TaskEvent, Transport,
+    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask,
+    Transport,
 };
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 
 pub const NVMET_ROOT: &str = "/sys/kernel/config/nvmet";
 
-/// Reconciles configfs under `root` to `desired`, streaming progress as task
-/// events. Returns `Err` only when the sink itself fails (the client is gone);
-/// configfs failures are reported via a `Finished { ok: false }` event.
-pub fn apply(desired: &NvmetDesired, root: &Path, sink: &mut dyn EventSink) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "configfs".into(),
-        args: vec!["nvmet".into(), "apply".into()],
-        stdin: None,
-    })?;
+/// Reconciles configfs under `root` to `desired`, streaming progress into the
+/// caller-opened subtask. Returns the subtask status (`Failed` on a configfs
+/// error, whose message is recorded on the subtask); `Err` only when the sink
+/// itself fails (the client is gone).
+pub fn apply(desired: &NvmetDesired, root: &Path, sub: &mut SubTask) -> io::Result<SubStatus> {
     match reconcile(desired, root) {
         Ok(summary) => {
-            sink.emit(TaskEvent::Stdout { data: summary })?;
-            sink.emit(TaskEvent::Finished {
-                exit: 0,
-                ok: true,
-                error: None,
-            })
+            write!(sub.stdout(), "{summary}")?;
+            Ok(SubStatus::Success)
         }
         Err(e) => {
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{e}\n"),
-            })?;
-            sink.emit(TaskEvent::Finished {
-                exit: 1,
-                ok: false,
-                error: Some(e.to_string()),
-            })
+            writeln!(sub.stderr(), "{e}")?;
+            sub.set_result(1, Some(e.to_string()));
+            Ok(SubStatus::Failed)
         }
     }
 }
@@ -300,31 +287,19 @@ fn remove_object_dir(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greendot_proto::{DevicePath, Nqn};
+    use crate::cmd::test::Collector;
+    use greendot_proto::{DevicePath, Nqn, Task};
 
-    #[derive(Default)]
-    struct Sink {
-        events: Vec<TaskEvent>,
-    }
-    impl EventSink for Sink {
-        fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {
-            self.events.push(ev);
-            Ok(())
-        }
-    }
-    impl Sink {
-        fn ok(&self) -> bool {
-            matches!(
-                self.events.last(),
-                Some(TaskEvent::Finished { ok: true, .. })
-            )
-        }
-    }
-
-    fn run(desired: &NvmetDesired, root: &Path) -> Sink {
-        let mut sink = Sink::default();
-        apply(desired, root, &mut sink).unwrap();
-        sink
+    /// Applies `desired` through a one-subtask task and returns whether it
+    /// reconciled successfully.
+    fn run(desired: &NvmetDesired, root: &Path) -> bool {
+        let mut c = Collector::default();
+        let mut task = Task::new(&mut c);
+        let mut sub = task.begin_subtask("Apply NVMe-oF configuration");
+        let status = apply(desired, root, &mut sub).unwrap();
+        sub.complete(status);
+        task.complete().unwrap();
+        status == SubStatus::Success
     }
 
     fn nqn(s: &str) -> Nqn {
@@ -376,7 +351,7 @@ mod tests {
                 port(2, Transport::Tcp, &["vm1"]),
             ],
         };
-        assert!(run(&first, &tmp).ok());
+        assert!(run(&first, &tmp));
 
         let vm1 = tmp.join("subsystems/nqn.2026-06.io.greendot:vm1");
         assert_eq!(read_trim(&vm1.join("attr_allow_any_host")), "0");
@@ -413,7 +388,7 @@ mod tests {
             ],
             ports: vec![port(3, Transport::Loop, &["vm1", "vm2"])],
         };
-        assert!(run(&second, &tmp).ok());
+        assert!(run(&second, &tmp));
 
         // vm1 reconciled: path changed (disable→re-enable), host dropped, allow-any set.
         assert_eq!(

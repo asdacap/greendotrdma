@@ -6,9 +6,9 @@
 //! RoCE-capable hardware, and "enable RoCE on this NIC"); this module answers
 //! both off sysfs and the registry.
 
-use crate::cmd::{EventSink, TaskSpec, run_cmd};
-use greendot_proto::{NetdevName, PciAddress, TaskEvent};
-use std::io;
+use crate::cmd::{TaskSpec, run_into};
+use greendot_proto::{NetdevName, PciAddress, SubStatus, SubTask};
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -246,129 +246,85 @@ fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)>
 
 /// Streams the RoCE-capable NIC inventory as one JSON line — a privileged read
 /// the web collects: `[{"netdev":"ens16","vendor":"Mellanox"}, …]`.
-pub fn report_capable_into(net_root: &Path, sink: &mut dyn EventSink) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "roce".into(),
-        args: vec!["capable".into()],
-        stdin: None,
-    })?;
+pub fn report_capable_into(net_root: &Path, sub: &mut SubTask) -> io::Result<SubStatus> {
     let nics: Vec<serde_json::Value> = roce_capable(net_root)
         .into_iter()
         .map(|(netdev, vendor)| serde_json::json!({ "netdev": netdev, "vendor": vendor }))
         .collect();
-    sink.emit(TaskEvent::Stdout {
-        data: serde_json::Value::Array(nics).to_string(),
-    })?;
-    sink.emit(TaskEvent::Finished {
-        exit: 0,
-        ok: true,
-        error: None,
-    })
+    write!(sub.stdout(), "{}", serde_json::Value::Array(nics))?;
+    Ok(SubStatus::Success)
 }
 
 /// Streams the per-NIC RDMA advisories as one JSON line — a privileged read the
 /// web collects: `[{"netdev":"ens16v0","label":"…","detail":"…"}, …]`.
-pub fn report_nic_advice_into(net_root: &Path, sink: &mut dyn EventSink) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "nic-advice".into(),
-        args: Vec::new(),
-        stdin: None,
-    })?;
+pub fn report_nic_advice_into(net_root: &Path, sub: &mut SubTask) -> io::Result<SubStatus> {
     let advice: Vec<serde_json::Value> = nic_rdma_advice(net_root)
         .into_iter()
         .map(|(netdev, label, detail)| {
             serde_json::json!({ "netdev": netdev, "label": label, "detail": detail })
         })
         .collect();
-    sink.emit(TaskEvent::Stdout {
-        data: serde_json::Value::Array(advice).to_string(),
-    })?;
-    sink.emit(TaskEvent::Finished {
-        exit: 0,
-        ok: true,
-        error: None,
-    })
+    write!(sub.stdout(), "{}", serde_json::Value::Array(advice))?;
+    Ok(SubStatus::Success)
 }
 
 /// Turns on hardware RoCE for `netdev`: detect the vendor, probe its RoCE-enable
 /// parameter, and — only if present and off — set it and reload the device, all
-/// streamed as one task. The reload briefly drops the NIC.
+/// streamed into the caller-opened subtask. The reload briefly drops the NIC.
 pub fn enable_into(
     net_root: &Path,
     netdev: &NetdevName,
-    sink: &mut dyn EventSink,
-) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "roce".into(),
-        args: vec!["enable".into(), netdev.to_string()],
-        stdin: None,
-    })?;
+    sub: &mut SubTask,
+) -> io::Result<SubStatus> {
     let Some((hw, pci)) = detect(net_root, netdev.as_str()) else {
-        return finish(
-            sink,
-            false,
-            Some(format!("{netdev} is not RoCE-capable hardware")),
-        );
+        let msg = format!("{netdev} is not RoCE-capable hardware");
+        writeln!(sub.stderr(), "{msg}")?;
+        sub.set_result(1, Some(msg));
+        return Ok(SubStatus::Failed);
     };
 
     // Confirm the parameter is present and currently off before reloading.
     let probe = hw.probe(&pci);
-    sink.emit(TaskEvent::Stdout {
-        data: format!("$ {} {}\n", probe.command, probe.args.join(" ")),
-    })?;
+    writeln!(sub.stdout(), "$ {} {}", probe.command, probe.args.join(" "))?;
     let stdout = match Command::new(&probe.command).args(&probe.args).output() {
         Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            return finish(
-                sink,
-                false,
-                Some(
-                    "devlink is not installed — install the iproute2 package \
-                     (Tasks → Install dependencies)"
-                        .into(),
-                ),
-            );
+            let msg = "devlink is not installed — install the iproute2 package \
+                       (Tasks → Install dependencies)"
+                .to_string();
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(1, Some(msg));
+            return Ok(SubStatus::Failed);
         }
-        Err(e) => return finish(sink, false, Some(format!("failed to start devlink: {e}"))),
+        Err(e) => {
+            let msg = format!("failed to start devlink: {e}");
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(1, Some(msg));
+            return Ok(SubStatus::Failed);
+        }
     };
     match hw.interpret(&stdout) {
         RoceState::AlreadyEnabled => {
-            sink.emit(TaskEvent::Stdout {
-                data: format!("RoCE is already enabled on {pci}\n"),
-            })?;
-            return finish(sink, true, None);
+            writeln!(sub.stdout(), "RoCE is already enabled on {pci}")?;
+            return Ok(SubStatus::Success);
         }
         RoceState::Unavailable => {
-            return finish(
-                sink,
-                false,
-                Some(format!(
-                    "{pci} has no settable enable_roce parameter — on an SR-IOV VF, \
-                     enable RoCE on the host/PF"
-                )),
+            let msg = format!(
+                "{pci} has no settable enable_roce parameter — on an SR-IOV VF, \
+                 enable RoCE on the host/PF"
             );
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(1, Some(msg));
+            return Ok(SubStatus::Failed);
         }
         RoceState::Disabled => {}
     }
 
-    let mut ok = true;
-    let mut first_err: Option<String> = None;
+    let mut acc: Option<SubStatus> = None;
     for spec in hw.enable(&pci) {
-        let (success, msg) = run_cmd(&spec.command, &spec.args, sink)?;
-        if !success {
-            ok = false;
-            first_err.get_or_insert(msg);
-        }
+        acc = Some(SubStatus::fold(acc, run_into(sub, &spec)?));
     }
-    finish(sink, ok, first_err)
-}
-
-fn finish(sink: &mut dyn EventSink, ok: bool, err: Option<String>) -> io::Result<()> {
-    sink.emit(TaskEvent::Finished {
-        exit: if ok { 0 } else { 1 },
-        ok,
-        error: (!ok).then(|| err.unwrap_or_else(|| "RoCE enable failed".into())),
-    })
+    Ok(acc.unwrap_or(SubStatus::Success))
 }
 
 #[cfg(test)]

@@ -7,10 +7,10 @@
 //! listener is asserted by writing `rdma <port>` to `/proc/fs/nfsd/portlist`
 //! (idempotent, root-only), mirroring how `nvmet::apply` writes configfs.
 
-use crate::cmd::{EventSink, run_cmd};
-use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, TaskEvent};
+use crate::cmd::{TaskSpec, run_into};
+use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, SubStatus, SubTask};
 use std::collections::BTreeSet;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command;
 
@@ -121,119 +121,95 @@ fn s(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|p| p.to_string()).collect()
 }
 
-/// Applies `desired`, streaming progress as task events. Returns `Err` only when
-/// the sink fails; operation failures are reported via `Finished { ok: false }`
-/// (which the web turns into the export's `last_error` and a red dot).
+/// Applies `desired` into the caller-opened subtask: each `exportfs`/`systemctl`
+/// command streams as a `$ …` echo + output, and their statuses fold into the
+/// returned subtask status. `Err` only when the sink fails; operation failures
+/// come back as `Failed` (which the web turns into the export's `last_error` and
+/// a red dot).
 pub fn apply(
     desired: &NfsDesired,
     exports_file: &Path,
     portlist: &Path,
-    sink: &mut dyn EventSink,
-) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "nfs".into(),
-        args: vec!["apply".into()],
-        stdin: None,
-    })?;
-
+    sub: &mut SubTask,
+) -> io::Result<SubStatus> {
     let previous = read_managed(exports_file);
     let want = desired_pairs(desired);
-    let mut ok = true;
-    let mut first_err: Option<String> = None;
-    let note = |ok: &mut bool, first: &mut Option<String>, success: bool, msg: String| {
-        if !success {
-            *ok = false;
-            first.get_or_insert(msg);
-        }
-    };
+    let mut acc: Option<SubStatus> = None;
 
     // 1. Persist our file (or remove it when nothing is desired).
     if desired.exports.is_empty() {
         if let Err(e) = std::fs::remove_file(exports_file)
             && e.kind() != io::ErrorKind::NotFound
         {
-            return finish(
-                sink,
-                false,
-                Some(format!("removing {}: {e}", exports_file.display())),
-            );
+            let msg = format!("removing {}: {e}", exports_file.display());
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(1, Some(msg));
+            return Ok(SubStatus::Failed);
         }
     } else if let Err(e) = write_exports_file(exports_file, desired) {
-        return finish(
-            sink,
-            false,
-            Some(format!("writing {}: {e}", exports_file.display())),
-        );
+        let msg = format!("writing {}: {e}", exports_file.display());
+        writeln!(sub.stderr(), "{msg}")?;
+        sub.set_result(1, Some(msg));
+        return Ok(SubStatus::Failed);
     }
 
     // 2. Unexport our previously-managed pairs that are no longer desired.
     for (client, path) in &previous {
         if !want.contains(&(client.clone(), path.clone())) {
-            let (success, msg) =
-                run_cmd("exportfs", &s(&["-u", &format!("{client}:{path}")]), sink)?;
-            note(&mut ok, &mut first_err, success, msg);
+            let spec = TaskSpec::new("exportfs", s(&["-u", &format!("{client}:{path}")]));
+            acc = Some(SubStatus::fold(acc, run_into(sub, &spec)?));
         }
     }
 
     if desired.exports.is_empty() {
-        sink.emit(TaskEvent::Stdout {
-            data: "no NFS exports desired; removed greendot exports\n".into(),
-        })?;
-        return finish(sink, ok, first_err);
+        writeln!(
+            sub.stdout(),
+            "no NFS exports desired; removed greendot exports"
+        )?;
+        return Ok(acc.unwrap_or(SubStatus::Success));
     }
 
     // 3. Ensure nfsd is up (so /proc/fs/nfsd exists and exportfs can register).
     // `start`, not `enable --now`: the Ubuntu nfs-kernel-server package already
     // enables the unit at install, and `enable` fails on a read-only /etc.
-    let (success, msg) = run_cmd("systemctl", &s(&["start", "nfs-server"]), sink)?;
-    note(&mut ok, &mut first_err, success, msg);
+    let spec = TaskSpec::new("systemctl", s(&["start", "nfs-server"]));
+    acc = Some(SubStatus::fold(acc, run_into(sub, &spec)?));
 
     // 4. Assert the RDMA listener (the "must be through RDMA" half).
     match ensure_portlist_rdma(portlist, desired.rdma_port) {
-        Ok(added) => sink.emit(TaskEvent::Stdout {
-            data: format!(
-                "NFSoRDMA listener on port {} {}\n",
-                desired.rdma_port,
-                if added { "enabled" } else { "already active" }
-            ),
-        })?,
+        Ok(added) => writeln!(
+            sub.stdout(),
+            "NFSoRDMA listener on port {} {}",
+            desired.rdma_port,
+            if added { "enabled" } else { "already active" }
+        )?,
         Err(e) => {
             let msg = format!(
                 "enabling NFSoRDMA listener on port {}: {e}",
                 desired.rdma_port
             );
-            note(&mut ok, &mut first_err, false, msg.clone());
-            sink.emit(TaskEvent::Stderr {
-                data: format!("{msg}\n"),
-            })?;
+            writeln!(sub.stderr(), "{msg}")?;
+            sub.set_result(1, Some(msg));
+            acc = Some(SubStatus::fold(acc, SubStatus::Failed));
         }
     }
 
     // 5. Add / update each desired export, one client:path at a time.
-    for spec in &desired.exports {
-        for c in &spec.clients {
-            let (success, msg) = run_cmd(
+    for exp in &desired.exports {
+        for c in &exp.clients {
+            let spec = TaskSpec::new(
                 "exportfs",
-                &s(&[
+                s(&[
                     "-o",
-                    &opts(c.rw, spec.fsid),
-                    &format!("{}:{}", c.client, spec.path),
+                    &opts(c.rw, exp.fsid),
+                    &format!("{}:{}", c.client, exp.path),
                 ]),
-                sink,
-            )?;
-            note(&mut ok, &mut first_err, success, msg);
+            );
+            acc = Some(SubStatus::fold(acc, run_into(sub, &spec)?));
         }
     }
 
-    finish(sink, ok, first_err)
-}
-
-fn finish(sink: &mut dyn EventSink, ok: bool, err: Option<String>) -> io::Result<()> {
-    sink.emit(TaskEvent::Finished {
-        exit: if ok { 0 } else { 1 },
-        ok,
-        error: (!ok).then(|| err.unwrap_or_else(|| "NFS apply failed".into())),
-    })
+    Ok(acc.unwrap_or(SubStatus::Success))
 }
 
 /// Reads NFS actual state (a privileged read): the live export table
@@ -244,13 +220,8 @@ fn finish(sink: &mut dyn EventSink, ok: bool, err: Option<String>) -> io::Result
 pub fn report_into(
     portlist: &Path,
     exports_file: &Path,
-    sink: &mut dyn EventSink,
-) -> io::Result<()> {
-    sink.emit(TaskEvent::Started {
-        command: "nfs".into(),
-        args: vec!["report".into()],
-        stdin: None,
-    })?;
+    sub: &mut SubTask,
+) -> io::Result<SubStatus> {
     let exports = Command::new("exportfs")
         .arg("-s")
         .output()
@@ -258,22 +229,18 @@ pub fn report_into(
         .unwrap_or_default();
     let portlist = std::fs::read_to_string(portlist).unwrap_or_default();
     let managed = std::fs::read_to_string(exports_file).unwrap_or_default();
-    sink.emit(TaskEvent::Stdout {
-        data: format!(
-            "{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}"
-        ),
-    })?;
-    sink.emit(TaskEvent::Finished {
-        exit: 0,
-        ok: true,
-        error: None,
-    })
+    write!(
+        sub.stdout(),
+        "{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}"
+    )?;
+    Ok(SubStatus::Success)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use greendot_proto::{NfsClient, NfsClientSpec, NfsExportPath, NfsExportSpec};
+    use crate::cmd::test::Collector;
+    use greendot_proto::{NfsClient, NfsClientSpec, NfsExportPath, NfsExportSpec, Task};
 
     fn export(path: &str, fsid: u32, clients: &[(&str, bool)]) -> NfsExportSpec {
         NfsExportSpec {
@@ -289,23 +256,16 @@ mod tests {
         }
     }
 
-    #[derive(Default)]
-    struct Sink {
-        events: Vec<TaskEvent>,
-    }
-    impl EventSink for Sink {
-        fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {
-            self.events.push(ev);
-            Ok(())
-        }
-    }
-    impl Sink {
-        fn finished_ok(&self) -> Option<bool> {
-            self.events.iter().rev().find_map(|e| match e {
-                TaskEvent::Finished { ok, .. } => Some(*ok),
-                _ => None,
-            })
-        }
+    /// Applies `desired` through a one-subtask task and returns the folded
+    /// subtask status.
+    fn apply_status(desired: &NfsDesired, file: &Path, pl: &Path) -> SubStatus {
+        let mut c = Collector::default();
+        let mut task = Task::new(&mut c);
+        let mut sub = task.begin_subtask("Apply NFS configuration");
+        let status = apply(desired, file, pl, &mut sub).unwrap();
+        sub.complete(status);
+        task.complete().unwrap();
+        status
     }
 
     #[test]
@@ -384,13 +344,11 @@ mod tests {
                 &[("192.168.101.0/24", true)],
             )],
         };
-        // systemctl/exportfs are absent in CI → overall ok is false, but the
+        // systemctl/exportfs are absent in CI → overall status is Failed, but the
         // file + portlist side effects (which don't depend on them) still happen.
-        let mut sink = Sink::default();
-        apply(&desired, &file, &pl, &mut sink).unwrap();
         assert_eq!(
-            sink.finished_ok(),
-            Some(false),
+            apply_status(&desired, &file, &pl),
+            SubStatus::Failed,
             "missing exportfs/systemctl"
         );
         assert_eq!(
@@ -407,7 +365,7 @@ mod tests {
             rdma_port: 20049,
             exports: vec![],
         };
-        apply(&empty, &file, &pl, &mut Sink::default()).unwrap();
+        apply_status(&empty, &file, &pl);
         assert!(!file.exists(), "teardown removes the exports file");
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 /// the shared `greendot-reconcile` crate so a standalone `greendotctl reconcile`
 /// shares them. Re-exported so existing `crate::state::*` paths keep working; the
 /// SQLite-backed `Db` (task history + the sole config writer) stays here.
-pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX, SubStatus};
 pub use greendot_reconcile::state::{
     Desired, IscsiExport, NfsClientEntry, NfsExport, NvmeExport, parse_listen_iface, read_desired,
 };
@@ -117,6 +117,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     stdin TEXT,
     stdout TEXT NOT NULL DEFAULT '',
     stderr TEXT NOT NULL DEFAULT '',
+    subtasks TEXT NOT NULL DEFAULT '[]',
     status TEXT NOT NULL,
     exit_code INTEGER,
     error TEXT,
@@ -145,6 +146,33 @@ impl TaskStatus {
     }
 }
 
+/// One recorded step of a task: its own label, optional single-process header
+/// (`command`/`args`/`stdin`, set only for command subtasks), captured output,
+/// and terminal status. Persisted as a JSON array in the `tasks.subtasks` column
+/// (mirroring the `args` JSON-column precedent). All fields `#[serde(default)]`
+/// so the shape can grow without breaking stored history.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SubTaskRecord {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub stdin: Option<String>,
+    #[serde(default)]
+    pub stdout: String,
+    #[serde(default)]
+    pub stderr: String,
+    #[serde(default)]
+    pub status: Option<SubStatus>,
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {
     pub id: i64,
@@ -155,6 +183,9 @@ pub struct Task {
     pub stdin: Option<String>,
     pub stdout: String,
     pub stderr: String,
+    /// The task's steps. Always ≥1 for rendering — an old flat row (before the
+    /// subtasks column) degrades to a single synthesized `"output"` subtask.
+    pub subtasks: Vec<SubTaskRecord>,
     pub status: TaskStatus,
     pub exit_code: Option<i64>,
     pub error: Option<String>,
@@ -187,6 +218,7 @@ impl Db {
             .with_context(|| format!("opening {}", tasks_db.display()))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.execute_batch(SCHEMA)?;
+        ensure_subtasks_column(&conn)?;
         let db = Db {
             conn: Mutex::new(conn),
             config: Mutex::new(load_config(state_path)?),
@@ -202,6 +234,7 @@ impl Db {
     pub fn in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch(SCHEMA)?;
+        ensure_subtasks_column(&conn)?;
         Ok(Db {
             conn: Mutex::new(conn),
             config: Mutex::new(ConfigDoc::default()),
@@ -490,18 +523,21 @@ impl Db {
         error: Option<&str>,
         stdout: &str,
         stderr: &str,
+        subtasks: &[SubTaskRecord],
         finished_at: i64,
     ) -> Result<()> {
+        let subtasks = serde_json::to_string(subtasks).unwrap_or_else(|_| "[]".into());
         let conn = self.conn.lock().unwrap();
         conn.execute(
             "UPDATE tasks SET status = ?1, exit_code = ?2, error = ?3, stdout = ?4, stderr = ?5,
-                              finished_at = ?6 WHERE id = ?7",
+                              subtasks = ?6, finished_at = ?7 WHERE id = ?8",
             rusqlite::params![
                 status.as_str(),
                 exit_code,
                 error,
                 stdout,
                 stderr,
+                subtasks,
                 finished_at,
                 id
             ],
@@ -531,6 +567,25 @@ impl Db {
     }
 }
 
+/// Adds the `subtasks` JSON column to an existing `tasks` table if it is missing
+/// (there is no migration framework). Idempotent — safe to call on every open, so
+/// both `Db::open` and `Db::in_memory` run it before any read.
+fn ensure_subtasks_column(conn: &Connection) -> Result<()> {
+    let present = conn
+        .prepare("PRAGMA table_info(tasks)")?
+        .query_map([], |row| row.get::<_, String>("name"))?
+        .collect::<rusqlite::Result<Vec<_>>>()?
+        .iter()
+        .any(|name| name == "subtasks");
+    if !present {
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN subtasks TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     let status = match row.get::<_, String>("status")?.as_str() {
         "success" => TaskStatus::Success,
@@ -539,15 +594,46 @@ fn row_to_task(row: &rusqlite::Row) -> rusqlite::Result<Task> {
     };
     let args: Vec<String> =
         serde_json::from_str(&row.get::<_, String>("args")?).unwrap_or_default();
+    let command: String = row.get("command")?;
+    let stdout: String = row.get("stdout")?;
+    let stderr: String = row.get("stderr")?;
+    let mut subtasks: Vec<SubTaskRecord> =
+        serde_json::from_str(&row.get::<_, String>("subtasks")?).unwrap_or_default();
+    // A pre-migration *finished* row (empty subtasks, flat output) degrades to a
+    // single synthesized "output" subtask so its output still renders. A running
+    // row is left with no subtasks — its live SSE stream creates the real ones,
+    // which would otherwise be shadowed by a stale synthetic block.
+    if subtasks.is_empty() && status != TaskStatus::Running {
+        subtasks.push(SubTaskRecord {
+            name: if command.is_empty() {
+                "output".into()
+            } else {
+                command.clone()
+            },
+            command: (!command.is_empty()).then(|| command.clone()),
+            args: args.clone(),
+            stdin: row.get("stdin")?,
+            stdout: stdout.clone(),
+            stderr: stderr.clone(),
+            status: match status {
+                TaskStatus::Success => Some(SubStatus::Success),
+                TaskStatus::Failed => Some(SubStatus::Failed),
+                TaskStatus::Running => None,
+            },
+            exit_code: row.get("exit_code")?,
+            error: row.get("error")?,
+        });
+    }
     Ok(Task {
         id: row.get("id")?,
         kind: row.get("kind")?,
         title: row.get("title")?,
-        command: row.get("command")?,
+        command,
         args,
         stdin: row.get("stdin")?,
-        stdout: row.get("stdout")?,
-        stderr: row.get("stderr")?,
+        stdout,
+        stderr,
+        subtasks,
         status,
         exit_code: row.get("exit_code")?,
         error: row.get("error")?,
@@ -668,14 +754,36 @@ mod tests {
         assert_eq!(t.args, ["create", "tank/vm1"]);
         assert_eq!(t.exit_code, None);
 
-        db.finish_task(id, TaskStatus::Success, Some(0), None, "done\n", "", 120)
-            .unwrap();
+        let subs = [SubTaskRecord {
+            name: "create zvol".into(),
+            command: Some("zfs".into()),
+            args: vec!["create".into(), "tank/vm1".into()],
+            stdout: "done\n".into(),
+            status: Some(SubStatus::Success),
+            exit_code: Some(0),
+            ..Default::default()
+        }];
+        db.finish_task(
+            id,
+            TaskStatus::Success,
+            Some(0),
+            None,
+            "done\n",
+            "",
+            &subs,
+            120,
+        )
+        .unwrap();
         let t = db.get_task(id).unwrap().unwrap();
         assert_eq!(
             (t.status, t.exit_code, t.stdout.as_str()),
             (TaskStatus::Success, Some(0), "done\n")
         );
         assert_eq!(t.finished_at, Some(120));
+        // Subtasks round-trip through the JSON column.
+        assert_eq!(t.subtasks.len(), 1);
+        assert_eq!(t.subtasks[0].status, Some(SubStatus::Success));
+        assert_eq!(t.subtasks[0].command.as_deref(), Some("zfs"));
 
         // A failed task with an error message.
         let id2 = db.insert_task("install", "install nvme-cli", 130).unwrap();
@@ -686,12 +794,19 @@ mod tests {
             Some("not installed"),
             "",
             "boom\n",
+            &[],
             131,
         )
         .unwrap();
         let t2 = db.get_task(id2).unwrap().unwrap();
         assert_eq!(t2.status, TaskStatus::Failed);
         assert_eq!(t2.error.as_deref(), Some("not installed"));
+        // An empty subtasks column (this call passed `&[]`, like a pre-migration
+        // row) degrades to one synthesized subtask carrying the flat output.
+        assert_eq!(t2.subtasks.len(), 1);
+        assert_eq!(t2.subtasks[0].name, "output");
+        assert_eq!(t2.subtasks[0].stderr, "boom\n");
+        assert_eq!(t2.subtasks[0].status, Some(SubStatus::Failed));
 
         // Newest-first listing.
         let list = db.list_tasks(10).unwrap();
@@ -700,8 +815,17 @@ mod tests {
         // Retention prunes to the most recent TASK_RETENTION on finish.
         for i in 0..(TASK_RETENTION + 10) {
             let tid = db.insert_task("noop", "noop", 200 + i).unwrap();
-            db.finish_task(tid, TaskStatus::Success, Some(0), None, "", "", 200 + i)
-                .unwrap();
+            db.finish_task(
+                tid,
+                TaskStatus::Success,
+                Some(0),
+                None,
+                "",
+                "",
+                &[],
+                200 + i,
+            )
+            .unwrap();
         }
         assert_eq!(db.list_tasks(10_000).unwrap().len() as i64, TASK_RETENTION);
         assert!(db.get_task(id).unwrap().is_none(), "oldest task pruned");

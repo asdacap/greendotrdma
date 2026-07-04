@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use greendot_proto::pb::helper_client::HelperClient as GrpcClient;
-use greendot_proto::{Request, Response, TaskEvent, pb};
+use greendot_proto::{Request, Response, SubStatus, TaskEvent, pb};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
@@ -27,8 +27,7 @@ pub struct HelperOutput {
 /// consumer of [`HelperClient::run_task`] always sees a `Finished`.
 fn transport_failure(msg: String) -> TaskEvent {
     TaskEvent::Finished {
-        exit: -1,
-        ok: false,
+        status: SubStatus::Failed,
         error: Some(msg),
     }
 }
@@ -61,12 +60,12 @@ impl HelperClient {
             match ev {
                 TaskEvent::Stdout { data } => out.stdout.push_str(&data),
                 TaskEvent::Stderr { data } => out.stderr.push_str(&data),
-                TaskEvent::Finished { ok, error, .. } => {
-                    out.ok = ok;
+                TaskEvent::Finished { status, error } => {
+                    out.ok = status != SubStatus::Failed;
                     out.error = error;
                     break;
                 }
-                TaskEvent::Started { .. } => {}
+                TaskEvent::SubtaskStarted { .. } | TaskEvent::SubtaskFinished { .. } => {}
             }
         }
         out

@@ -16,8 +16,8 @@ use crate::{
     LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvName, LvmReport, MountPath, MountPoint,
     NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn,
     NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName, PartLabel, PoolName,
-    Request, Response, Secret, SnapName, TaskEvent, Transport, Username, ValidationError,
-    VdevLayout, VgName,
+    Request, Response, Secret, SnapName, SubStatus, TaskEvent, Transport, Username,
+    ValidationError, VdevLayout, VgName,
 };
 use std::net::IpAddr;
 
@@ -963,24 +963,61 @@ impl TryFrom<pb::Response> for Response {
 
 // ---- TaskEvent ----
 
+impl From<SubStatus> for pb::SubStatus {
+    fn from(s: SubStatus) -> Self {
+        match s {
+            SubStatus::Success => pb::SubStatus::Success,
+            SubStatus::Failed => pb::SubStatus::Failed,
+            SubStatus::Skipped => pb::SubStatus::Skipped,
+        }
+    }
+}
+impl TryFrom<i32> for SubStatus {
+    type Error = ConvertError;
+    fn try_from(i: i32) -> Result<Self, ConvertError> {
+        let p = pb::SubStatus::try_from(i)
+            .map_err(|_| ConvertError(format!("unknown sub status {i}")))?;
+        Ok(match p {
+            pb::SubStatus::Success => SubStatus::Success,
+            pb::SubStatus::Failed => SubStatus::Failed,
+            pb::SubStatus::Skipped => SubStatus::Skipped,
+            pb::SubStatus::Unspecified => {
+                return Err(ConvertError("unspecified sub status".into()));
+            }
+        })
+    }
+}
+
 impl From<TaskEvent> for pb::TaskEvent {
     fn from(ev: TaskEvent) -> Self {
         use pb::task_event::Event;
         let event = match ev {
-            TaskEvent::Started {
+            TaskEvent::SubtaskStarted {
+                name,
                 command,
                 args,
                 stdin,
-            } => Event::Started(pb::Started {
+            } => Event::SubtaskStarted(pb::SubtaskStarted {
+                name,
                 command,
                 args,
                 stdin,
             }),
             TaskEvent::Stdout { data } => Event::Stdout(pb::Output { data }),
             TaskEvent::Stderr { data } => Event::Stderr(pb::Output { data }),
-            TaskEvent::Finished { exit, ok, error } => {
-                Event::Finished(pb::Finished { exit, ok, error })
-            }
+            TaskEvent::SubtaskFinished {
+                status,
+                exit,
+                error,
+            } => Event::SubtaskFinished(pb::SubtaskFinished {
+                status: pb::SubStatus::from(status) as i32,
+                exit,
+                error,
+            }),
+            TaskEvent::Finished { status, error } => Event::Finished(pb::Finished {
+                status: pb::SubStatus::from(status) as i32,
+                error,
+            }),
         };
         pb::TaskEvent { event: Some(event) }
     }
@@ -994,16 +1031,21 @@ impl TryFrom<pb::TaskEvent> for TaskEvent {
             .event
             .ok_or_else(|| ConvertError("task event has no event set".into()))?;
         Ok(match event {
-            Event::Started(s) => TaskEvent::Started {
+            Event::SubtaskStarted(s) => TaskEvent::SubtaskStarted {
+                name: s.name,
                 command: s.command,
                 args: s.args,
                 stdin: s.stdin,
             },
             Event::Stdout(o) => TaskEvent::Stdout { data: o.data },
             Event::Stderr(o) => TaskEvent::Stderr { data: o.data },
-            Event::Finished(f) => TaskEvent::Finished {
+            Event::SubtaskFinished(f) => TaskEvent::SubtaskFinished {
+                status: SubStatus::try_from(f.status)?,
                 exit: f.exit,
-                ok: f.ok,
+                error: f.error,
+            },
+            Event::Finished(f) => TaskEvent::Finished {
+                status: SubStatus::try_from(f.status)?,
                 error: f.error,
             },
         })
@@ -1147,21 +1189,41 @@ mod tests {
             assert_eq!(Response::try_from(decoded).unwrap(), resp);
         }
         for ev in [
-            TaskEvent::Started {
-                command: "zfs".into(),
+            TaskEvent::SubtaskStarted {
+                name: "Create zvol".into(),
+                command: Some("zfs".into()),
                 args: vec!["create".into()],
                 stdin: Some("x".into()),
             },
+            TaskEvent::SubtaskStarted {
+                name: "Load kernel modules".into(),
+                command: None,
+                args: vec![],
+                stdin: None,
+            },
             TaskEvent::Stdout { data: "out".into() },
             TaskEvent::Stderr { data: "err".into() },
-            TaskEvent::Finished {
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Success,
                 exit: 0,
-                ok: true,
+                error: None,
+            },
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Failed,
+                exit: 1,
+                error: Some("boom".into()),
+            },
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Skipped,
+                exit: 0,
                 error: None,
             },
             TaskEvent::Finished {
-                exit: 1,
-                ok: false,
+                status: SubStatus::Success,
+                error: None,
+            },
+            TaskEvent::Finished {
+                status: SubStatus::Failed,
                 error: Some("boom".into()),
             },
         ] {
@@ -1169,6 +1231,21 @@ mod tests {
                 pb::TaskEvent::decode(pb::TaskEvent::from(ev.clone()).encode_to_vec().as_slice())
                     .unwrap();
             assert_eq!(TaskEvent::try_from(decoded).unwrap(), ev);
+        }
+        // A `SubStatus` of 0 (UNSPECIFIED) is rejected on ingress, mirroring the
+        // other enum-ingress checks — an unset status must not decode as Success.
+        for bad in [
+            pb::task_event::Event::SubtaskFinished(pb::SubtaskFinished {
+                status: 0,
+                exit: 0,
+                error: None,
+            }),
+            pb::task_event::Event::Finished(pb::Finished {
+                status: 0,
+                error: None,
+            }),
+        ] {
+            assert!(TaskEvent::try_from(pb::TaskEvent { event: Some(bad) }).is_err());
         }
     }
 

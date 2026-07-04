@@ -289,6 +289,240 @@ pub trait EventSink {
     fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()>;
 }
 
+/// A typed handle over an [`EventSink`] that structures a run as a task of one
+/// or more sequential [`SubTask`]s, each with its own recorded output and
+/// terminal [`SubStatus`]. This is a thin layer *on top of* `emit(TaskEvent)` —
+/// the sink stays the transport; `Task`/`SubTask`/`Pipe` just guarantee the
+/// framing invariants (every task ends with exactly one `Finished` whose status
+/// is the worst child; output attributes to the open subtask).
+///
+/// ```ignore
+/// let mut task = Task::new(sink);
+/// let mut sub = task.begin_subtask("Load kernel modules");
+/// writeln!(sub.stdout(), "$ modprobe nvmet_rdma")?;
+/// sub.complete(SubStatus::Success);
+/// task.complete()?;
+/// ```
+///
+/// The mutable borrow taken by `begin_*` *is* the sequential guarantee: the
+/// previous subtask must drop (finish) before the next one can open.
+pub struct Task<'s> {
+    sink: &'s mut dyn EventSink,
+    /// Folded status of every finished subtask so far (`None` until the first).
+    agg: Option<SubStatus>,
+    /// First failing subtask's error message — becomes the task-level `error`.
+    first_err: Option<String>,
+    /// A sink error captured on a path that can't return `io::Result`
+    /// (`begin_*`, subtask `Drop`); surfaced by the next `Pipe::write` /
+    /// `complete`, preserving "stop streaming the instant the client hangs up".
+    pending: Option<std::io::Error>,
+}
+
+impl<'s> Task<'s> {
+    pub fn new(sink: &'s mut dyn EventSink) -> Self {
+        Task {
+            sink,
+            agg: None,
+            first_err: None,
+            pending: None,
+        }
+    }
+
+    /// Open a plain subtask (a human label, no command header). Output written
+    /// to its pipes belongs to it until it finishes.
+    pub fn begin_subtask(&mut self, name: impl Into<String>) -> SubTask<'_, 's> {
+        self.emit_soft(TaskEvent::SubtaskStarted {
+            name: name.into(),
+            command: None,
+            args: Vec::new(),
+            stdin: None,
+        });
+        SubTask::new(self)
+    }
+
+    /// Open a subtask that wraps a single process, carrying the `$ cmd` header
+    /// fields (`command`/`args`/`stdin`).
+    pub fn begin_command(
+        &mut self,
+        name: impl Into<String>,
+        command: impl Into<String>,
+        args: Vec<String>,
+        stdin: Option<String>,
+    ) -> SubTask<'_, 's> {
+        self.emit_soft(TaskEvent::SubtaskStarted {
+            name: name.into(),
+            command: Some(command.into()),
+            args,
+            stdin,
+        });
+        SubTask::new(self)
+    }
+
+    /// Record an already-satisfied step as a grey `Skipped` dot (opened and
+    /// closed with no output).
+    pub fn skipped_subtask(&mut self, name: impl Into<String>) {
+        self.emit_soft(TaskEvent::SubtaskStarted {
+            name: name.into(),
+            command: None,
+            args: Vec::new(),
+            stdin: None,
+        });
+        self.finish_subtask(SubStatus::Skipped, 0, None);
+    }
+
+    /// The worst subtask status seen so far (`Success` if no subtask ran).
+    pub fn aggregate(&self) -> SubStatus {
+        self.agg.unwrap_or(SubStatus::Success)
+    }
+
+    /// Emit the single terminal `Finished` (status = worst child, error = first
+    /// failing subtask's message), consuming the task. Surfaces any deferred
+    /// sink error first.
+    pub fn complete(mut self) -> std::io::Result<()> {
+        let status = self.aggregate();
+        let error = self.first_err.take();
+        self.take_pending()?;
+        self.emit(TaskEvent::Finished { status, error })
+    }
+
+    /// Close the current subtask: fold its status, remember the first error, and
+    /// emit `SubtaskFinished`. Called by `SubTask::complete`/`fail`/`Drop` and by
+    /// `skipped_subtask`.
+    fn finish_subtask(&mut self, status: SubStatus, exit: i32, error: Option<String>) {
+        self.agg = Some(SubStatus::fold(self.agg, status));
+        if status == SubStatus::Failed && self.first_err.is_none() {
+            self.first_err = error.clone();
+        }
+        self.emit_soft(TaskEvent::SubtaskFinished {
+            status,
+            exit,
+            error,
+        });
+    }
+
+    /// Hard emit — the error propagates to the caller (via `Pipe::write`/
+    /// `complete`).
+    fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()> {
+        self.sink.emit(ev)
+    }
+
+    /// Soft emit — used where we can't return `io::Result`. The first sink error
+    /// is stashed in `pending`; later frames are skipped (client is gone).
+    fn emit_soft(&mut self, ev: TaskEvent) {
+        if self.pending.is_none()
+            && let Err(e) = self.sink.emit(ev)
+        {
+            self.pending = Some(e);
+        }
+    }
+
+    fn take_pending(&mut self) -> std::io::Result<()> {
+        match self.pending.take() {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+}
+
+/// A single step of a [`Task`], holding a mutable borrow of it (so the next
+/// subtask can't open until this one finishes). Its `stdout()`/`stderr()` pipes
+/// stream output attributed to this subtask. Failures are reported via
+/// `complete(Failed)`/`fail(...)` — never via `?` (a `?` fires only on a sink
+/// error, i.e. the client is gone, where the terminal status is moot). `Drop`
+/// auto-completes as `Success`.
+pub struct SubTask<'t, 's> {
+    task: &'t mut Task<'s>,
+    exit: i32,
+    error: Option<String>,
+    done: bool,
+}
+
+impl<'t, 's> SubTask<'t, 's> {
+    fn new(task: &'t mut Task<'s>) -> Self {
+        SubTask {
+            task,
+            exit: 0,
+            error: None,
+            done: false,
+        }
+    }
+
+    /// A writer whose every `write` emits one `Stdout` event for this subtask.
+    pub fn stdout(&mut self) -> Pipe<'_, 's> {
+        Pipe {
+            task: self.task,
+            stderr: false,
+        }
+    }
+
+    /// A writer whose every `write` emits one `Stderr` event for this subtask.
+    pub fn stderr(&mut self) -> Pipe<'_, 's> {
+        Pipe {
+            task: self.task,
+            stderr: true,
+        }
+    }
+
+    /// Record the wrapped process's exit code and (optional) error message, to be
+    /// carried on this subtask's `SubtaskFinished`.
+    pub fn set_result(&mut self, exit: i32, error: Option<String>) {
+        self.exit = exit;
+        self.error = error;
+    }
+
+    /// Finish this subtask with an explicit status.
+    pub fn complete(mut self, status: SubStatus) {
+        self.finish(status);
+    }
+
+    /// Finish this subtask as `Failed` with a human message.
+    pub fn fail(mut self, msg: impl Into<String>) {
+        self.error = Some(msg.into());
+        self.finish(SubStatus::Failed);
+    }
+
+    fn finish(&mut self, status: SubStatus) {
+        if self.done {
+            return;
+        }
+        self.done = true;
+        let error = self.error.take();
+        self.task.finish_subtask(status, self.exit, error);
+    }
+}
+
+impl Drop for SubTask<'_, '_> {
+    fn drop(&mut self) {
+        self.finish(SubStatus::Success);
+    }
+}
+
+/// An `io::Write` that turns each `write` into one `Stdout`/`Stderr` event on the
+/// underlying task (no buffering; `flush` is a no-op). Deferred sink errors
+/// surface here so streaming stops the instant the client hangs up.
+pub struct Pipe<'p, 's> {
+    task: &'p mut Task<'s>,
+    stderr: bool,
+}
+
+impl std::io::Write for Pipe<'_, '_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.task.take_pending()?;
+        let data = String::from_utf8_lossy(buf).into_owned();
+        let ev = if self.stderr {
+            TaskEvent::Stderr { data }
+        } else {
+            TaskEvent::Stdout { data }
+        };
+        self.task.emit(ev)?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ErrKind {
@@ -456,10 +690,17 @@ mod tests {
     #[test]
     fn task_events_roundtrip() {
         for ev in [
-            TaskEvent::Started {
-                command: "configfs".into(),
+            TaskEvent::SubtaskStarted {
+                name: "Apply NVMe-oF".into(),
+                command: Some("configfs".into()),
                 args: vec!["nvmet".into(), "apply".into()],
                 stdin: Some("{}".into()),
+            },
+            TaskEvent::SubtaskStarted {
+                name: "Load kernel modules".into(),
+                command: None,
+                args: vec![],
+                stdin: None,
             },
             TaskEvent::Stdout {
                 data: "hello\n".into(),
@@ -467,15 +708,47 @@ mod tests {
             TaskEvent::Stderr {
                 data: "warn\n".into(),
             },
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Failed,
+                exit: 1,
+                error: Some("boom".into()),
+            },
             TaskEvent::Finished {
-                exit: 0,
-                ok: true,
+                status: SubStatus::Success,
                 error: None,
             },
         ] {
             let json = serde_json::to_string(&ev).unwrap();
             assert_eq!(serde_json::from_str::<TaskEvent>(&json).unwrap(), ev);
         }
+        // Serde tags are the wire contract the JSONL reconcile stream relies on.
+        assert_eq!(
+            serde_json::to_string(&TaskEvent::Finished {
+                status: SubStatus::Skipped,
+                error: None,
+            })
+            .unwrap(),
+            r#"{"ev":"finished","status":"skipped","error":null}"#
+        );
+    }
+
+    #[rstest]
+    // Failed dominates regardless of order or accumulator.
+    #[case(None, SubStatus::Failed, SubStatus::Failed)]
+    #[case(Some(SubStatus::Success), SubStatus::Failed, SubStatus::Failed)]
+    #[case(Some(SubStatus::Failed), SubStatus::Success, SubStatus::Failed)]
+    // Success beats Skipped in both directions (not a plain max).
+    #[case(Some(SubStatus::Skipped), SubStatus::Success, SubStatus::Success)]
+    #[case(Some(SubStatus::Success), SubStatus::Skipped, SubStatus::Success)]
+    // All-skipped stays skipped.
+    #[case(None, SubStatus::Skipped, SubStatus::Skipped)]
+    #[case(Some(SubStatus::Skipped), SubStatus::Skipped, SubStatus::Skipped)]
+    fn substatus_fold(
+        #[case] acc: Option<SubStatus>,
+        #[case] s: SubStatus,
+        #[case] expected: SubStatus,
+    ) {
+        assert_eq!(SubStatus::fold(acc, s), expected);
     }
 
     #[test]

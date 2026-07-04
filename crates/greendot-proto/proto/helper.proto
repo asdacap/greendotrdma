@@ -68,6 +68,13 @@ enum ErrKind {
   ERR_KIND_UNSUPPORTED = 7;
 }
 
+enum SubStatus {
+  SUB_STATUS_UNSPECIFIED = 0;
+  SUB_STATUS_SUCCESS = 1;
+  SUB_STATUS_FAILED = 2;
+  SUB_STATUS_SKIPPED = 3;
+}
+
 // ---- Desired-state documents (nested payloads). ----
 
 message NvmetDesired {
@@ -269,25 +276,33 @@ message Response {
   }
 }
 
-// ---- Task streaming (RunTask response). Terminated by exactly one Finished. ----
+// ---- Task streaming (RunTask response). A task is a sequence of subtasks,
+// each with its own recorded output and terminal status; Stdout/Stderr belong
+// to the most-recent still-open subtask. Terminated by exactly one Finished. ----
 
-message Started {
-  string command = 1;
-  repeated string args = 2;
-  optional string stdin = 3;
+message SubtaskStarted {
+  string name = 1;
+  optional string command = 2;
+  repeated string args = 3;
+  optional string stdin = 4;
 }
 message Output { string data = 1; }
-message Finished {
-  int32 exit = 1;
-  bool ok = 2;
+message SubtaskFinished {
+  SubStatus status = 1;
+  int32 exit = 2;
   optional string error = 3;
+}
+message Finished {
+  SubStatus status = 1;
+  optional string error = 2;
 }
 
 message TaskEvent {
   oneof event {
-    Started started = 1;
+    SubtaskStarted subtask_started = 1;
     Output stdout = 2;
     Output stderr = 3;
-    Finished finished = 4;
+    SubtaskFinished subtask_finished = 4;
+    Finished finished = 5;
   }
 }

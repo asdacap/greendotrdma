@@ -6,7 +6,7 @@
 
 use greendot_proto::pb;
 use greendot_proto::pb::helper_client::HelperClient;
-use greendot_proto::{DatasetName, KernelModule, Request, Response, TaskEvent};
+use greendot_proto::{DatasetName, KernelModule, Request, Response, SubStatus, TaskEvent};
 use std::path::PathBuf;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -82,18 +82,19 @@ async fn ping_streamed_task_oneshot_and_validation() {
         }),
     )
     .await;
-    assert!(matches!(events.first(), Some(TaskEvent::Started { command, .. }) if command == "zfs"));
+    assert!(
+        matches!(events.first(), Some(TaskEvent::SubtaskStarted { command: Some(cmd), .. }) if cmd == "zfs")
+    );
     match events.last() {
         Some(TaskEvent::Finished {
-            ok: false,
+            status: SubStatus::Failed,
             error: Some(msg),
-            ..
         }) => assert!(msg.contains("zfs is not installed"), "{msg}"),
         other => panic!("expected Finished with install hint, got {other:?}"),
     }
 
     // EnsureModules with an empty set is a one-shot Ok: over RunTask it becomes a
-    // terminal successful Finished (no command to run).
+    // one-subtask task ending in a successful Finished (no command to run).
     let events = run_task(
         &mut client,
         pb::Request::from(Request::EnsureModules {
@@ -103,7 +104,10 @@ async fn ping_streamed_task_oneshot_and_validation() {
     .await;
     assert!(matches!(
         events.last(),
-        Some(TaskEvent::Finished { ok: true, .. })
+        Some(TaskEvent::Finished {
+            status: SubStatus::Success,
+            ..
+        })
     ));
 
     // A request that fails validation at the proto->domain boundary is reported
@@ -117,9 +121,8 @@ async fn ping_streamed_task_oneshot_and_validation() {
     let events = run_task(&mut client, bad).await;
     match events.last() {
         Some(TaskEvent::Finished {
-            ok: false,
+            status: SubStatus::Failed,
             error: Some(msg),
-            ..
         }) => assert!(msg.contains("invalid request"), "{msg}"),
         other => panic!("expected rejected task, got {other:?}"),
     }
