@@ -3,22 +3,6 @@ use greendot_web::{auth, config, helper_client, metrics, routes, snapshots, stat
 use std::sync::Arc;
 use std::time::Duration;
 
-/// The argv the web service runs to reconcile: the sibling `greendotctl`
-/// (installed next to this binary) with the same config file, so it reads the
-/// same desired state and helper socket. Run unprivileged here, `greendotctl
-/// reconcile` finds the helper socket reachable and proxies the apply to the
-/// running daemon — exactly as the old `greendot-cli` did.
-fn reconcile_cmd(config_arg: Option<String>) -> Vec<String> {
-    let cli = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("greendotctl")))
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "greendotctl".into());
-    let mut cmd = vec![cli, "reconcile".into()];
-    cmd.extend(config_arg);
-    cmd
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
@@ -51,7 +35,9 @@ async fn main() -> Result<()> {
         lio_root: config.lio_root.clone(),
         reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
-        reconcile_cmd: reconcile_cmd(config_arg),
+        // The daemon loads the same config file for Request::Reconcile, so web
+        // and daemon render the same desired state.
+        reconcile_config: config_arg,
     });
     let app = routes::app(Arc::clone(&state));
 

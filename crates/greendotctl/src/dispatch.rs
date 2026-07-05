@@ -28,6 +28,10 @@ pub enum Dispatch {
     /// Privileged read of NFS actual state (`exportfs -s` + portlist), streamed
     /// as a task; collected by the web, never recorded.
     NfsReport,
+    /// Run the full desired-state reconcile inline (render, drift check, and
+    /// the area applies all in this process), streamed as one task with a
+    /// subtask per area. Carries the optional config TOML path.
+    Reconcile(Option<String>),
     /// Privileged read of the RoCE-capable NIC inventory (vendor classification
     /// via the `NetworkHardware` registry), streamed as JSON like `NfsReport`.
     RoceCapableNics,
@@ -90,6 +94,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
         Request::NfsApply { desired } => Dispatch::NfsApply(desired),
         Request::NfsReport => Dispatch::NfsReport,
+        Request::Reconcile { config } => Dispatch::Reconcile(config),
 
         Request::EnsureModules { modules: list } => match modules::ensure(&list) {
             Some(spec) => Dispatch::Task(spec),

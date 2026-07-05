@@ -1,27 +1,24 @@
-//! Desired-state reconciliation. Renders the full NVMe-oF/iSCSI/NFS desired
-//! state from the export list, and — only when the actual system state no longer
-//! realizes it — applies it through an [`Executor`]: an in-process root executor
-//! (greendotctl, no daemon) or a socket executor that drives the running helper.
+//! Desired-state reconciliation: renders the full NVMe-oF/iSCSI/NFS desired
+//! state from the export list, plus the `*_satisfied` drift predicates and the
+//! per-area kernel-module lists.
 //!
-//! The render/satisfied predicates are shared with greendot-web's drift
-//! pre-check (`routes::block_export::reconcile_state`), so the web and the
-//! standalone CLI render the same live input identically.
+//! Everything here is a pure render/compare — the applies run inline in
+//! greendotctl (the privileged caller: the daemon on `Request::Reconcile`, or
+//! the root-only standalone `greendotctl reconcile`). Shared with greendot-web's
+//! drift pre-check (`routes::block_export::reconcile_state`), so the web and
+//! greendotctl render the same live input identically.
 
 use crate::actual::lio::ActualLio;
 use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::ActualNvmet;
-use crate::config::Config;
 use crate::state::{IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 use greendot_proto::{
-    EventSink, KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec,
-    LioTargetSpec, NFS_RDMA_PORT, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath,
-    NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Request,
-    SubStatus, SubTask, Task, TaskEvent, Transport, pb,
+    KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
+    NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired,
+    NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Transport,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::io::Write;
 use std::net::IpAddr;
-use std::path::PathBuf;
 
 /// greendot's NFS `fsid`s are offset into a reserved high range so they don't
 /// collide with foreign numeric `fsid=`s in `/etc/exports`.
@@ -395,7 +392,7 @@ fn fmt_addr(addr: IpAddr, port: u16) -> String {
 }
 
 /// The nvmet transport modules to load for the enabled NVMe-oF exports.
-fn nvme_modules(nvme: &[NvmeExport]) -> Vec<KernelModule> {
+pub fn nvme_modules(nvme: &[NvmeExport]) -> Vec<KernelModule> {
     let mut m = Vec::new();
     let any = |f: fn(&NvmeExport) -> bool| nvme.iter().filter(|e| e.enabled).any(f);
     if any(|e| e.want_rdma) {
@@ -412,7 +409,7 @@ fn nvme_modules(nvme: &[NvmeExport]) -> Vec<KernelModule> {
 
 /// The LIO modules to load for the enabled iSCSI exports (iSER only when any
 /// requests RDMA).
-fn iscsi_modules(iscsi: &[IscsiExport]) -> Vec<KernelModule> {
+pub fn iscsi_modules(iscsi: &[IscsiExport]) -> Vec<KernelModule> {
     let mut m = Vec::new();
     let enabled: Vec<&IscsiExport> = iscsi.iter().filter(|e| e.enabled).collect();
     if !enabled.is_empty() {
@@ -424,220 +421,12 @@ fn iscsi_modules(iscsi: &[IscsiExport]) -> Vec<KernelModule> {
     m
 }
 
-/// Applies reconcile Requests and fetches the privileged NFS actual state. One
-/// impl talks to the running helper daemon over its Unix socket; another (in
-/// greendotctl, as root) calls the helper's apply functions in-process.
-pub trait Executor {
-    /// Runs one mutating apply Request (`EnsureModules`/`NvmetApply`/`LioApply`/
-    /// `NfsApply`), streaming its output **into the caller-opened subtask** `sub`
-    /// and returning the applied status. `Err` only on a transport/sink error.
-    fn apply(&self, req: Request, sub: &mut SubTask) -> std::io::Result<SubStatus>;
-
-    /// Fetches and parses the privileged NFS actual state (`Request::NfsReport`).
-    /// A failure yields an empty state (red dots) — the same graceful
-    /// degradation as elsewhere.
-    fn nfs_report(&self) -> ActualNfs;
-}
-
-/// Writes each task event as one `serde_json`-encoded line to stdout — the JSONL
-/// frame the web-spawned `greendotctl reconcile` streams back, parsed line by
-/// line by `greendot-web`. Nothing else may write stdout (tracing/panics go to
-/// stderr, out of band), or it would corrupt the frame. Flushed per line so the
-/// web sees events as they happen.
-pub struct JsonlSink;
-
-impl EventSink for JsonlSink {
-    fn emit(&mut self, ev: TaskEvent) -> std::io::Result<()> {
-        let mut line = serde_json::to_vec(&ev).map_err(std::io::Error::other)?;
-        line.push(b'\n');
-        let stdout = std::io::stdout();
-        let mut lock = stdout.lock();
-        lock.write_all(&line)?;
-        lock.flush()
-    }
-}
-
-/// Drives reconcile over the running helper daemon's Unix socket — a synchronous
-/// port of greendot-web's async `HelperClient`. This is the path the web-spawned
-/// (unprivileged) `greendotctl reconcile` takes, identical to the old greendot-cli.
-pub struct SocketExecutor {
-    socket: PathBuf,
-    /// The `greendotctl reconcile` binary is synchronous, so we drive the async
-    /// gRPC client on a private current-thread runtime (this runs outside any
-    /// ambient runtime — `main` keeps the reconcile path off the daemon's).
-    runtime: tokio::runtime::Runtime,
-}
-
-impl SocketExecutor {
-    pub fn new(socket: PathBuf) -> Self {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("build reconcile runtime");
-        SocketExecutor { socket, runtime }
-    }
-
-    /// Sends `req` over the helper's `RunTask` gRPC stream and forwards each
-    /// event to `on_event` until the terminal `Finished`.
-    fn stream(
-        &self,
-        req: Request,
-        mut on_event: impl FnMut(TaskEvent) -> std::io::Result<()>,
-    ) -> std::io::Result<()> {
-        let socket = self.socket.clone();
-        self.runtime.block_on(async move {
-            let mut client = greendot_proto::client::connect_uds(socket)
-                .map_err(|e| std::io::Error::other(format!("helper endpoint: {e}")))?;
-            let mut stream = client
-                .run_task(pb::Request::from(req))
-                .await
-                .map_err(|e| std::io::Error::other(format!("helper run_task: {e}")))?
-                .into_inner();
-            while let Some(pb_ev) = stream
-                .message()
-                .await
-                .map_err(|e| std::io::Error::other(format!("helper stream: {e}")))?
-            {
-                let ev = TaskEvent::try_from(pb_ev)
-                    .map_err(|e| std::io::Error::other(format!("bad task event: {e}")))?;
-                let done = matches!(ev, TaskEvent::Finished { .. });
-                on_event(ev)?;
-                if done {
-                    break;
-                }
-            }
-            Ok(())
-        })
-    }
-}
-
-impl Executor for SocketExecutor {
-    /// **Flattens** the daemon's own task framing into the already-open `sub`
-    /// (reconcile's `step()` opened it): output writes through; a single-command
-    /// subtask header re-echoes as `$ cmd`; a multi-step header is dropped (its
-    /// commands echo themselves); subtask/task statuses fold into the return. It
-    /// must not re-open a subtask, or the areas would nest.
-    fn apply(&self, req: Request, sub: &mut SubTask) -> std::io::Result<SubStatus> {
-        let mut acc: Option<SubStatus> = None;
-        self.stream(req, |ev| match ev {
-            TaskEvent::SubtaskStarted {
-                command: Some(cmd),
-                args,
-                ..
-            } => writeln!(sub.stdout(), "$ {cmd} {}", args.join(" ")),
-            TaskEvent::SubtaskStarted { command: None, .. } => Ok(()),
-            TaskEvent::Stdout { data } => sub.stdout().write_all(data.as_bytes()),
-            TaskEvent::Stderr { data } => sub.stderr().write_all(data.as_bytes()),
-            TaskEvent::SubtaskFinished { status, .. } => {
-                acc = Some(SubStatus::fold(acc, status));
-                Ok(())
-            }
-            TaskEvent::Finished { status, error } => {
-                acc = Some(SubStatus::fold(acc, status));
-                if status == SubStatus::Failed
-                    && let Some(e) = error
-                {
-                    sub.set_result(1, Some(e));
-                }
-                Ok(())
-            }
-        })?;
-        Ok(acc.unwrap_or(SubStatus::Success))
-    }
-
-    fn nfs_report(&self) -> ActualNfs {
-        let mut stdout = String::new();
-        let res = self.stream(Request::NfsReport, |ev| {
-            if let TaskEvent::Stdout { data } = &ev {
-                stdout.push_str(data);
-            }
-            Ok(())
-        });
-        match res {
-            Ok(()) => crate::actual::nfs::from_report(&stdout),
-            Err(_) => ActualNfs::default(),
-        }
-    }
-}
-
-/// Reconciles desired → actual using `exec` for the privileged steps, streaming
-/// each area as its own subtask on `task`. Read-only on the config TOML. Each
-/// area is either applied (its own subtask) or, when already satisfied, recorded
-/// as a `Skipped` (grey) subtask — so a reconcile that only touched one area
-/// shows the rest greyed rather than silently absent. Returns `false` if any
-/// applied area failed (an all-skipped run is success).
-pub fn run(cfg: &Config, exec: &dyn Executor, task: &mut Task) -> anyhow::Result<bool> {
-    let desired = crate::state::read_desired(&cfg.state_path)?;
-    let nvme_exports = desired.nvme_exports;
-    let iscsi_exports = desired.iscsi_exports;
-    let nfs_exports = desired.nfs_exports;
-    let pci_addrs = crate::actual::nic::pci_addrs();
-    let nvmet_desired = render_nvmet(&nvme_exports, desired.listen, &pci_addrs);
-    let lio_desired = render_lio(&iscsi_exports, desired.listen, &pci_addrs);
-    let nfs_desired = render_nfs(&nfs_exports, NFS_RDMA_PORT);
-    let nvmet_ok = nvmet_satisfied(&nvmet_desired, &crate::actual::nvmet::read(&cfg.nvmet_root));
-    let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
-    let nfs_ok = nfs_satisfied(&nfs_desired, &exec.nfs_report());
-
-    let mut modules = nvme_modules(&nvme_exports);
-    modules.extend(iscsi_modules(&iscsi_exports));
-    modules.extend(nfs_modules(&nfs_exports));
-    if modules.is_empty() {
-        task.skipped_subtask("Load kernel modules");
-    } else {
-        step(
-            exec,
-            task,
-            Request::EnsureModules { modules },
-            "Load kernel modules",
-        )?;
-    }
-
-    if nvmet_ok {
-        task.skipped_subtask("Apply NVMe-oF configuration");
-    } else {
-        let req = Request::NvmetApply {
-            desired: nvmet_desired,
-        };
-        step(exec, task, req, "Apply NVMe-oF configuration")?;
-    }
-
-    if lio_ok {
-        task.skipped_subtask("Apply iSCSI configuration");
-    } else {
-        let req = Request::LioApply {
-            desired: lio_desired,
-        };
-        step(exec, task, req, "Apply iSCSI configuration")?;
-    }
-
-    if nfs_ok {
-        task.skipped_subtask("Apply NFS configuration");
-    } else {
-        let req = Request::NfsApply {
-            desired: nfs_desired,
-        };
-        step(exec, task, req, "Apply NFS configuration")?;
-    }
-
-    Ok(task.aggregate() != SubStatus::Failed)
-}
-
-/// Runs one apply request through `exec` as a labelled subtask: opens the
-/// subtask, flattens the executor's output into it, and completes with the
-/// applied status.
-fn step(exec: &dyn Executor, task: &mut Task, req: Request, label: &str) -> anyhow::Result<()> {
-    let mut sub = task.begin_subtask(label);
-    let status = exec.apply(req, &mut sub)?;
-    sub.complete(status);
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::actual::lio::{Backstore, Portal, Target};
     use crate::actual::nvmet::{Namespace, Port, Subsys};
+    use greendot_proto::NFS_RDMA_PORT;
 
     const DEV: &str = "/dev/zvol/tank/vm1";
 

@@ -80,8 +80,8 @@ pkgs.testers.runNixOSTest {
     )
     machine.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'kind=nvme&name=vm1&device=/dev/zvol/tank/vm1&want_rdma=1&want_tcp=1' "
-        "http://127.0.0.1:8080/exports/create"
+        "--data 'name=vm1&device=/dev/zvol/tank/vm1&want_rdma=1&want_tcp=1' "
+        "http://127.0.0.1:8080/nvme/create"
     )
 
     # The apply wrote configfs directly as a recorded task: the subsystem must
@@ -91,8 +91,8 @@ pkgs.testers.runNixOSTest {
     trtype = machine.succeed("cat /sys/kernel/config/nvmet/ports/1/addr_trtype").strip()
     assert trtype == "rdma", f"port 1 should be rdma, got {trtype}"
 
-    # The dashboard must show this export GREEN (served via RDMA).
-    page = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/exports")
+    # The NVMe-oF page must show this export GREEN (served via RDMA).
+    page = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/nvme")
     assert "vm1" in page, "export not listed"
     assert "dot-green" in page, f"expected a green dot, page was:\n{page}"
 
@@ -106,17 +106,16 @@ pkgs.testers.runNixOSTest {
     print(metrics)
     assert 'greendot_export_status{export="vm1"} 2' in metrics, "export status gauge not green in /metrics"
 
-    # The operation was recorded as a task: the Tasks page lists a succeeded
-    # nvmet-apply that wrote configfs directly (no external CLI).
+    # The operation was recorded as a task: the Tasks page lists the reconcile
+    # the daemon ran inline (one subtask per area), with nothing failed.
     tasks = machine.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/tasks")
-    assert "nvmet-apply" in tasks, f"apply not recorded as a task:\n{tasks}"
-    assert "configfs" in tasks, "apply should run as a direct configfs write"
+    assert "Reconcile exports" in tasks, f"reconcile not recorded as a task:\n{tasks}"
     assert "dot-red" not in tasks, f"a task failed:\n{tasks}"
 
     # Disabling the export tears the subsystem back down (reconcile works).
     machine.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'id=1&enable=false' http://127.0.0.1:8080/exports/toggle"
+        "--data 'id=1&enable=false' http://127.0.0.1:8080/nvme/toggle"
     )
     machine.wait_until_fails("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:vm1", timeout=60)
 
@@ -124,6 +123,9 @@ pkgs.testers.runNixOSTest {
     # A ZFS filesystem dataset to share (auto-mounts at its mountpoint).
     machine.succeed("zfs create -o mountpoint=/srv/share tank/share")
     machine.wait_until_succeeds("mountpoint -q /srv/share")
+    # greendot writes exports without no_root_squash, so the client's root maps
+    # to nobody — make the share world-writable so the probe write can land.
+    machine.succeed("chmod 1777 /srv/share")
 
     # Export it over NFS to anyone on the test LAN (RDMA is server-wide).
     machine.succeed(
@@ -146,7 +148,9 @@ pkgs.testers.runNixOSTest {
     machine.succeed("modprobe rpcrdma")
     machine.succeed("mkdir -p /mnt/nfs")
     machine.wait_until_succeeds(f"mount -o rdma,port=20049 {ip}:/srv/share /mnt/nfs", timeout=60)
-    machine.succeed("echo hello > /mnt/nfs/probe && grep -q hello /mnt/nfs/probe")
+    # greendot's exports keep root_squash, so write as a regular user.
+    machine.succeed("runuser -u gduser -- sh -c 'echo hello > /mnt/nfs/probe'")
+    machine.succeed("grep -q hello /mnt/nfs/probe")
     machine.succeed("umount /mnt/nfs")
 
     # Deleting the share unexports it (reconcile tears it down).

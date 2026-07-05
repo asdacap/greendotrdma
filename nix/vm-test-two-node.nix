@@ -85,13 +85,13 @@ pkgs.testers.runNixOSTest {
     # so the initiator VM can connect without per-host ACLs.
     target.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'kind=nvme&name=nvme1&device=/dev/zvol/tank/nvme1&want_rdma=1&want_tcp=1' "
-        "http://127.0.0.1:8080/exports/create"
+        "--data 'name=nvme1&device=/dev/zvol/tank/nvme1&want_rdma=1&want_tcp=1' "
+        "http://127.0.0.1:8080/nvme/create"
     )
     target.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'kind=iscsi&name=iscsi1&device=/dev/zvol/tank/iscsi1&want_rdma=1&want_tcp=1' "
-        "http://127.0.0.1:8080/exports/create"
+        "--data 'name=iscsi1&device=/dev/zvol/tank/iscsi1&want_rdma=1&want_tcp=1' "
+        "http://127.0.0.1:8080/iscsi/create"
     )
 
     # --- target-side: both realized in configfs, RDMA-linked ---
@@ -104,9 +104,11 @@ pkgs.testers.runNixOSTest {
     iser = target.succeed(f"cat {iser_np}/iser").strip()
     assert iser == "1", f"iSCSI portal should be iSER-enabled, got iser={iser}"
 
-    # Both exports listed; Prometheus gauge = 2 (green) for each.
-    page = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/exports")
-    assert "nvme1" in page and "iscsi1" in page, f"exports not listed:\n{page}"
+    # Both exports listed on their pages; Prometheus gauge = 2 (green) for each.
+    page = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/nvme")
+    assert "nvme1" in page, f"nvme export not listed:\n{page}"
+    page = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/iscsi")
+    assert "iscsi1" in page, f"iscsi export not listed:\n{page}"
     metrics = target.succeed("curl -s http://127.0.0.1:8080/metrics")
     print(metrics)
     assert 'greendot_export_status{export="nvme1"} 2' in metrics, "nvme export not green in /metrics"
@@ -133,13 +135,14 @@ pkgs.testers.runNixOSTest {
     )
 
     # --- disabling reconciles both back out of configfs ---
+    # Ids are per-protocol tables, so each first export is id 1.
     target.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'id=1&enable=false' http://127.0.0.1:8080/exports/toggle"
+        "--data 'id=1&enable=false' http://127.0.0.1:8080/nvme/toggle"
     )
     target.succeed(
         f"curl -s -b /tmp/jar.txt -H 'X-Greendot-Csrf: {csrf}' "
-        "--data 'id=2&enable=false' http://127.0.0.1:8080/exports/toggle"
+        "--data 'id=1&enable=false' http://127.0.0.1:8080/iscsi/toggle"
     )
     target.wait_until_fails("test -d /sys/kernel/config/nvmet/subsystems/nqn.2026-06.io.greendot:nvme1", timeout=60)
     target.wait_until_fails("test -d /sys/kernel/config/target/iscsi/iqn.2026-06.io.greendot:iscsi1", timeout=60)

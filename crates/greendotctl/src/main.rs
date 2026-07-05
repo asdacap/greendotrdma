@@ -3,9 +3,9 @@
 //! `greendotctl serve` (the default, no subcommand) runs the gRPC daemon that
 //! executes allowlisted privileged operations on behalf of greendot-web; only
 //! the configured uid may connect (SO_PEERCRED, enforced on each accepted Unix
-//! socket). `greendotctl reconcile [config.toml]` applies the desired state —
-//! in-process as root with no daemon, or over the helper socket when one is
-//! running (see [`reconcile_cli`]).
+//! socket). `greendotctl reconcile [config.toml]` applies the desired state
+//! inline, in-process — root-only; the web reconciles through the daemon's
+//! `Request::Reconcile` instead (see [`reconcile`]).
 //!
 //! Transport is gRPC (tonic) over the Unix socket. Every incoming `pb::Request`
 //! is converted to the validated domain [`greendot_proto::Request`] via
@@ -24,7 +24,7 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
-mod reconcile_cli;
+mod reconcile;
 mod smart;
 mod zfs;
 
@@ -99,21 +99,20 @@ impl Opts {
 }
 
 fn main() -> Result<()> {
-    // Tracing goes to stderr, never stdout: `greendotctl reconcile` streams its
-    // task events as a JSONL frame on stdout, and a stray log line there would
-    // land in the web's task output. (The daemon's stderr is captured by systemd.)
+    // Tracing goes to stderr so it never mixes with `greendotctl reconcile`'s
+    // task output on stdout. (The daemon's stderr is captured by systemd.)
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .init();
     // Subcommands: `reconcile [config]` runs the one-shot reconcile; `serve` (or
     // no subcommand, for back-compat with the flags-only invocation) runs the
-    // daemon. `reconcile` runs OUTSIDE any tokio runtime — it builds its own via
-    // the socket executor — so we only spin up the async runtime for `serve`.
+    // daemon. `reconcile` is fully synchronous — everything applies in-process —
+    // so only `serve` spins up the async runtime.
     let mut args = std::env::args().skip(1).peekable();
     match args.peek().map(String::as_str) {
         Some("reconcile") => {
             args.next();
-            return reconcile_cli::run(args.next());
+            return reconcile::cli(args.next());
         }
         Some("serve") => {
             args.next();
@@ -308,6 +307,11 @@ fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Resu
             )?;
             sub.complete(status);
         }
+        Dispatch::Reconcile(config) => match greendot_reconcile::config::Config::load(config) {
+            // The driver takes the mutate lock itself, for the whole pass.
+            Ok(cfg) => reconcile::run(&cfg, ctx, &mut task)?,
+            Err(e) => task.begin_subtask("Load config").fail(format!("{e:#}")),
+        },
         // Reads: no mutate_lock (they stream like the old serve loop).
         Dispatch::NfsReport => {
             let mut sub = task.begin_subtask("Read NFS state");

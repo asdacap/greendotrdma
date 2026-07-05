@@ -48,9 +48,10 @@ pub struct AppState {
     pub reconcile_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
-    /// The command run (as a recorded task) to reconcile on drift — normally
-    /// the sibling `greendotctl reconcile <config>`.
-    pub reconcile_cmd: Vec<String>,
+    /// The daemon-local path of the shared config TOML, sent with
+    /// `Request::Reconcile` on drift (the web's own config argument, so the
+    /// daemon reads the same desired state). `None` = built-in defaults.
+    pub reconcile_config: Option<String>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -295,10 +296,10 @@ pub(crate) mod testutil {
         socket
     }
 
-    /// A test `AppState` whose reconcile "command" is `reconcile_cmd` — `true`
-    /// stands in for a successful reconcile, `false` for a failed one, so the
-    /// drift gate + record/stream path is exercised without execing the real CLI.
-    pub fn test_state_with(reconcile_cmd: Vec<String>) -> Arc<AppState> {
+    /// A test `AppState` backed by the fake helper, whose canned `RunTask`
+    /// stream answers `Request::Reconcile` with a successful task — so the
+    /// drift gate + record/stream path is exercised without a real daemon.
+    pub fn test_state() -> Arc<AppState> {
         let nvmet_root =
             std::env::temp_dir().join(format!("gd-nvmet-app{}", rand::random::<u32>()));
         Arc::new(AppState {
@@ -311,12 +312,8 @@ pub(crate) mod testutil {
             nvmet_root,
             reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
             tasks: crate::task_runner::TaskHub::default(),
-            reconcile_cmd,
+            reconcile_config: None,
         })
-    }
-
-    pub fn test_state() -> Arc<AppState> {
-        test_state_with(vec!["true".into()])
     }
 
     pub fn test_app() -> Router {

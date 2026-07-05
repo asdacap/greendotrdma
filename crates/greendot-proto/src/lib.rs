@@ -229,6 +229,15 @@ pub enum Request {
     /// Privileged read of NFS actual state (`exportfs -s` + `/proc/fs/nfsd/portlist`),
     /// which the unprivileged web service cannot read directly.
     NfsReport,
+    /// Run the full desired-state reconcile inline in the daemon: render the
+    /// NVMe-oF/iSCSI/NFS desired state from the config's state TOML and apply
+    /// whatever drifted, one subtask per area. `config` is the daemon-local
+    /// path of the shared config TOML (`None` = built-in defaults); it is a
+    /// plain string because it never reaches a command line — the daemon only
+    /// reads it, and the sole allowed peer already drives every mutation.
+    Reconcile {
+        config: Option<String>,
+    },
 
     // System
     EnsureModules {
@@ -721,7 +730,8 @@ mod tests {
             let json = serde_json::to_string(&ev).unwrap();
             assert_eq!(serde_json::from_str::<TaskEvent>(&json).unwrap(), ev);
         }
-        // Serde tags are the wire contract the JSONL reconcile stream relies on.
+        // The serde tag layout is a stable contract for any recorded/external
+        // consumer of serialized task events; pin it against silent renames.
         assert_eq!(
             serde_json::to_string(&TaskEvent::Finished {
                 status: SubStatus::Skipped,

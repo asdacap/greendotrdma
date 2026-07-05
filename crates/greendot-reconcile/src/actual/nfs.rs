@@ -1,8 +1,8 @@
 //! Actual NFS state parsers. The export table (`exportfs -s`) and the nfsd
 //! portlist (`/proc/fs/nfsd/portlist`, root-only) are fetched by a privileged
-//! reader — the helper's `NfsReport` over the socket, or greendotctl's own
-//! in-process read when running as root — and parsed here. The parsers are pure
-//! and tested; the privileged fetch lives behind the reconcile `Executor`.
+//! reader — greendotctl's in-process reconcile driver, or the helper's
+//! `NfsReport` collected by the web — and parsed here. The parsers are pure
+//! and tested; only the fetch needs root.
 
 use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL};
 use std::collections::BTreeSet;

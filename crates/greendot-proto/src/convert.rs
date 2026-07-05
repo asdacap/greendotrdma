@@ -701,6 +701,7 @@ impl From<Request> for pb::Request {
                 desired: Some(desired.into()),
             }),
             Request::NfsReport => Op::NfsReport(pb::Empty {}),
+            Request::Reconcile { config } => Op::Reconcile(pb::Reconcile { config }),
             Request::EnsureModules { modules } => Op::EnsureModules(pb::EnsureModules {
                 modules: modules
                     .into_iter()
@@ -899,6 +900,7 @@ impl TryFrom<pb::Request> for Request {
                     .try_into()?,
             },
             Op::NfsReport(_) => Request::NfsReport,
+            Op::Reconcile(r) => Request::Reconcile { config: r.config },
             Op::EnsureModules(e) => Request::EnsureModules {
                 modules: dec_kernel_modules(e.modules)?,
             },
@@ -1163,6 +1165,8 @@ mod tests {
         },
     })]
     #[case::nfs_report(Request::NfsReport)]
+    #[case::reconcile(Request::Reconcile { config: Some("/etc/greendotrdma/config.toml".into()) })]
+    #[case::reconcile_default(Request::Reconcile { config: None })]
     #[case::roce(Request::RoceCapableNics)]
     #[case::enable_roce(Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() })]
     #[case::advice(Request::NicRdmaAdvice)]

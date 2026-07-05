@@ -203,6 +203,7 @@ message LvDelete { string vg = 1; string name = 2; }
 message NvmetApply { NvmetDesired desired = 1; }
 message LioApply { LioDesired desired = 1; }
 message NfsApply { NfsDesired desired = 1; }
+message Reconcile { optional string config = 1; }
 
 message EnsureModules { repeated KernelModule modules = 1; }
 message RxeLinkAdd { string netdev = 1; }
@@ -260,6 +261,7 @@ message Request {
     Empty nic_rdma_advice = 46;
     Empty rdma_resources = 47;
     InstallPackages install_packages = 48;
+    Reconcile reconcile = 49;
   }
 }
 

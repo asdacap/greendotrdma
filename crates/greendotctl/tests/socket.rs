@@ -18,8 +18,14 @@ struct Helper {
 
 impl Helper {
     fn start() -> Self {
-        let dir =
-            PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("h{}", std::process::id()));
+        // Unique per instance: tests in this binary run in parallel threads of
+        // one process, so a pid-only name would race two daemons on one socket.
+        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+            "h{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let socket = dir.join("helper.sock");
         let uid = nix::unistd::getuid().to_string();
@@ -126,4 +132,78 @@ async fn ping_streamed_task_oneshot_and_validation() {
         }) => assert!(msg.contains("invalid request"), "{msg}"),
         other => panic!("expected rejected task, got {other:?}"),
     }
+}
+
+/// Reconcile runs inline in the daemon: it loads the request's config, reads
+/// the desired-state TOML, and streams one subtask per area — applied or
+/// `Skipped` — ending in exactly one terminal `Finished`. Unprivileged here, so
+/// applies against the real configfs fail; the point is the framing: every
+/// area shows up and the stream terminates (failure, not a hang).
+#[tokio::test]
+async fn reconcile_streams_one_subtask_per_area_and_terminates() {
+    let helper = Helper::start();
+    let mut client = helper.client();
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rec{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("state.toml"),
+        r#"
+[[nvme_export]]
+id = 1
+name = "vm1"
+device_path = "/dev/zvol/tank/vm1"
+enabled = true
+want_rdma = false
+want_tcp = true
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("config.toml"),
+        format!(
+            "state_path = \"{state}\"\nnvmet_root = \"{root}\"\nlio_root = \"{root}\"\n",
+            state = dir.join("state.toml").display(),
+            root = dir.join("empty").display(),
+        ),
+    )
+    .unwrap();
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(60),
+        run_task(
+            &mut client,
+            pb::Request::from(Request::Reconcile {
+                config: Some(dir.join("config.toml").to_string_lossy().into_owned()),
+            }),
+        ),
+    )
+    .await
+    .expect("reconcile stream must terminate, not hang");
+
+    let names: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            TaskEvent::SubtaskStarted { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "Load kernel modules",
+            "Apply NVMe-oF configuration",
+            "Apply iSCSI configuration",
+            "Apply NFS configuration",
+        ],
+        "every area must appear as a subtask; events: {events:?}"
+    );
+    let finished = events
+        .iter()
+        .filter(|e| matches!(e, TaskEvent::Finished { .. }))
+        .count();
+    assert!(
+        finished == 1 && matches!(events.last(), Some(TaskEvent::Finished { .. })),
+        "exactly one terminal Finished; events: {events:?}"
+    );
 }
