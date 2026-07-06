@@ -16,21 +16,27 @@ struct Helper {
     socket: PathBuf,
 }
 
+/// A fresh scratch dir, unique per call: tests in this binary run in parallel
+/// threads of one process, so a pid-only name would race two tests on one dir.
+fn test_dir(prefix: &str) -> PathBuf {
+    static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "{prefix}{}-{}",
+        std::process::id(),
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
 impl Helper {
-    fn start() -> Self {
-        // Unique per instance: tests in this binary run in parallel threads of
-        // one process, so a pid-only name would race two daemons on one socket.
-        static SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
-            "h{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
+    fn start(extra_args: &[&str]) -> Self {
+        let dir = test_dir("h");
         let socket = dir.join("helper.sock");
         let uid = nix::unistd::getuid().to_string();
         let child = std::process::Command::new(env!("CARGO_BIN_EXE_greendotctl"))
             .args(["--socket", socket.to_str().unwrap(), "--allow-uid", &uid])
+            .args(extra_args)
             .spawn()
             .unwrap();
         for _ in 0..200 {
@@ -66,7 +72,7 @@ async fn run_task(client: &mut HelperClient<Channel>, req: pb::Request) -> Vec<T
 
 #[tokio::test]
 async fn ping_streamed_task_oneshot_and_validation() {
-    let helper = Helper::start();
+    let helper = Helper::start(&[]);
     let mut client = helper.client();
 
     // Ping is one-shot (unary Call) and works repeatedly on one channel.
@@ -134,18 +140,15 @@ async fn ping_streamed_task_oneshot_and_validation() {
     }
 }
 
-/// Reconcile runs inline in the daemon: it loads the request's config, reads
-/// the desired-state TOML, and streams one subtask per area — applied or
-/// `Skipped` — ending in exactly one terminal `Finished`. Unprivileged here, so
-/// applies against the real configfs fail; the point is the framing: every
-/// area shows up and the stream terminates (failure, not a hang).
+/// Reconcile runs inline in the daemon: it loads the daemon's own `--config`
+/// (the request carries no path), reads the desired-state TOML, and streams
+/// one subtask per area — applied or `Skipped` — ending in exactly one
+/// terminal `Finished`. Unprivileged here, so applies against the real
+/// configfs fail; the point is the framing: every area shows up and the
+/// stream terminates (failure, not a hang).
 #[tokio::test]
 async fn reconcile_streams_one_subtask_per_area_and_terminates() {
-    let helper = Helper::start();
-    let mut client = helper.client();
-
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("rec{}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
+    let dir = test_dir("rec");
     std::fs::write(
         dir.join("state.toml"),
         r#"
@@ -168,15 +171,13 @@ want_tcp = true
         ),
     )
     .unwrap();
+    let config = dir.join("config.toml");
+    let helper = Helper::start(&["--config", config.to_str().unwrap()]);
+    let mut client = helper.client();
 
     let events = tokio::time::timeout(
         Duration::from_secs(60),
-        run_task(
-            &mut client,
-            pb::Request::from(Request::Reconcile {
-                config: Some(dir.join("config.toml").to_string_lossy().into_owned()),
-            }),
-        ),
+        run_task(&mut client, pb::Request::from(Request::Reconcile)),
     )
     .await
     .expect("reconcile stream must terminate, not hang");

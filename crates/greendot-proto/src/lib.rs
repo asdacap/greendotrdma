@@ -231,13 +231,10 @@ pub enum Request {
     NfsReport,
     /// Run the full desired-state reconcile inline in the daemon: render the
     /// NVMe-oF/iSCSI/NFS desired state from the config's state TOML and apply
-    /// whatever drifted, one subtask per area. `config` is the daemon-local
-    /// path of the shared config TOML (`None` = built-in defaults); it is a
-    /// plain string because it never reaches a command line — the daemon only
-    /// reads it, and the sole allowed peer already drives every mutation.
-    Reconcile {
-        config: Option<String>,
-    },
+    /// whatever drifted, one subtask per area. Deliberately carries nothing:
+    /// the daemon reconciles against its own `--config`, so the peer cannot
+    /// name a file for root to read.
+    Reconcile,
 
     // System
     EnsureModules {
@@ -694,52 +691,6 @@ mod tests {
     #[case::nfs_report(Request::NfsReport)]
     fn request_roundtrips(#[case] req: Request) {
         assert_eq!(roundtrip(&req), req);
-    }
-
-    #[test]
-    fn task_events_roundtrip() {
-        for ev in [
-            TaskEvent::SubtaskStarted {
-                name: "Apply NVMe-oF".into(),
-                command: Some("configfs".into()),
-                args: vec!["nvmet".into(), "apply".into()],
-                stdin: Some("{}".into()),
-            },
-            TaskEvent::SubtaskStarted {
-                name: "Load kernel modules".into(),
-                command: None,
-                args: vec![],
-                stdin: None,
-            },
-            TaskEvent::Stdout {
-                data: "hello\n".into(),
-            },
-            TaskEvent::Stderr {
-                data: "warn\n".into(),
-            },
-            TaskEvent::SubtaskFinished {
-                status: SubStatus::Failed,
-                exit: 1,
-                error: Some("boom".into()),
-            },
-            TaskEvent::Finished {
-                status: SubStatus::Success,
-                error: None,
-            },
-        ] {
-            let json = serde_json::to_string(&ev).unwrap();
-            assert_eq!(serde_json::from_str::<TaskEvent>(&json).unwrap(), ev);
-        }
-        // The serde tag layout is a stable contract for any recorded/external
-        // consumer of serialized task events; pin it against silent renames.
-        assert_eq!(
-            serde_json::to_string(&TaskEvent::Finished {
-                status: SubStatus::Skipped,
-                error: None,
-            })
-            .unwrap(),
-            r#"{"ev":"finished","status":"skipped","error":null}"#
-        );
     }
 
     #[rstest]

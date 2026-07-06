@@ -216,12 +216,8 @@ pub fn apply(
 /// (`exportfs -s`, exports(5) syntax), the nfsd portlist, and greendot's own
 /// managed exports file (what it last applied — for drift detection), separated
 /// by the report sentinels. Missing tools/files read as empty so the dashboard
-/// simply shows nothing exported.
-pub fn report_into(
-    portlist: &Path,
-    exports_file: &Path,
-    sub: &mut SubTask,
-) -> io::Result<SubStatus> {
+/// simply shows nothing exported. Parsed back by `actual::nfs::from_report`.
+pub fn report(portlist: &Path, exports_file: &Path) -> String {
     let exports = Command::new("exportfs")
         .arg("-s")
         .output()
@@ -229,10 +225,16 @@ pub fn report_into(
         .unwrap_or_default();
     let portlist = std::fs::read_to_string(portlist).unwrap_or_default();
     let managed = std::fs::read_to_string(exports_file).unwrap_or_default();
-    write!(
-        sub.stdout(),
-        "{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}"
-    )?;
+    format!("{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}")
+}
+
+/// Streams [`report`] into the subtask, for the socket `NfsReport` request.
+pub fn report_into(
+    portlist: &Path,
+    exports_file: &Path,
+    sub: &mut SubTask,
+) -> io::Result<SubStatus> {
+    write!(sub.stdout(), "{}", report(portlist, exports_file))?;
     Ok(SubStatus::Success)
 }
 

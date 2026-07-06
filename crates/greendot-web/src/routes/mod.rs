@@ -48,10 +48,6 @@ pub struct AppState {
     pub reconcile_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
-    /// The daemon-local path of the shared config TOML, sent with
-    /// `Request::Reconcile` on drift (the web's own config argument, so the
-    /// daemon reads the same desired state). `None` = built-in defaults.
-    pub reconcile_config: Option<String>,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -312,7 +308,6 @@ pub(crate) mod testutil {
             nvmet_root,
             reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
             tasks: crate::task_runner::TaskHub::default(),
-            reconcile_config: None,
         })
     }
 

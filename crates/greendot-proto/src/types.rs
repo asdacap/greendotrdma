@@ -386,9 +386,9 @@ impl SubStatus {
 /// Frames a task as it runs: a sequence of subtasks, each with its own recorded
 /// output and terminal status. Subtasks are sequential, so `Stdout`/`Stderr`
 /// attribute to the most-recent still-open subtask. Terminated by exactly one
-/// `Finished` whose status is the worst child.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "ev", rename_all = "snake_case")]
+/// `Finished` whose status is the worst child. Wire transport is protobuf only
+/// (the JSONL stream is gone), so no serde here.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskEvent {
     /// Opens a subtask. `command`/`args`/`stdin` are set only when the subtask
     /// wraps a single process (rendered as a `$ cmd` header); a plain multi-step

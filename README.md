@@ -36,10 +36,13 @@ Two systemd services:
   every string that becomes a path or argv element is a validated newtype,
   checked again on deserialization. Only the `greendot` uid may connect
   (SO_PEERCRED). It also runs the PAM login check. Reconcile runs everything
-  inline in-process inside the daemon (the web asks for it over the socket);
-  the same binary is also the standalone reconcile tool — `greendotctl
-  reconcile [config.toml]`, root-only, no daemon needed — so the web UI is
-  optional and an alternative frontend can drive it directly.
+  inline in-process inside the daemon, against the daemon's own `--config` —
+  the request carries no paths, so a peer can never name a file for root to
+  read. The same binary is also the reconcile CLI: `greendotctl reconcile`
+  proxies through the daemon socket when one is running (no root needed), and
+  `greendotctl reconcile [config.toml]` applies standalone as root with no
+  daemon — so the web UI is optional and an alternative frontend can drive it
+  directly.
 
 Log in with any system account that is a member of the **greendot-admin**
 group:

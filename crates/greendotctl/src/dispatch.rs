@@ -12,6 +12,10 @@ pub struct Ctx {
     pub auth_limiter: Mutex<pam::RateLimiter>,
     /// Serializes task execution so configfs/zfs changes never interleave.
     pub mutate_lock: Mutex<()>,
+    /// The daemon's own config TOML path for `Request::Reconcile` (`--config`;
+    /// `None` = built-in defaults). The request deliberately carries no path,
+    /// so the peer cannot name a file for root to read.
+    pub reconcile_config: Option<String>,
 }
 
 pub enum Dispatch {
@@ -30,8 +34,8 @@ pub enum Dispatch {
     NfsReport,
     /// Run the full desired-state reconcile inline (render, drift check, and
     /// the area applies all in this process), streamed as one task with a
-    /// subtask per area. Carries the optional config TOML path.
-    Reconcile(Option<String>),
+    /// subtask per area. The config comes from `Ctx::reconcile_config`.
+    Reconcile,
     /// Privileged read of the RoCE-capable NIC inventory (vendor classification
     /// via the `NetworkHardware` registry), streamed as JSON like `NfsReport`.
     RoceCapableNics,
@@ -94,7 +98,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
         Request::NfsApply { desired } => Dispatch::NfsApply(desired),
         Request::NfsReport => Dispatch::NfsReport,
-        Request::Reconcile { config } => Dispatch::Reconcile(config),
+        Request::Reconcile => Dispatch::Reconcile,
 
         Request::EnsureModules { modules: list } => match modules::ensure(&list) {
             Some(spec) => Dispatch::Task(spec),
@@ -208,6 +212,7 @@ mod tests {
             // exercises the rate-limit path without ever touching real PAM.
             auth_limiter: Mutex::new(pam::RateLimiter::new(0, 60.0, Instant::now())),
             mutate_lock: Mutex::new(()),
+            reconcile_config: None,
         }
     }
 

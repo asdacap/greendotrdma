@@ -6,8 +6,7 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
-    let config_arg = std::env::args().nth(1);
-    let config = config::Config::load(config_arg.clone())?;
+    let config = config::Config::load(std::env::args().nth(1))?;
 
     let tls = match (&config.tls_cert, &config.tls_key) {
         (Some(cert), Some(key)) => Some(
@@ -35,9 +34,6 @@ async fn main() -> Result<()> {
         lio_root: config.lio_root.clone(),
         reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
-        // The daemon loads the same config file for Request::Reconcile, so web
-        // and daemon render the same desired state.
-        reconcile_config: config_arg,
     });
     let app = routes::app(Arc::clone(&state));
 

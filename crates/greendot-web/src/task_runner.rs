@@ -239,18 +239,22 @@ pub(crate) async fn drive(
     Ok(outcome.unwrap_or_else(|| {
         // Channel closed without Finished — mark the open subtask and the task
         // Failed, so a crashed producer doesn't leave a task "running" forever.
+        // The cause (a daemon crash/restart or a dropped connection) is only in
+        // the daemon's journal, which this UI cannot read — say where to look.
+        const NO_RESULT: &str = "task ended without a result — the helper stream \
+             closed early (daemon crash or restart? check greendotctl's journal)";
         if let Some(open) = subs.last_mut()
             && open.status.is_none()
         {
             open.status = Some(SubStatus::Failed);
-            open.error = Some("task ended without a result".into());
+            open.error = Some(NO_RESULT.into());
         }
         let (stdout, stderr) = flat_output(&subs);
         let _ = state.db.finish_task(
             id,
             TaskStatus::Failed,
             None,
-            Some("task ended without a result"),
+            Some(NO_RESULT),
             &stdout,
             &stderr,
             &subs,
@@ -258,7 +262,7 @@ pub(crate) async fn drive(
         );
         TaskOutcome {
             ok: false,
-            error: Some("task ended without a result".into()),
+            error: Some(NO_RESULT.into()),
         }
     }))
 }

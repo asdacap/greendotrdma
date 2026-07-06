@@ -203,7 +203,9 @@ message LvDelete { string vg = 1; string name = 2; }
 message NvmetApply { NvmetDesired desired = 1; }
 message LioApply { LioDesired desired = 1; }
 message NfsApply { NfsDesired desired = 1; }
-message Reconcile { optional string config = 1; }
+// Deliberately empty: the daemon reconciles against its own --config, so the
+// peer cannot name a file for root to read.
+message Reconcile { reserved 1; reserved "config"; }
 
 message EnsureModules { repeated KernelModule modules = 1; }
 message RxeLinkAdd { string netdev = 1; }

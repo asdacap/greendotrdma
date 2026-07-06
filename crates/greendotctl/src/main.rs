@@ -3,9 +3,11 @@
 //! `greendotctl serve` (the default, no subcommand) runs the gRPC daemon that
 //! executes allowlisted privileged operations on behalf of greendot-web; only
 //! the configured uid may connect (SO_PEERCRED, enforced on each accepted Unix
-//! socket). `greendotctl reconcile [config.toml]` applies the desired state
-//! inline, in-process — root-only; the web reconciles through the daemon's
-//! `Request::Reconcile` instead (see [`reconcile`]).
+//! socket). `greendotctl reconcile` heals drift through a running daemon (any
+//! uid with socket access), or applies inline as root when given a config or
+//! when no daemon is up; the web reconciles through the daemon's
+//! `Request::Reconcile`, which reads the daemon's own `--config` — never a
+//! peer-supplied path (see [`reconcile`]).
 //!
 //! Transport is gRPC (tonic) over the Unix socket. Every incoming `pb::Request`
 //! is converted to the validated domain [`greendot_proto::Request`] via
@@ -59,6 +61,8 @@ struct Opts {
     allow_uid: Option<u32>,
     pam_service: String,
     admin_group: String,
+    /// Config TOML for `Request::Reconcile` (`None` = built-in defaults).
+    config: Option<String>,
 }
 
 impl Opts {
@@ -69,6 +73,7 @@ impl Opts {
             allow_uid: None,
             pam_service: "greendotrdma".into(),
             admin_group: "greendot-admin".into(),
+            config: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -78,6 +83,7 @@ impl Opts {
                 "--allow-uid" => opts.allow_uid = Some(value()?.parse()?),
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
+                "--config" => opts.config = Some(value()?),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -153,6 +159,7 @@ async fn serve_forever(opts: Opts) -> Result<()> {
             std::time::Instant::now(),
         )),
         mutate_lock: std::sync::Mutex::new(()),
+        reconcile_config: opts.config,
     });
 
     // SO_PEERCRED authorization: only the configured uid may connect. Rejected
@@ -262,8 +269,9 @@ impl Helper for HelperSvc {
         let ctx = Arc::clone(&self.ctx);
         // All privileged work (commands, configfs, /proc writes) is blocking;
         // run it on a blocking thread and stream its events back via the sink.
-        tokio::task::spawn_blocking(move || {
-            let mut sink = ChannelSink(tx);
+        let worker_tx = tx.clone();
+        let worker = tokio::task::spawn_blocking(move || {
+            let mut sink = ChannelSink(worker_tx);
             let domain = match GdRequest::try_from(pbreq) {
                 Ok(r) => r,
                 Err(e) => {
@@ -274,6 +282,25 @@ impl Helper for HelperSvc {
                 }
             };
             let _ = run_dispatch(&ctx, domain, &mut sink);
+        });
+        // A worker panic would otherwise just drop the stream, and the web
+        // could only record "task ended without a result" while the cause sat
+        // in our journal. Fold the panic message into the recorded task.
+        tokio::spawn(async move {
+            if let Err(e) = worker.await
+                && let Ok(panic) = e.try_into_panic()
+            {
+                let msg = panic
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_owned())
+                    .or_else(|| panic.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic payload".into());
+                let ev = TaskEvent::Finished {
+                    status: SubStatus::Failed,
+                    error: Some(format!("helper worker panicked: {msg}")),
+                };
+                let _ = tx.send(Ok(pb::TaskEvent::from(ev))).await;
+            }
         });
         Ok(TonicResponse::new(ReceiverStream::new(rx)))
     }
@@ -307,11 +334,11 @@ fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Resu
             )?;
             sub.complete(status);
         }
-        Dispatch::Reconcile(config) => match greendot_reconcile::config::Config::load(config) {
-            // The driver takes the mutate lock itself, for the whole pass.
-            Ok(cfg) => reconcile::run(&cfg, ctx, &mut task)?,
-            Err(e) => task.begin_subtask("Load config").fail(format!("{e:#}")),
-        },
+        // The driver loads the config and takes the mutate lock itself, for
+        // the whole pass.
+        Dispatch::Reconcile => {
+            reconcile::run(ctx.reconcile_config.clone(), &ctx.mutate_lock, &mut task)?
+        }
         // Reads: no mutate_lock (they stream like the old serve loop).
         Dispatch::NfsReport => {
             let mut sub = task.begin_subtask("Read NFS state");

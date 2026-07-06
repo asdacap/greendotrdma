@@ -67,10 +67,7 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
     let st = state.clone();
     tokio::spawn(async move {
         let _guard = guard; // serialize: released only when the run is done
-        let req = Request::Reconcile {
-            config: st.reconcile_config.clone(),
-        };
-        let outcome = crate::task_runner::drive(&st, id, st.helper.run_task(req))
+        let outcome = crate::task_runner::drive(&st, id, st.helper.run_task(Request::Reconcile))
             .await
             .unwrap_or_else(|e| TaskOutcome {
                 ok: false,

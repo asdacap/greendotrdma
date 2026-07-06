@@ -8,7 +8,9 @@ Type=simple
 # RuntimeDirectory (/run/greendotrdma) is owned root:greendot — letting the
 # unprivileged greendot-web traverse it to reach the helper socket.
 Group=greendot
-ExecStart=/usr/libexec/greendotrdma/greendotctl serve
+# --config: the daemon reconciles against its own copy of the shared config
+# (Request::Reconcile carries no path, so the web can never name one for root).
+ExecStart=/usr/libexec/greendotrdma/greendotctl serve --config /etc/greendotrdma/config.toml
 Restart=on-failure
 RestartSec=2
 # Must stay root for configfs/PAM/zfs, and must run in the HOST mount namespace:
