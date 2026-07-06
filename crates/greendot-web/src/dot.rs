@@ -37,6 +37,9 @@ pub fn nvme_dot(export: &NvmeExport, actual: &ActualNvmet, rdma: &[RdmaDev]) -> 
     if let Some(error) = &export.last_error {
         return red(format!("reconcile failed: {error}"));
     }
+    if let Some(reason) = crate::reconcile::nvme_render_error(export) {
+        return red(reason);
+    }
     let nqn = export.nqn();
     let Some(subsys) = actual.subsystems.iter().find(|s| s.nqn == nqn.as_str()) else {
         return red("subsystem not configured (reconcile pending?)");
@@ -103,6 +106,9 @@ pub fn nvme_dot(export: &NvmeExport, actual: &ActualNvmet, rdma: &[RdmaDev]) -> 
 pub fn iscsi_dot(export: &IscsiExport, actual: &ActualLio, rdma: &[RdmaDev]) -> Dot {
     if let Some(error) = &export.last_error {
         return red(format!("reconcile failed: {error}"));
+    }
+    if let Some(reason) = crate::reconcile::iscsi_render_error(export) {
+        return red(reason);
     }
     let iqn = export.iqn();
     let Some(backstore) = actual.backstores.iter().find(|b| b.name == export.name) else {
@@ -231,6 +237,9 @@ pub fn nfs_dot(export: &NfsExport, actual: &ActualNfs, rdma: &[RdmaDev], listen:
     if let Some(error) = &export.last_error {
         return red(format!("reconcile failed: {error}"));
     }
+    if let Some(reason) = crate::reconcile::nfs_render_error(export) {
+        return red(reason);
+    }
     if !actual.exported(&export.path) {
         return red("not exported (reconcile pending?)");
     }
@@ -287,6 +296,17 @@ fn crit(label: &str, ok: bool, detail: impl Into<String>) -> Criterion {
         ok,
         detail: detail.into(),
     }
+}
+
+/// First checklist row: whether the export definition itself is renderable —
+/// an invalid entry is skipped by the renderers and can never be served, which
+/// no downstream criterion would explain.
+fn validity_criterion(render_error: Option<String>) -> Criterion {
+    crit(
+        "Export definition is valid",
+        render_error.is_none(),
+        render_error.unwrap_or_else(|| "validated".to_owned()),
+    )
 }
 
 /// The four steps of RDMA-device readiness, shared by both protocols: a device
@@ -379,6 +399,7 @@ pub fn nvme_diagnostics(
     let listen = rdma_ports.first();
 
     let mut crits = vec![
+        validity_criterion(crate::reconcile::nvme_render_error(export)),
         crit(
             "RDMA requested for this export",
             export.want_rdma,
@@ -454,6 +475,7 @@ pub fn iscsi_diagnostics(
     let lun_mapped = target.is_some_and(|t| t.luns.iter().any(|l| l == &export.name));
 
     let mut crits = vec![
+        validity_criterion(crate::reconcile::iscsi_render_error(export)),
         crit(
             "RDMA (iSER) requested for this export",
             export.want_rdma,
@@ -531,15 +553,18 @@ pub fn nfs_diagnostics(
     listen: IpAddr,
 ) -> Vec<Criterion> {
     let exported = actual.exported(&export.path);
-    let mut crits = vec![crit(
-        "Path exported by nfsd",
-        exported,
-        if exported {
-            export.path.clone()
-        } else {
-            "not in the export table (reconcile pending?)".to_owned()
-        },
-    )];
+    let mut crits = vec![
+        validity_criterion(crate::reconcile::nfs_render_error(export)),
+        crit(
+            "Path exported by nfsd",
+            exported,
+            if exported {
+                export.path.clone()
+            } else {
+                "not in the export table (reconcile pending?)".to_owned()
+            },
+        ),
+    ];
     crits.extend(rdma_device_criteria(rdma, capable_disabled));
     crits.push(crit(
         "nfsd RDMA listener active",
@@ -1071,7 +1096,10 @@ mod tests {
             id: 1,
             path: "/tank/share".into(),
             enabled: true,
-            clients: vec![],
+            clients: vec![crate::state::NfsClientEntry {
+                client: "*".into(),
+                rw: false,
+            }],
             last_error: last_error.map(Into::into),
         }
     }

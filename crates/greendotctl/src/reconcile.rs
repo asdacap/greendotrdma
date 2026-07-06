@@ -13,10 +13,10 @@ use greendot_proto::{NFS_RDMA_PORT, Request, SubStatus, SubTask, Task, TaskEvent
 use greendot_reconcile::actual::nfs::from_report;
 use greendot_reconcile::config::Config;
 use greendot_reconcile::reconcile::{
-    iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied, nvme_modules, nvmet_satisfied,
-    render_lio, render_nfs, render_nvmet,
+    foreign_port_ids, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied, nvme_modules,
+    nvmet_satisfied, render_issues, render_lio, render_nfs, render_nvmet,
 };
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -109,14 +109,35 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
             return Ok(());
         }
     };
+    // Surface entries the renderers must skip — an invalid export would
+    // otherwise be silently absent from the applies: never served, no error.
+    let issues = render_issues(
+        &desired.nvme_exports,
+        &desired.iscsi_exports,
+        &desired.nfs_exports,
+    );
+    if !issues.is_empty() {
+        let mut sub = task.begin_subtask("Validate desired state");
+        for issue in &issues {
+            writeln!(sub.stderr(), "{issue}")?;
+        }
+        sub.fail(format!(
+            "{} desired-state entr{} cannot be served as configured",
+            issues.len(),
+            if issues.len() == 1 { "y" } else { "ies" }
+        ));
+    }
     let pci_addrs = greendot_reconcile::actual::nic::pci_addrs();
-    let nvmet_desired = render_nvmet(&desired.nvme_exports, desired.listen, &pci_addrs);
+    let actual_nvmet = greendot_reconcile::actual::nvmet::read(&cfg.nvmet_root);
+    let nvmet_desired = render_nvmet(
+        &desired.nvme_exports,
+        desired.listen,
+        &pci_addrs,
+        &foreign_port_ids(&actual_nvmet),
+    );
     let lio_desired = render_lio(&desired.iscsi_exports, desired.listen, &pci_addrs);
     let nfs_desired = render_nfs(&desired.nfs_exports, NFS_RDMA_PORT);
-    let nvmet_ok = nvmet_satisfied(
-        &nvmet_desired,
-        &greendot_reconcile::actual::nvmet::read(&cfg.nvmet_root),
-    );
+    let nvmet_ok = nvmet_satisfied(&nvmet_desired, &actual_nvmet);
     let lio_ok = lio_satisfied(
         &lio_desired,
         &greendot_reconcile::actual::lio::read(&cfg.lio_root),

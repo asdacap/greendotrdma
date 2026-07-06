@@ -53,11 +53,14 @@ pub fn listen_addrs(
 
 /// Renders the desired nvmet state from the enabled NVMe-oF exports. Each export
 /// listens on its pinned interfaces' current IPs (resolved via `pci_addrs`), or
-/// `default_listen` when it pins none.
+/// `default_listen` when it pins none. `reserved_ports` holds the ids of
+/// foreign nvmet ports (see [`foreign_port_ids`]); the rendered ports skip
+/// them so the apply never re-addresses a foreign port.
 pub fn render_nvmet(
     nvme: &[NvmeExport],
     default_listen: IpAddr,
     pci_addrs: &HashMap<String, Vec<IpAddr>>,
+    reserved_ports: &BTreeSet<u16>,
 ) -> NvmetDesired {
     let enabled = || {
         nvme.iter()
@@ -100,9 +103,10 @@ pub fn render_nvmet(
         }
     }
 
-    // Deterministic port ids from the sorted groups: the web drift pre-check and
-    // the CLI apply render the same live input independently, so the ids must
-    // agree. The loop port (if any) comes last.
+    // Deterministic port ids from the sorted groups, skipping ids held by
+    // foreign ports: the web drift pre-check and the CLI apply render the same
+    // live input independently, so the ids must agree. The loop port (if any)
+    // comes last.
     let mut ports: Vec<NvmetPortSpec> = net
         .into_iter()
         .map(|((trtype, traddr), subsystems)| NvmetPortSpec {
@@ -122,10 +126,129 @@ pub fn render_nvmet(
             subsystems: loop_subs,
         });
     }
-    for (i, p) in ports.iter_mut().enumerate() {
-        p.id = i as u16 + 1;
+    let mut next: u16 = 1;
+    for p in ports.iter_mut() {
+        while reserved_ports.contains(&next) {
+            next += 1;
+        }
+        p.id = next;
+        next += 1;
     }
     NvmetDesired { subsystems, ports }
+}
+
+/// Port ids held by foreign nvmet ports — ports whose subsystem links are all
+/// non-greendot. [`render_nvmet`] skips these ids so a foreign port at a
+/// colliding id is neither re-addressed by the apply nor read as perpetual
+/// drift. A port with no links at all is treated as reclaimable.
+pub fn foreign_port_ids(a: &ActualNvmet) -> BTreeSet<u16> {
+    a.ports
+        .iter()
+        .filter(|p| {
+            !p.subsystems.is_empty() && !p.subsystems.iter().any(|n| n.starts_with(OUR_NQN_PREFIX))
+        })
+        .map(|p| p.id)
+        .collect()
+}
+
+/// Why an enabled NVMe-oF export cannot be rendered at all, mirroring exactly
+/// what [`render_nvmet`] skips. The renderers deliberately serve every valid
+/// entry rather than failing the whole area on one bad one; the dots and the
+/// reconcile task surface these reasons so a skipped export is loud, not
+/// silently absent.
+pub fn nvme_render_error(e: &NvmeExport) -> Option<String> {
+    greendot_proto::DevicePath::new(&e.device_path)
+        .is_err()
+        .then(|| {
+            format!(
+                "invalid device path {:?} — export cannot be served",
+                e.device_path
+            )
+        })
+}
+
+/// Why an enabled iSCSI export cannot be rendered at all (see
+/// [`nvme_render_error`]).
+pub fn iscsi_render_error(e: &IscsiExport) -> Option<String> {
+    if greendot_proto::BackstoreName::new(&e.name).is_err() {
+        return Some(format!(
+            "invalid export name {:?} — export cannot be served",
+            e.name
+        ));
+    }
+    greendot_proto::DevicePath::new(&e.device_path)
+        .is_err()
+        .then(|| {
+            format!(
+                "invalid device path {:?} — export cannot be served",
+                e.device_path
+            )
+        })
+}
+
+/// Why an enabled NFS export cannot be rendered at all (see
+/// [`nvme_render_error`]).
+pub fn nfs_render_error(e: &NfsExport) -> Option<String> {
+    if NfsExportPath::new(&e.path).is_err() {
+        return Some(format!(
+            "invalid export path {:?} — export cannot be served",
+            e.path
+        ));
+    }
+    let valid = e
+        .clients
+        .iter()
+        .filter(|c| NfsClient::new(&c.client).is_ok())
+        .count();
+    (valid == 0).then(|| "no valid client spec — export cannot be served".to_owned())
+}
+
+/// Every reason the renderers will skip (or partially skip) enabled desired
+/// entries: the per-export render errors plus initiators/clients dropped by
+/// validation. Emitted by the reconcile task so nothing is dropped silently.
+pub fn render_issues(nvme: &[NvmeExport], iscsi: &[IscsiExport], nfs: &[NfsExport]) -> Vec<String> {
+    let mut issues = Vec::new();
+    for e in nvme.iter().filter(|e| e.enabled) {
+        if let Some(err) = nvme_render_error(e) {
+            issues.push(format!("NVMe-oF export {:?}: {err}", e.name));
+        }
+        for i in &e.initiators {
+            if Nqn::new(i.clone()).is_err() {
+                issues.push(format!(
+                    "NVMe-oF export {:?}: invalid initiator NQN {i:?} — dropped from allowed hosts",
+                    e.name
+                ));
+            }
+        }
+    }
+    for e in iscsi.iter().filter(|e| e.enabled) {
+        if let Some(err) = iscsi_render_error(e) {
+            issues.push(format!("iSCSI export {:?}: {err}", e.name));
+        }
+        for i in &e.initiators {
+            if greendot_proto::Iqn::new(i.clone()).is_err() {
+                issues.push(format!(
+                    "iSCSI export {:?}: invalid initiator IQN {i:?} — dropped from the ACL",
+                    e.name
+                ));
+            }
+        }
+    }
+    for e in nfs.iter().filter(|e| e.enabled) {
+        if let Some(err) = nfs_render_error(e) {
+            issues.push(format!("NFS export {:?}: {err}", e.path));
+        } else {
+            for c in &e.clients {
+                if NfsClient::new(&c.client).is_err() {
+                    issues.push(format!(
+                        "NFS export {:?}: invalid client {:?} — dropped",
+                        e.path, c.client
+                    ));
+                }
+            }
+        }
+    }
+    issues
 }
 
 /// Renders the desired LIO state from the enabled iSCSI exports. Each target's
@@ -446,6 +569,7 @@ mod tests {
             &[nvme_export()],
             "10.0.0.5".parse().unwrap(),
             &HashMap::new(),
+            &BTreeSet::new(),
         );
         assert_eq!(d.subsystems.len(), 1);
         assert_eq!(d.subsystems[0].nqn.as_str(), "nqn.2026-06.io.greendot:vm1");
@@ -465,7 +589,7 @@ mod tests {
     #[test]
     fn nvmet_satisfied_detects_match_and_drift() {
         let listen: IpAddr = "10.0.0.5".parse().unwrap();
-        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new());
+        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &BTreeSet::new());
         let actual = ActualNvmet {
             subsystems: vec![Subsys {
                 nqn: "nqn.2026-06.io.greendot:vm1".into(),
@@ -563,7 +687,12 @@ mod tests {
         };
 
         // One pinned interface → a single RDMA port at the resolved IP, not 0.0.0.0.
-        let d = render_nvmet(&[pin(1, "a", &["pci:0000:00:10.0"])], default, &pci);
+        let d = render_nvmet(
+            &[pin(1, "a", &["pci:0000:00:10.0"])],
+            default,
+            &pci,
+            &BTreeSet::new(),
+        );
         assert_eq!(d.ports.len(), 1);
         assert_eq!(d.ports[0].trtype, Transport::Rdma);
         assert_eq!(d.ports[0].traddr.to_string(), "10.0.0.1");
@@ -577,6 +706,7 @@ mod tests {
             ],
             default,
             &pci,
+            &BTreeSet::new(),
         );
         assert_eq!(shared.ports.len(), 1);
         assert_eq!(shared.ports[0].subsystems.len(), 2);
@@ -586,6 +716,7 @@ mod tests {
             &[pin(1, "a", &["pci:0000:00:10.0", "pci:0000:00:11.0"])],
             default,
             &pci,
+            &BTreeSet::new(),
         );
         let addrs: BTreeSet<String> = multi.ports.iter().map(|p| p.traddr.to_string()).collect();
         assert_eq!(
@@ -595,7 +726,12 @@ mod tests {
 
         // An unresolvable pin yields no port but keeps the subsystem (honest "not
         // served" rather than silently falling back to the default address).
-        let unresolved = render_nvmet(&[pin(1, "a", &["pci:0000:00:99.0"])], default, &pci);
+        let unresolved = render_nvmet(
+            &[pin(1, "a", &["pci:0000:00:99.0"])],
+            default,
+            &pci,
+            &BTreeSet::new(),
+        );
         assert!(unresolved.ports.is_empty());
         assert_eq!(unresolved.subsystems.len(), 1);
     }
@@ -691,6 +827,131 @@ mod tests {
         );
         assert!(nvme_modules(&[]).is_empty());
         assert!(iscsi_modules(&[]).is_empty());
+    }
+
+    #[test]
+    fn foreign_port_ids_are_skipped_and_never_drift() {
+        let listen: IpAddr = "10.0.0.5".parse().unwrap();
+        let foreign_port = Port {
+            id: 1,
+            trtype: "tcp".into(),
+            traddr: "192.168.9.9".into(),
+            trsvcid: "4420".into(),
+            subsystems: vec!["nqn.2000-01.com.example:manual".into()],
+        };
+        let actual = ActualNvmet {
+            subsystems: vec![],
+            ports: vec![foreign_port.clone()],
+        };
+        // The foreign port reserves id 1, so rendered ids start at 2…
+        let reserved = foreign_port_ids(&actual);
+        assert_eq!(reserved, BTreeSet::from([1]));
+        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &reserved);
+        let ids: Vec<u16> = d.ports.iter().map(|p| p.id).collect();
+        assert_eq!(ids, vec![2, 3]);
+        // …and a satisfied tree with the foreign port present stays satisfied.
+        let mut satisfied_actual = ActualNvmet {
+            subsystems: vec![Subsys {
+                nqn: "nqn.2026-06.io.greendot:vm1".into(),
+                allow_any_host: false,
+                allowed_hosts: vec!["nqn.2014-08.org.nvmexpress:host1".into()],
+                namespaces: vec![Namespace {
+                    nsid: 1,
+                    device_path: DEV.into(),
+                    enabled: true,
+                }],
+            }],
+            ports: vec![foreign_port],
+        };
+        for (id, trtype) in [(2, "rdma"), (3, "tcp")] {
+            satisfied_actual.ports.push(Port {
+                id,
+                trtype: trtype.into(),
+                traddr: "10.0.0.5".into(),
+                trsvcid: "4420".into(),
+                subsystems: vec!["nqn.2026-06.io.greendot:vm1".into()],
+            });
+        }
+        assert!(nvmet_satisfied(&d, &satisfied_actual));
+        // A port linking one of ours is not foreign; an unlinked port is
+        // reclaimable, not reserved.
+        assert!(
+            foreign_port_ids(&ActualNvmet {
+                subsystems: vec![],
+                ports: satisfied_actual.ports.clone(),
+            }) == BTreeSet::from([1])
+        );
+        let unlinked = ActualNvmet {
+            subsystems: vec![],
+            ports: vec![Port {
+                id: 4,
+                trtype: "tcp".into(),
+                traddr: "10.0.0.5".into(),
+                trsvcid: "4420".into(),
+                subsystems: vec![],
+            }],
+        };
+        assert!(foreign_port_ids(&unlinked).is_empty());
+    }
+
+    #[test]
+    fn render_issues_surface_every_skip() {
+        // Valid entries produce no issues.
+        assert!(render_issues(&[nvme_export()], &[iscsi_export()], &[]).is_empty());
+
+        let bad_nvme = NvmeExport {
+            device_path: "/etc/passwd; rm".into(),
+            initiators: vec!["not an nqn!".into()],
+            ..nvme_export()
+        };
+        let bad_iscsi = IscsiExport {
+            name: "-bad".into(),
+            ..iscsi_export()
+        };
+        let bad_nfs = crate::state::NfsExport {
+            id: 3,
+            path: "/tank/../etc".into(),
+            enabled: true,
+            clients: vec![],
+            last_error: None,
+        };
+        let clientless_nfs = crate::state::NfsExport {
+            id: 4,
+            path: "/tank/ok".into(),
+            enabled: true,
+            clients: vec![crate::state::NfsClientEntry {
+                client: "h(rw".into(),
+                rw: true,
+            }],
+            last_error: None,
+        };
+        let issues = render_issues(
+            std::slice::from_ref(&bad_nvme),
+            std::slice::from_ref(&bad_iscsi),
+            &[bad_nfs.clone(), clientless_nfs],
+        );
+        assert_eq!(issues.len(), 5, "{issues:?}");
+        assert!(issues[0].contains("invalid device path"), "{}", issues[0]);
+        assert!(issues[1].contains("invalid initiator NQN"), "{}", issues[1]);
+        assert!(issues[2].contains("invalid export name"), "{}", issues[2]);
+        assert!(issues[3].contains("invalid export path"), "{}", issues[3]);
+        assert!(issues[4].contains("no valid client spec"), "{}", issues[4]);
+        // …but a disabled entry is not an issue.
+        assert!(
+            render_issues(
+                &[NvmeExport {
+                    enabled: false,
+                    ..bad_nvme
+                }],
+                &[],
+                &[]
+            )
+            .is_empty()
+        );
+        // The per-export errors mirror the renderers exactly.
+        assert!(nvme_render_error(&nvme_export()).is_none());
+        assert!(iscsi_render_error(&iscsi_export()).is_none());
+        assert!(nfs_render_error(&bad_nfs).is_some());
     }
 
     #[test]

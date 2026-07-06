@@ -51,9 +51,15 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
 
     let nfs_exports = state.db.list_nfs_exports()?;
     let pci_addrs = actual::nic::pci_addrs();
+    let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let nvmet_ok = reconcile::nvmet_satisfied(
-        &reconcile::render_nvmet(&nvme_exports, listen, &pci_addrs),
-        &actual::nvmet::read(&state.nvmet_root),
+        &reconcile::render_nvmet(
+            &nvme_exports,
+            listen,
+            &pci_addrs,
+            &reconcile::foreign_port_ids(&actual_nvmet),
+        ),
+        &actual_nvmet,
     );
     let lio_ok = reconcile::lio_satisfied(
         &reconcile::render_lio(&iscsi_exports, listen, &pci_addrs),
