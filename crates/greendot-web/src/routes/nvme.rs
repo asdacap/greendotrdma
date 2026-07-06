@@ -5,10 +5,9 @@
 //! read-only with an honest, observed-transport dot.
 
 use super::block_export::{
-    self, ClientCmd, DiagnoseView, ExportDetailView, ExportProtocol, ExportRow, ExportsView,
-    capable_disabled_nics, diagnose_not_found, dot_class, hosts_cell, iface_choices, join_devices,
-    listen_addr, managed_dot, parse_create_fields, reconcile_banner, reconcile_state,
-    render_diagnose, validate_create,
+    self, ClientCmd, CreateFields, DiagnoseView, ExportDetailView, ExportProtocol, ExportRow,
+    ExportsView, capable_disabled_nics, diagnose_not_found, dot_class, gather_view, hosts_cell,
+    join_devices, listen_addr, managed_dot, render_diagnose,
 };
 use super::{AppState, page};
 use crate::actual;
@@ -16,19 +15,18 @@ use crate::auth::CurrentUser;
 use crate::dot::{external_nvme_dot, nvme_diagnostics, nvme_dot};
 use crate::state::{Db, NewNvmeExport};
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{Nqn, OUR_NQN_PREFIX};
-use std::collections::HashSet;
+use greendot_proto::{DevicePath, ExportName, Nqn, OUR_NQN_PREFIX};
 use std::net::IpAddr;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/nvme", get(nvme_page))
-        .route("/nvme/create", post(create))
+        .route("/nvme/create", post(block_export::create::<Nvme>))
         .route("/nvme/{id}", get(detail_page))
         .route("/nvme/toggle", post(block_export::toggle::<Nvme>))
         .route(
@@ -52,7 +50,94 @@ impl ExportProtocol for Nvme {
         form_error: Option<String>,
         task_id: Option<i64>,
     ) -> ExportsView {
-        gather(state, flash, form_error, task_id).await
+        gather_view(state, flash, form_error, task_id, |reconcile_task| {
+            let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
+            let rdma = actual::rdma::devices();
+            let listen = listen_addr(state);
+            let pci_addrs = actual::nic::pci_addrs();
+            let (mut rows, error): (Vec<ExportRow>, Option<String>) =
+                match state.db.list_nvme_exports() {
+                    Ok(exports) => (
+                        exports
+                            .iter()
+                            .map(|e| {
+                                let (dot_class_, dot_reason, diagnose, row_task) =
+                                    managed_dot(e.enabled, e.want_rdma, reconcile_task, || {
+                                        nvme_dot(e, &actual_nvmet, &rdma)
+                                    });
+                                let mut transports = Vec::new();
+                                for (want, label) in [
+                                    (e.want_rdma, "RDMA"),
+                                    (e.want_tcp, "TCP"),
+                                    (e.want_loop, "loop"),
+                                ] {
+                                    if want {
+                                        transports.push(label);
+                                    }
+                                }
+                                ExportRow {
+                                    id: e.id,
+                                    name: e.name.clone(),
+                                    dot_class: dot_class_,
+                                    dot_reason,
+                                    device: e.device_path.clone(),
+                                    transports: transports.join(" + "),
+                                    hosts: hosts_cell(e.allow_any_host, e.initiators.len()),
+                                    clients: None,
+                                    enabled: e.enabled,
+                                    diagnose,
+                                    client: client_instructions(
+                                        e,
+                                        &crate::reconcile::listen_addrs(
+                                            &e.interfaces,
+                                            listen,
+                                            &pci_addrs,
+                                        ),
+                                    ),
+                                    external: false,
+                                    task_id: row_task,
+                                }
+                            })
+                            .collect(),
+                        None,
+                    ),
+                    Err(e) => (vec![], Some(format!("could not read export store: {e:#}"))),
+                };
+            // Foreign subsystems present on the box that greendot didn't create —
+            // observed read-only with the same honest RDMA dot.
+            rows.extend(foreign_nvme_rows(&actual_nvmet, &rdma));
+            (rows, error)
+        })
+        .await
+    }
+
+    fn initiator_ok(i: &str) -> bool {
+        Nqn::new(i.to_owned()).is_ok()
+    }
+
+    fn has_transport(f: &CreateFields) -> bool {
+        f.want_rdma || f.want_tcp || f.want_loop
+    }
+
+    fn insert(
+        db: &Db,
+        name: &ExportName,
+        device: &DevicePath,
+        allow_any_host: bool,
+        initiators: Vec<String>,
+        f: CreateFields,
+    ) -> anyhow::Result<()> {
+        db.insert_nvme_export(&NewNvmeExport {
+            name: name.to_string(),
+            device_path: device.to_string(),
+            want_rdma: f.want_rdma,
+            want_tcp: f.want_tcp,
+            want_loop: f.want_loop,
+            allow_any_host,
+            initiators,
+            interfaces: f.interfaces,
+        })
+        .map(|_| ())
     }
 
     fn render_list_partial(view: ExportsView) -> Response {
@@ -147,11 +232,7 @@ fn foreign_nvme_rows(
                 dot_reason: dot.reason,
                 device: join_devices(s.namespaces.iter().map(|n| n.device_path.as_str())),
                 transports: transports.join(" + "),
-                hosts: if s.allow_any_host {
-                    "any host".into()
-                } else {
-                    format!("{} allowed", s.allowed_hosts.len())
-                },
+                hosts: hosts_cell(s.allow_any_host, s.allowed_hosts.len()),
                 clients: None,
                 enabled: true,
                 diagnose: false,
@@ -161,84 +242,6 @@ fn foreign_nvme_rows(
             }
         })
         .collect()
-}
-
-pub async fn gather(
-    state: &AppState,
-    flash: Option<String>,
-    form_error: Option<String>,
-    task_id: Option<i64>,
-) -> ExportsView {
-    let mut view = ExportsView {
-        rows: vec![],
-        devices: vec![],
-        interfaces: iface_choices(state, &[]).await,
-        banner: None,
-        banner_task_id: None,
-        flash,
-        task_id,
-        form_error,
-    };
-    // The most recent reconcile task — linked from the banner and from the dots
-    // of any export it left unrealized.
-    let (reconcile_task, reconcile_banner) = reconcile_banner(state);
-    let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
-    let rdma = actual::rdma::devices();
-    let listen = listen_addr(state);
-    let pci_addrs = actual::nic::pci_addrs();
-    match state.db.list_nvme_exports() {
-        Ok(exports) => {
-            view.rows = exports
-                .iter()
-                .map(|e| {
-                    let (dot_class_, dot_reason, diagnose, row_task) =
-                        managed_dot(e.enabled, e.want_rdma, reconcile_task, || {
-                            nvme_dot(e, &actual_nvmet, &rdma)
-                        });
-                    let mut transports = Vec::new();
-                    for (want, label) in [
-                        (e.want_rdma, "RDMA"),
-                        (e.want_tcp, "TCP"),
-                        (e.want_loop, "loop"),
-                    ] {
-                        if want {
-                            transports.push(label);
-                        }
-                    }
-                    ExportRow {
-                        id: e.id,
-                        name: e.name.clone(),
-                        dot_class: dot_class_,
-                        dot_reason,
-                        device: e.device_path.clone(),
-                        transports: transports.join(" + "),
-                        hosts: hosts_cell(e.allow_any_host, e.initiators.len()),
-                        clients: None,
-                        enabled: e.enabled,
-                        diagnose,
-                        client: client_instructions(
-                            e,
-                            &crate::reconcile::listen_addrs(&e.interfaces, listen, &pci_addrs),
-                        ),
-                        external: false,
-                        task_id: row_task,
-                    }
-                })
-                .collect();
-        }
-        Err(e) => view.banner = Some(format!("could not read export store: {e:#}")),
-    }
-
-    // Foreign subsystems present on the box that greendot didn't create — observed
-    // read-only with the same honest RDMA dot.
-    view.rows.extend(foreign_nvme_rows(&actual_nvmet, &rdma));
-    if let Some(banner) = reconcile_banner {
-        view.banner = Some(banner);
-        view.banner_task_id = reconcile_task;
-    }
-    let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
-    view.devices = actual::block::available_block_devices(&state.helper, &in_use).await;
-    view
 }
 
 #[derive(Template)]
@@ -325,48 +328,14 @@ async fn nvme_page(
 ) -> Response {
     page(NvmeTemplate {
         user,
-        view: gather(&state, None, None, None).await,
+        view: Nvme::gather(&state, None, None, None).await,
     })
 }
 
 async fn dots_partial(State(state): State<Arc<AppState>>) -> Response {
     page(NvmeDotsPartial {
-        view: gather(&state, None, None, None).await,
+        view: Nvme::gather(&state, None, None, None).await,
     })
-}
-
-/// Create keeps only the NVMe-oF specifics (loop transport, NQN initiators,
-/// the insert); parsing and validation are shared with iSCSI.
-async fn create(
-    State(state): State<Arc<AppState>>,
-    Form(fields): Form<Vec<(String, String)>>,
-) -> Response {
-    let f = parse_create_fields(fields);
-    let has_transport = f.want_rdma || f.want_tcp || f.want_loop;
-    let valid = validate_create(&f, |i| Nqn::new(i.to_owned()).is_ok(), has_transport);
-    let (name, device, initiators, allow_any_host) = match valid {
-        Ok(v) => v,
-        Err(msg) => {
-            return page(NvmePartial {
-                view: gather(&state, None, Some(msg), None).await,
-            });
-        }
-    };
-    let new = NewNvmeExport {
-        name: name.to_string(),
-        device_path: device.to_string(),
-        want_rdma: f.want_rdma,
-        want_tcp: f.want_tcp,
-        want_loop: f.want_loop,
-        allow_any_host,
-        initiators,
-        interfaces: f.interfaces,
-    };
-    let result = match state.db.insert_nvme_export(&new) {
-        Ok(_) => reconcile_state(&state).await,
-        Err(e) => Err(e),
-    };
-    block_export::finish::<Nvme>(&state, result, format!("created export {name}")).await
 }
 
 #[cfg(test)]
@@ -541,6 +510,18 @@ mod tests {
             .await;
             assert_eq!(status, StatusCode::OK);
             assert!(body.contains("listen interfaces updated"), "{body}");
+
+            // A missing (or unparsable) id is a client error — it must not fall
+            // through to export id 0 and flash success without updating anything.
+            let (status, _, _) = send(
+                &app,
+                auth(form_post(
+                    "/nvme/interfaces",
+                    "interfaces=pci%3A0000%3A00%3A11.0",
+                )),
+            )
+            .await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
         }
 
         #[tokio::test]

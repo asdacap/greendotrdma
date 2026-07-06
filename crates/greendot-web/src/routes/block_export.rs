@@ -14,8 +14,8 @@ use crate::state::{Db, IscsiExport, NfsExport, NvmeExport};
 use crate::task_runner::TaskOutcome;
 use askama::Template;
 use axum::extract::{Form, State};
-use axum::http::HeaderMap;
-use axum::response::Response;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse, Response};
 use greendot_proto::{DevicePath, ExportName, NFS_RDMA_PORT, Request};
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
@@ -177,7 +177,8 @@ pub struct ExportDetailView {
 /// create/toggle/interfaces/delete flows and the detail plumbing used to live
 /// line-for-line in both `routes::nvme` and `routes::iscsi`; each now
 /// implements this and the generic handlers do the rest. `gather` stays
-/// protocol-owned — rows, transports and client commands genuinely differ.
+/// protocol-owned — rows, transports and client commands genuinely differ —
+/// with its shared chrome factored into [`gather_view`].
 #[allow(async_fn_in_trait)]
 pub trait ExportProtocol: Send + Sync + 'static {
     /// The list page path (`"/nvme"`), used for redirects after delete.
@@ -195,6 +196,20 @@ pub trait ExportProtocol: Send + Sync + 'static {
     fn set_enabled(db: &Db, id: i64, enable: bool) -> anyhow::Result<()>;
     fn set_interfaces(db: &Db, id: i64, interfaces: &[String]) -> anyhow::Result<()>;
     fn delete(db: &Db, id: i64) -> anyhow::Result<()>;
+    /// Whether `i` is a valid initiator identifier for this protocol (NQN vs IQN).
+    fn initiator_ok(i: &str) -> bool;
+    /// Whether the create form picked a transport — protocol-computed because
+    /// loop counts only for NVMe-oF.
+    fn has_transport(f: &CreateFields) -> bool;
+    /// Inserts the validated export into the desired state.
+    fn insert(
+        db: &Db,
+        name: &ExportName,
+        device: &DevicePath,
+        allow_any_host: bool,
+        initiators: Vec<String>,
+        f: CreateFields,
+    ) -> anyhow::Result<()>;
 }
 
 #[derive(Deserialize)]
@@ -218,6 +233,40 @@ pub fn reconcile_banner(state: &AppState) -> (Option<i64>, Option<String>) {
         _ => None,
     };
     (task, banner)
+}
+
+/// The shared chrome of a protocol's list `gather`: the interface picker, the
+/// reconcile banner threading, and the available-devices tail. `rows` builds
+/// the protocol's table (managed + foreign) given the reconcile task id to
+/// link from unrealized dots, returning the rows plus the store-read error
+/// banner, if any (the reconcile banner wins when both are present).
+pub async fn gather_view(
+    state: &AppState,
+    flash: Option<String>,
+    form_error: Option<String>,
+    task_id: Option<i64>,
+    rows: impl FnOnce(Option<i64>) -> (Vec<ExportRow>, Option<String>),
+) -> ExportsView {
+    let (reconcile_task, reconcile_banner) = reconcile_banner(state);
+    let (rows, store_error) = rows(reconcile_task);
+    let mut view = ExportsView {
+        rows,
+        devices: vec![],
+        interfaces: iface_choices(state, &[]).await,
+        banner: store_error,
+        banner_task_id: None,
+        flash,
+        task_id,
+        form_error,
+    };
+    if let Some(banner) = reconcile_banner {
+        view.banner = Some(banner);
+        view.banner_task_id = reconcile_task;
+    }
+    let in_use: std::collections::HashSet<String> =
+        state.db.export_device_paths().into_iter().collect();
+    view.devices = actual::block::available_block_devices(&state.helper, &in_use).await;
+    view
 }
 
 /// The dot cell of a managed export row: CSS class, reason, whether to offer
@@ -261,13 +310,19 @@ pub async fn gather_detail<P: ExportProtocol>(
     task_id: Option<i64>,
 ) -> ExportDetailView {
     let selected = P::stored_interfaces(&state.db, id);
-    let view = P::gather(state, flash, form_error, task_id).await;
+    let sel: std::collections::HashSet<&str> = selected.iter().map(String::as_str).collect();
+    let mut view = P::gather(state, flash, form_error, task_id).await;
+    // Reuse the list gather's picker (one NIC enumeration round-trip), re-checked
+    // against this export's pins instead of querying the helper again.
+    for c in &mut view.interfaces {
+        c.checked = sel.contains(c.value.as_str());
+    }
     let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
     ExportDetailView {
         name: row
             .as_ref()
             .map_or_else(|| id.to_string(), |r| r.name.clone()),
-        interfaces: iface_choices(state, &selected).await,
+        interfaces: view.interfaces,
         row,
         banner: view.banner,
         banner_task_id: view.banner_task_id,
@@ -280,7 +335,7 @@ pub async fn gather_detail<P: ExportProtocol>(
 /// Renders the list partial after a create: the reconcile (if any) runs in the
 /// background, so `result` carries its task id for the notice's "view task"
 /// link.
-pub async fn finish<P: ExportProtocol>(
+async fn finish<P: ExportProtocol>(
     state: &AppState,
     result: anyhow::Result<Option<i64>>,
     success: String,
@@ -290,6 +345,27 @@ pub async fn finish<P: ExportProtocol>(
         Err(e) => (None, Some(format!("{e:#}")), None),
     };
     P::render_list_partial(P::gather(state, flash, error, task_id).await)
+}
+
+/// The shared create flow: parse, validate (the protocol hooks supply the
+/// identifier check and transport rule), insert, reconcile. A validation or
+/// insert error re-renders the list partial with the form error.
+pub async fn create<P: ExportProtocol>(
+    State(state): State<Arc<AppState>>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let f = parse_create_fields(fields);
+    let valid = validate_create(&f, P::initiator_ok, P::has_transport(&f));
+    let (name, device, initiators, allow_any_host) = match valid {
+        Ok(v) => v,
+        Err(msg) => return P::render_list_partial(P::gather(&state, None, Some(msg), None).await),
+    };
+    let success = format!("created export {name}");
+    let result = match P::insert(&state.db, &name, &device, allow_any_host, initiators, f) {
+        Ok(()) => reconcile_state(&state).await,
+        Err(e) => Err(e),
+    };
+    finish::<P>(&state, result, success).await
 }
 
 /// Enable/disable stays on the export's own page, re-rendering its detail
@@ -317,15 +393,21 @@ pub async fn edit_interfaces<P: ExportProtocol>(
     State(state): State<Arc<AppState>>,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
-    let mut id: i64 = 0;
+    let mut id: Option<i64> = None;
     let mut interfaces: Vec<String> = Vec::new();
     for (k, v) in fields {
         match k.as_str() {
-            "id" => id = v.trim().parse().unwrap_or(0),
+            "id" => id = v.trim().parse().ok(),
             "interfaces" => interfaces.push(v),
             _ => {}
         }
     }
+    // A missing or unparsable id must not fall through to export id 0 —
+    // set_interfaces would match no row yet still flash success. Reject it the
+    // way the Form(IdForm) handlers reject theirs.
+    let Some(id) = id else {
+        return (StatusCode::UNPROCESSABLE_ENTITY, "missing or invalid id").into_response();
+    };
     if let Some(bad) = interfaces
         .iter()
         .find(|s| crate::state::parse_listen_iface(s).is_none())
@@ -381,7 +463,7 @@ pub struct CreateFields {
     pub interfaces: Vec<String>,
 }
 
-pub fn parse_create_fields(fields: Vec<(String, String)>) -> CreateFields {
+fn parse_create_fields(fields: Vec<(String, String)>) -> CreateFields {
     let mut f = CreateFields::default();
     for (k, v) in fields {
         match k.as_str() {
@@ -403,7 +485,7 @@ pub fn parse_create_fields(fields: Vec<(String, String)>) -> CreateFields {
 /// allow_any_host)` on success, the user-facing form error otherwise.
 /// `initiator_ok` is the protocol's identifier check (NQN vs IQN);
 /// `has_transport` is protocol-computed because loop counts only for NVMe-oF.
-pub fn validate_create(
+fn validate_create(
     f: &CreateFields,
     initiator_ok: impl Fn(&str) -> bool,
     has_transport: bool,
