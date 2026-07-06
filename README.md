@@ -44,6 +44,17 @@ Two systemd services:
   daemon — so the web UI is optional and an alternative frontend can drive it
   directly.
 
+**Trust model.** The helper boundary stops *smuggling*, not *semantics*: no
+request can name an arbitrary path or argv for root, but the allowlisted
+operations themselves are powerful — the `greendot` uid can, with perfectly
+well-formed requests, mount a dataset over a system directory, export any
+absolute path over NFS, or create a pool on the OS disk. A compromised
+greendot-web is therefore root-equivalent in effect, just constrained in
+mechanism. This is a deliberate trade-off for a single-purpose storage
+appliance: the boundary's job is to make the web service's *bugs* (injection,
+traversal, deserialization) non-exploitable, not to sandbox a fully hostile
+web process.
+
 Log in with any system account that is a member of the **greendot-admin**
 group:
 

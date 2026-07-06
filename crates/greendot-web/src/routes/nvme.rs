@@ -5,24 +5,22 @@
 //! read-only with an honest, observed-transport dot.
 
 use super::block_export::{
-    ClientCmd, DiagnoseView, ExportRow, IfaceChoice, dot_class, iface_choices, join_devices,
-    listen_addr, reconcile_state, render_diagnose,
+    self, ClientCmd, DiagnoseView, ExportDetailView, ExportProtocol, ExportRow, ExportsView,
+    capable_disabled_nics, diagnose_not_found, dot_class, hosts_cell, iface_choices, join_devices,
+    listen_addr, managed_dot, parse_create_fields, reconcile_banner, reconcile_state,
+    render_diagnose, validate_create,
 };
-use super::block_export::{RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
 use super::{AppState, page};
 use crate::actual;
-use crate::auth::{CurrentUser, nav_redirect};
-use crate::dot::DotState;
+use crate::auth::CurrentUser;
 use crate::dot::{external_nvme_dot, nvme_diagnostics, nvme_dot};
-use crate::state::NewNvmeExport;
+use crate::state::{Db, NewNvmeExport};
 use askama::Template;
 use axum::extract::{Form, Path, State};
-use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{DevicePath, ExportName, Nqn, OUR_NQN_PREFIX};
-use serde::Deserialize;
+use greendot_proto::{Nqn, OUR_NQN_PREFIX};
 use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -32,11 +30,58 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/nvme", get(nvme_page))
         .route("/nvme/create", post(create))
         .route("/nvme/{id}", get(detail_page))
-        .route("/nvme/toggle", post(toggle))
-        .route("/nvme/interfaces", post(set_interfaces))
-        .route("/nvme/delete", post(delete))
+        .route("/nvme/toggle", post(block_export::toggle::<Nvme>))
+        .route(
+            "/nvme/interfaces",
+            post(block_export::edit_interfaces::<Nvme>),
+        )
+        .route("/nvme/delete", post(block_export::delete::<Nvme>))
         .route("/nvme/{id}/diagnose", get(diagnose_page))
         .route("/partials/nvme", get(dots_partial))
+}
+
+/// The NVMe-oF bindings for the shared export handlers.
+struct Nvme;
+
+impl ExportProtocol for Nvme {
+    const LIST_PATH: &'static str = "/nvme";
+
+    async fn gather(
+        state: &AppState,
+        flash: Option<String>,
+        form_error: Option<String>,
+        task_id: Option<i64>,
+    ) -> ExportsView {
+        gather(state, flash, form_error, task_id).await
+    }
+
+    fn render_list_partial(view: ExportsView) -> Response {
+        page(NvmePartial { view })
+    }
+
+    fn render_detail_partial(view: ExportDetailView) -> Response {
+        page(NvmeDetailPartial { view })
+    }
+
+    fn stored_interfaces(db: &Db, id: i64) -> Vec<String> {
+        db.list_nvme_exports()
+            .ok()
+            .and_then(|es| es.into_iter().find(|e| e.id == id))
+            .map(|e| e.interfaces)
+            .unwrap_or_default()
+    }
+
+    fn set_enabled(db: &Db, id: i64, enable: bool) -> anyhow::Result<()> {
+        db.set_nvme_export_enabled(id, enable)
+    }
+
+    fn set_interfaces(db: &Db, id: i64, interfaces: &[String]) -> anyhow::Result<()> {
+        db.set_nvme_export_interfaces(id, interfaces)
+    }
+
+    fn delete(db: &Db, id: i64) -> anyhow::Result<()> {
+        db.delete_nvme_export(id)
+    }
 }
 
 /// Builds the per-transport `nvme connect` command(s) for an export. Ports
@@ -118,27 +163,13 @@ fn foreign_nvme_rows(
         .collect()
 }
 
-pub struct NvmeExportsView {
-    pub rows: Vec<ExportRow>,
-    pub devices: Vec<actual::block::AvailDevice>,
-    /// Physical ports offered in the create form's "listen interfaces" picker.
-    pub interfaces: Vec<IfaceChoice>,
-    pub banner: Option<String>,
-    /// The reconcile task to link from the banner (`/tasks/{id}`).
-    pub banner_task_id: Option<i64>,
-    pub flash: Option<String>,
-    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
-    pub task_id: Option<i64>,
-    pub form_error: Option<String>,
-}
-
 pub async fn gather(
     state: &AppState,
     flash: Option<String>,
     form_error: Option<String>,
     task_id: Option<i64>,
-) -> NvmeExportsView {
-    let mut view = NvmeExportsView {
+) -> ExportsView {
+    let mut view = ExportsView {
         rows: vec![],
         devices: vec![],
         interfaces: iface_choices(state, &[]).await,
@@ -150,12 +181,7 @@ pub async fn gather(
     };
     // The most recent reconcile task — linked from the banner and from the dots
     // of any export it left unrealized.
-    let reconcile_task = state
-        .db
-        .get_setting(RECONCILE_TASK_KEY)
-        .ok()
-        .flatten()
-        .and_then(|s| s.parse::<i64>().ok());
+    let (reconcile_task, reconcile_banner) = reconcile_banner(state);
     let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
     let rdma = actual::rdma::devices();
     let listen = listen_addr(state);
@@ -165,18 +191,10 @@ pub async fn gather(
             view.rows = exports
                 .iter()
                 .map(|e| {
-                    let (dot_class_, dot_reason, diagnose, row_task) = if !e.enabled {
-                        ("dot-gray", "disabled".to_owned(), false, None)
-                    } else {
-                        let dot = nvme_dot(e, &actual_nvmet, &rdma);
-                        let not_green = dot.state != DotState::Green;
-                        (
-                            dot_class(dot.state),
-                            dot.reason,
-                            e.want_rdma && not_green,
-                            not_green.then_some(reconcile_task).flatten(),
-                        )
-                    };
+                    let (dot_class_, dot_reason, diagnose, row_task) =
+                        managed_dot(e.enabled, e.want_rdma, reconcile_task, || {
+                            nvme_dot(e, &actual_nvmet, &rdma)
+                        });
                     let mut transports = Vec::new();
                     for (want, label) in [
                         (e.want_rdma, "RDMA"),
@@ -194,11 +212,7 @@ pub async fn gather(
                         dot_reason,
                         device: e.device_path.clone(),
                         transports: transports.join(" + "),
-                        hosts: if e.allow_any_host {
-                            "any host".into()
-                        } else {
-                            format!("{} allowed", e.initiators.len())
-                        },
+                        hosts: hosts_cell(e.allow_any_host, e.initiators.len()),
                         clients: None,
                         enabled: e.enabled,
                         diagnose,
@@ -218,10 +232,8 @@ pub async fn gather(
     // Foreign subsystems present on the box that greendot didn't create — observed
     // read-only with the same honest RDMA dot.
     view.rows.extend(foreign_nvme_rows(&actual_nvmet, &rdma));
-    if let Ok(Some(err)) = state.db.get_setting(RECONCILE_ERROR_KEY)
-        && !err.is_empty()
-    {
-        view.banner = Some(format!("reconcile problem: {err}"));
+    if let Some(banner) = reconcile_banner {
+        view.banner = Some(banner);
         view.banner_task_id = reconcile_task;
     }
     let in_use: HashSet<String> = state.db.export_device_paths().into_iter().collect();
@@ -233,38 +245,22 @@ pub async fn gather(
 #[template(path = "nvme.html")]
 struct NvmeTemplate {
     user: CurrentUser,
-    view: NvmeExportsView,
+    view: ExportsView,
 }
 
 #[derive(Template)]
 #[template(path = "_nvme.html")]
 struct NvmePartial {
-    view: NvmeExportsView,
+    view: ExportsView,
 }
 
 #[derive(Template)]
 #[template(path = "_nvme_dots.html")]
 struct NvmeDotsPartial {
-    view: NvmeExportsView,
+    view: ExportsView,
 }
 
 // ---- Per-export page (client instructions + enable/disable/delete) ----
-
-pub struct ExportDetailView {
-    pub name: String,
-    /// `None` when the export id is unknown (or belongs to a foreign export).
-    pub row: Option<ExportRow>,
-    /// Physical ports for the "listen interfaces" edit form, this export's
-    /// current pins pre-checked.
-    pub interfaces: Vec<IfaceChoice>,
-    pub banner: Option<String>,
-    /// The reconcile task to link from the banner (`/tasks/{id}`).
-    pub banner_task_id: Option<i64>,
-    pub flash: Option<String>,
-    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
-    pub task_id: Option<i64>,
-    pub form_error: Option<String>,
-}
 
 #[derive(Template)]
 #[template(path = "nvme_detail.html")]
@@ -279,38 +275,6 @@ struct NvmeDetailPartial {
     view: ExportDetailView,
 }
 
-/// Re-reads live state via [`gather`] and picks out the one managed export, so
-/// the detail page shows the same dot/transports/client commands as the list.
-async fn gather_detail(
-    state: &AppState,
-    id: i64,
-    flash: Option<String>,
-    form_error: Option<String>,
-    task_id: Option<i64>,
-) -> ExportDetailView {
-    let selected = state
-        .db
-        .list_nvme_exports()
-        .ok()
-        .and_then(|es| es.into_iter().find(|e| e.id == id))
-        .map(|e| e.interfaces)
-        .unwrap_or_default();
-    let view = gather(state, flash, form_error, task_id).await;
-    let row = view.rows.into_iter().find(|r| r.id == id && !r.external);
-    ExportDetailView {
-        name: row
-            .as_ref()
-            .map_or_else(|| id.to_string(), |r| r.name.clone()),
-        interfaces: iface_choices(state, &selected).await,
-        row,
-        banner: view.banner,
-        banner_task_id: view.banner_task_id,
-        flash: view.flash,
-        task_id: view.task_id,
-        form_error: view.form_error,
-    }
-}
-
 async fn detail_page(
     State(state): State<Arc<AppState>>,
     Extension(user): Extension<CurrentUser>,
@@ -318,7 +282,7 @@ async fn detail_page(
 ) -> Response {
     page(NvmeDetailTemplate {
         user,
-        view: gather_detail(&state, id, None, None, None).await,
+        view: block_export::gather_detail::<Nvme>(&state, id, None, None, None).await,
     })
 }
 
@@ -329,25 +293,10 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
         .ok()
         .and_then(|exports| exports.into_iter().find(|e| e.id == id));
     let Some(export) = export else {
-        return DiagnoseView {
-            name: String::new(),
-            protocol: "NVMe-oF",
-            dot_class: "dot-gray",
-            dot_reason: String::new(),
-            criteria: vec![],
-            not_found: true,
-            back_href: "/nvme",
-        };
+        return diagnose_not_found("NVMe-oF", "/nvme");
     };
     let rdma = actual::rdma::devices();
-    // NICs that are RoCE-capable but have RoCE switched off — surfaced when no
-    // RDMA device exists, so the checklist explains why and points at Settings.
-    let capable_disabled: Vec<String> = actual::nic::interfaces(&state.helper)
-        .await
-        .into_iter()
-        .filter(|n| matches!(n.kind, actual::nic::NicRdmaKind::CapableDisabled { .. }))
-        .map(|n| n.netdev)
-        .collect();
+    let capable_disabled = capable_disabled_nics(state).await;
     let nvmet = actual::nvmet::read(&state.nvmet_root);
     let criteria = nvme_diagnostics(&export, &nvmet, &rdma, &capable_disabled);
     let dot = nvme_dot(&export, &nvmet, &rdma);
@@ -386,171 +335,38 @@ async fn dots_partial(State(state): State<Arc<AppState>>) -> Response {
     })
 }
 
-/// Renders the list partial after a create: the reconcile (if any) runs in the
-/// background, so `result` carries its task id for the notice's "view task" link.
-async fn finish(
-    state: &AppState,
-    result: anyhow::Result<Option<i64>>,
-    success: String,
-) -> Response {
-    let (flash, error, task_id) = match result {
-        Ok(task_id) => (Some(success), None, task_id),
-        Err(e) => (None, Some(format!("{e:#}")), None),
-    };
-    page(NvmePartial {
-        view: gather(state, flash, error, task_id).await,
-    })
-}
-
-/// Create reads the raw pair list because the "listen interfaces" picker arrives
-/// as repeated `interfaces` keys (the same pattern as the pool/VG create forms).
+/// Create keeps only the NVMe-oF specifics (loop transport, NQN initiators,
+/// the insert); parsing and validation are shared with iSCSI.
 async fn create(
     State(state): State<Arc<AppState>>,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
-    let view_err = |msg: String| async {
-        page(NvmePartial {
-            view: gather(&state, None, Some(msg), None).await,
-        })
-    };
-    let (mut name, mut device, mut initiators_raw) = (String::new(), String::new(), String::new());
-    let (mut want_rdma, mut want_tcp, mut want_loop, mut allow_any_host) =
-        (false, false, false, false);
-    let mut interfaces: Vec<String> = Vec::new();
-    for (k, v) in fields {
-        match k.as_str() {
-            "name" => name = v,
-            "device" => device = v,
-            "initiators" => initiators_raw = v,
-            "want_rdma" => want_rdma = true,
-            "want_tcp" => want_tcp = true,
-            "want_loop" => want_loop = true,
-            "allow_any_host" => allow_any_host = true,
-            "interfaces" => interfaces.push(v),
-            _ => {}
+    let f = parse_create_fields(fields);
+    let has_transport = f.want_rdma || f.want_tcp || f.want_loop;
+    let valid = validate_create(&f, |i| Nqn::new(i.to_owned()).is_ok(), has_transport);
+    let (name, device, initiators, allow_any_host) = match valid {
+        Ok(v) => v,
+        Err(msg) => {
+            return page(NvmePartial {
+                view: gather(&state, None, Some(msg), None).await,
+            });
         }
-    }
-    let Ok(name) = ExportName::new(name.trim()) else {
-        return view_err(format!(
-            "invalid export name {name:?} (lowercase letters, digits, '-', '.')"
-        ))
-        .await;
     };
-    let Ok(device) = DevicePath::new(device.trim()) else {
-        return view_err(format!("invalid device path {device:?}")).await;
-    };
-    let initiators: Vec<String> = initiators_raw
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .map(Into::into)
-        .collect();
-    if let Some(bad) = initiators.iter().find(|i| Nqn::new((*i).clone()).is_err()) {
-        return view_err(format!("invalid initiator name {bad:?}")).await;
-    }
-    if let Some(bad) = interfaces
-        .iter()
-        .find(|s| crate::state::parse_listen_iface(s).is_none())
-    {
-        return view_err(format!("invalid interface selector {bad:?}")).await;
-    }
-    let allow_any_host = allow_any_host || initiators.is_empty();
-    if !(want_rdma || want_tcp || want_loop) {
-        return view_err("select at least one transport".into()).await;
-    }
     let new = NewNvmeExport {
         name: name.to_string(),
         device_path: device.to_string(),
-        want_rdma,
-        want_tcp,
-        want_loop,
+        want_rdma: f.want_rdma,
+        want_tcp: f.want_tcp,
+        want_loop: f.want_loop,
         allow_any_host,
         initiators,
-        interfaces,
+        interfaces: f.interfaces,
     };
     let result = match state.db.insert_nvme_export(&new) {
         Ok(_) => reconcile_state(&state).await,
         Err(e) => Err(e),
     };
-    finish(&state, result, format!("created export {name}")).await
-}
-
-#[derive(Deserialize)]
-struct IdForm {
-    id: i64,
-    #[serde(default)]
-    enable: Option<bool>,
-}
-
-/// Enable/disable stays on the export's own page, re-rendering its detail partial.
-async fn toggle(State(state): State<Arc<AppState>>, Form(form): Form<IdForm>) -> Response {
-    let enable = form.enable.unwrap_or(false);
-    let success = format!("export {}", if enable { "enabled" } else { "disabled" });
-    let (flash, error, task_id) = match state.db.set_nvme_export_enabled(form.id, enable) {
-        Ok(()) => match reconcile_state(&state).await {
-            Ok(task_id) => (Some(success), None, task_id),
-            Err(e) => (None, Some(format!("{e:#}")), None),
-        },
-        Err(e) => (None, Some(format!("{e:#}")), None),
-    };
-    page(NvmeDetailPartial {
-        view: gather_detail(&state, form.id, flash, error, task_id).await,
-    })
-}
-
-/// Sets the export's pinned listen interfaces (repeated `interfaces` keys), then
-/// reconciles. Stays on the export's page, re-rendering its detail partial.
-async fn set_interfaces(
-    State(state): State<Arc<AppState>>,
-    Form(fields): Form<Vec<(String, String)>>,
-) -> Response {
-    let mut id: i64 = 0;
-    let mut interfaces: Vec<String> = Vec::new();
-    for (k, v) in fields {
-        match k.as_str() {
-            "id" => id = v.trim().parse().unwrap_or(0),
-            "interfaces" => interfaces.push(v),
-            _ => {}
-        }
-    }
-    if let Some(bad) = interfaces
-        .iter()
-        .find(|s| crate::state::parse_listen_iface(s).is_none())
-    {
-        let err = format!("invalid interface selector {bad:?}");
-        return page(NvmeDetailPartial {
-            view: gather_detail(&state, id, None, Some(err), None).await,
-        });
-    }
-    let (flash, error, task_id) = match state.db.set_nvme_export_interfaces(id, &interfaces) {
-        Ok(()) => match reconcile_state(&state).await {
-            Ok(task_id) => (Some("listen interfaces updated".to_owned()), None, task_id),
-            Err(e) => (None, Some(format!("{e:#}")), None),
-        },
-        Err(e) => (None, Some(format!("{e:#}")), None),
-    };
-    page(NvmeDetailPartial {
-        view: gather_detail(&state, id, flash, error, task_id).await,
-    })
-}
-
-/// Deleting an export removes its page, so on success redirect back to the list;
-/// a failed DB delete leaves the row in place and re-renders the detail partial.
-async fn delete(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Form(form): Form<IdForm>,
-) -> Response {
-    match state.db.delete_nvme_export(form.id) {
-        Ok(()) => {
-            // A reconcile failure surfaces on the /nvme banner, not here.
-            let _ = reconcile_state(&state).await;
-            nav_redirect(&headers, "/nvme")
-        }
-        Err(e) => page(NvmeDetailPartial {
-            view: gather_detail(&state, form.id, None, Some(format!("{e:#}")), None).await,
-        }),
-    }
+    block_export::finish::<Nvme>(&state, result, format!("created export {name}")).await
 }
 
 #[cfg(test)]
