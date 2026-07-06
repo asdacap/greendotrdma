@@ -646,29 +646,6 @@ async fn run_step(
     }
 }
 
-async fn finish_shrink(
-    state: &AppState,
-    disk: &str,
-    number: u32,
-    result: Result<(), String>,
-) -> Response {
-    let view = match result {
-        Ok(()) => {
-            gather_part_detail(
-                state,
-                disk,
-                number,
-                Some("partition shrunk".into()),
-                None,
-                None,
-            )
-            .await
-        }
-        Err(e) => gather_part_detail(state, disk, number, None, Some(e), None).await,
-    };
-    page(PartDetailPartial { view })
-}
-
 /// Shrinks a partition: the filesystem is always resized *before* the partition
 /// boundary, so a mid-sequence failure never leaves the fs larger than its
 /// partition. The requested size, its shrinkability, and the current size are
@@ -759,70 +736,119 @@ async fn part_shrink(
             )
             .await
         }
-        Shrink::Raw => {
-            let r = run_step(
-                &state,
-                resize_part,
-                "partition-resize",
-                format!("resize {device}"),
-            )
-            .await;
-            finish_shrink(&state, &scope, form.number, r).await
-        }
-        Shrink::Ext => {
-            let mut r = run_step(
-                &state,
-                Request::Fsck {
-                    device: device.clone(),
-                },
-                "fsck",
-                format!("check {device}"),
-            )
-            .await;
-            if r.is_ok() {
-                r = run_step(
-                    &state,
-                    Request::ResizeExt {
-                        device: device.clone(),
-                        new_size_sectors: fs_target / 512,
-                    },
-                    "resize-fs",
-                    format!("shrink filesystem on {device}"),
-                )
-                .await;
-            }
-            if r.is_ok() {
-                r = run_step(
-                    &state,
-                    resize_part,
-                    "partition-resize",
-                    format!("resize {device}"),
-                )
-                .await;
-            }
-            finish_shrink(&state, &scope, form.number, r).await
-        }
-        Shrink::Btrfs => {
+        kind => {
             let Ok(mp) = MountPath::new(format!("/run/greendotrdma/btrfs-resize-{part_name}"))
             else {
                 return part_detail_failed(&state, &scope, form.number, "invalid temp mount path")
                     .await;
             };
-            if let Err(e) = run_step(
-                &state,
-                Request::BtrfsMount {
+            // The fs steps can take minutes (fsck on a large ext4), so the
+            // ordered sequence runs on a background task — each step its own
+            // recorded task — and the response returns at once with a notice
+            // linked to the first step.
+            let (first_kind, first_title, first_req) = match &kind {
+                Shrink::Ext => (
+                    "fsck",
+                    format!("check {device}"),
+                    Request::Fsck {
+                        device: device.clone(),
+                    },
+                ),
+                Shrink::Btrfs => (
+                    "btrfs-mount",
+                    format!("mount {device}"),
+                    Request::BtrfsMount {
+                        device: device.clone(),
+                        mount_path: mp.clone(),
+                    },
+                ),
+                _ => (
+                    "partition-resize",
+                    format!("resize {device}"),
+                    resize_part.clone(),
+                ),
+            };
+            let id = match crate::task_runner::begin(&state, first_kind, &first_title) {
+                Ok(id) => id,
+                Err(e) => {
+                    return part_detail_failed(&state, &scope, form.number, format!("{e:#}")).await;
+                }
+            };
+            let st = state.clone();
+            let dev = device.clone();
+            tokio::spawn(async move {
+                let rx = st.helper.run_task(first_req);
+                let first = match crate::task_runner::drive(&st, id, rx).await {
+                    Ok(o) if o.ok => Ok(()),
+                    Ok(o) => Err(o.error.unwrap_or_else(|| format!("{first_title} failed"))),
+                    Err(e) => Err(format!("{e:#}")),
+                };
+                st.tasks.unregister(id);
+                if let Err(e) =
+                    drive_shrink(&st, kind, first, &dev, mp, fs_target, resize_part).await
+                {
+                    // Each failed step is its own red task on /tasks; this log
+                    // just ties the sequence together in the journal.
+                    tracing::warn!(device = %dev, error = %e, "partition shrink failed");
+                }
+            });
+            page(PartDetailPartial {
+                view: gather_part_detail(
+                    &state,
+                    &scope,
+                    form.number,
+                    Some(format!(
+                        "started shrink of {device} — each step runs as a task"
+                    )),
+                    None,
+                    Some(id),
+                )
+                .await,
+            })
+        }
+    }
+}
+
+/// Drives the shrink steps after the already-driven first one, preserving the
+/// invariant that the filesystem is always resized *before* the partition
+/// boundary — a mid-sequence failure never leaves the fs larger than its
+/// partition.
+async fn drive_shrink(
+    st: &Arc<AppState>,
+    kind: Shrink,
+    first: Result<(), String>,
+    device: &DevicePath,
+    mp: MountPath,
+    fs_target: u64,
+    resize_part: Request,
+) -> Result<(), String> {
+    first?;
+    match kind {
+        Shrink::No(_) => unreachable!("filtered by the handler"),
+        // The first step *was* the partition resize.
+        Shrink::Raw => Ok(()),
+        Shrink::Ext => {
+            run_step(
+                st,
+                Request::ResizeExt {
                     device: device.clone(),
-                    mount_path: mp.clone(),
+                    new_size_sectors: fs_target / 512,
                 },
-                "btrfs-mount",
-                format!("mount {device}"),
+                "resize-fs",
+                format!("shrink filesystem on {device}"),
+            )
+            .await?;
+            run_step(
+                st,
+                resize_part,
+                "partition-resize",
+                format!("resize {device}"),
             )
             .await
-            {
-                return finish_shrink(&state, &scope, form.number, Err(e)).await;
-            }
+        }
+        Shrink::Btrfs => {
             if let Err(e) = run_step(
-                &state,
+                st,
                 Request::BtrfsResize {
                     mount_path: mp.clone(),
                     new_size: fs_target,
@@ -834,7 +860,7 @@ async fn part_shrink(
             {
                 // Best-effort cleanup; the temp mount otherwise clears on reboot.
                 let _ = run_step(
-                    &state,
+                    st,
                     Request::Umount {
                         mount_path: mp.clone(),
                     },
@@ -842,37 +868,24 @@ async fn part_shrink(
                     "unmount".into(),
                 )
                 .await;
-                return finish_shrink(&state, &scope, form.number, Err(e)).await;
+                return Err(e);
             }
             // Hard gate: never resize the partition while the fs is still mounted.
-            if let Err(e) = run_step(
-                &state,
-                Request::Umount {
-                    mount_path: mp.clone(),
-                },
+            run_step(
+                st,
+                Request::Umount { mount_path: mp },
                 "umount",
                 "unmount".into(),
             )
             .await
-            {
-                return finish_shrink(
-                    &state,
-                    &scope,
-                    form.number,
-                    Err(format!(
-                        "filesystem still mounted, partition not resized: {e}"
-                    )),
-                )
-                .await;
-            }
-            let r = run_step(
-                &state,
+            .map_err(|e| format!("filesystem still mounted, partition not resized: {e}"))?;
+            run_step(
+                st,
                 resize_part,
                 "partition-resize",
                 format!("resize {device}"),
             )
-            .await;
-            finish_shrink(&state, &scope, form.number, r).await
+            .await
         }
     }
 }

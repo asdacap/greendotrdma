@@ -998,6 +998,57 @@ mod tests {
         std::fs::remove_file(&state).ok();
     }
 
+    /// The daemon reads the desired state from the TOML via
+    /// `greendot_reconcile::state::read_desired`, while the web's drift
+    /// pre-check reads it through `Db::list_*` — the two must agree exactly
+    /// (including ordering), or the pre-check and the apply would render
+    /// different desired states from the same input. This pins the contract.
+    #[test]
+    fn read_desired_matches_db_lists() {
+        let dir = std::env::temp_dir();
+        let tag = rand::random::<u32>();
+        let tasks_db = dir.join(format!("gd-tasks-rd{tag}.db"));
+        let state = dir.join(format!("gd-state-rd{tag}.toml"));
+
+        let db = Db::open(&tasks_db, &state).unwrap();
+        // Insert out of name order so ordering normalization is exercised.
+        db.insert_nvme_export(&new("zeta")).unwrap();
+        db.insert_nvme_export(&new("alpha")).unwrap();
+        db.insert_iscsi_export(&NewIscsiExport {
+            name: "tape".into(),
+            device_path: "/dev/zvol/tank/tape".into(),
+            want_rdma: true,
+            want_tcp: false,
+            allow_any_host: false,
+            initiators: vec![
+                "iqn.1993-08.org.debian:01:zzz".into(),
+                "iqn.1993-08.org.debian:01:aaa".into(),
+            ],
+            interfaces: vec![],
+        })
+        .unwrap();
+        db.insert_nfs_export(&NewNfsExport {
+            path: "/tank/share".into(),
+            clients: vec![NfsClientEntry {
+                client: "192.168.101.0/24".into(),
+                rw: true,
+            }],
+        })
+        .unwrap();
+        db.set_setting("listen_addr", "10.0.0.5").unwrap();
+
+        let desired = greendot_reconcile::state::read_desired(&state).unwrap();
+        assert_eq!(desired.nvme_exports, db.list_nvme_exports().unwrap());
+        assert_eq!(desired.iscsi_exports, db.list_iscsi_exports().unwrap());
+        assert_eq!(desired.nfs_exports, db.list_nfs_exports().unwrap());
+        assert_eq!(desired.listen.to_string(), "10.0.0.5");
+
+        for ext in ["db", "db-wal", "db-shm"] {
+            std::fs::remove_file(dir.join(format!("gd-tasks-rd{tag}.{ext}"))).ok();
+        }
+        std::fs::remove_file(&state).ok();
+    }
+
     #[test]
     fn legacy_unified_export_table_migrates_to_typed_tables() {
         let dir = std::env::temp_dir();

@@ -74,6 +74,8 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(protected)
         .route("/login", get(auth::login_page).post(auth::login_post))
         .route("/healthz", get(async || "ok"))
+        // Deliberately unauthenticated, like /healthz: Prometheus scrapers
+        // don't carry a session, and the gauges leak no secrets.
         .route("/metrics", get(charts::prometheus))
         .route(
             "/static/htmx.min.js",
