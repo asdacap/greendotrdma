@@ -7,14 +7,18 @@
 //!
 //! The transport is gRPC (tonic): the generated protobuf types live in [`pb`],
 //! and [`convert`] provides the conversions. Crucially, protobuf messages are
-//! plain strings that prost does *not* validate on decode, so the daemon must
-//! convert every incoming `pb::Request` via `TryFrom` (in `convert`), which
-//! re-runs the validators — that conversion is the security choke point the
-//! serde `Deserialize` impls used to provide for free.
+//! plain strings that prost does *not* validate on decode, so every incoming
+//! `pb::Request` must pass the `TryFrom` conversion (in `convert`), which
+//! re-runs the validators. The `server::Validated` adapter (feature `server`)
+//! performs that conversion in exactly one place, so daemon code only ever
+//! handles the validated domain `Request` — the security choke point cannot
+//! be skipped.
 
+#[cfg(feature = "client")]
 pub mod client;
 mod convert;
-mod osdetect;
+#[cfg(feature = "server")]
+pub mod server;
 mod types;
 mod validate;
 
@@ -27,13 +31,9 @@ pub mod pb {
 }
 
 pub use convert::ConvertError;
-pub use osdetect::*;
 pub use types::*;
 
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
     Ping,
     Authenticate {
@@ -270,8 +270,7 @@ pub enum Request {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
     Ok,
     OkAuth { username: String },
@@ -529,8 +528,7 @@ impl std::io::Write for Pipe<'_, '_> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrKind {
     AuthFailed,
     NotInAdminGroup,
@@ -545,153 +543,6 @@ pub enum ErrKind {
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    fn roundtrip(req: &Request) -> Request {
-        let json = serde_json::to_string(req).unwrap();
-        serde_json::from_str(&json).unwrap()
-    }
-
-    #[rstest]
-    #[case::ping(Request::Ping)]
-    #[case::auth(Request::Authenticate {
-        username: Username::new("alice").unwrap(),
-        password: Secret("hunter2".into()),
-    })]
-    #[case::zvol(Request::ZvolCreate {
-        dataset: DatasetName::new("tank/vols/vm1").unwrap(),
-        size: 10 << 30,
-        volblocksize: Some(16384),
-        sparse: true,
-    })]
-    #[case::nvmet(Request::NvmetApply {
-        desired: NvmetDesired {
-            subsystems: vec![NvmetSubsysSpec {
-                nqn: Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap(),
-                allow_any_host: false,
-                allowed_hosts: vec![Nqn::new("nqn.2014-08.org.nvmexpress:host1").unwrap()],
-                namespaces: vec![NvmetNsSpec {
-                    nsid: 1,
-                    device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
-                }],
-            }],
-            ports: vec![NvmetPortSpec {
-                id: 1,
-                trtype: Transport::Rdma,
-                traddr: "192.168.1.10".parse().unwrap(),
-                trsvcid: 4420,
-                subsystems: vec![Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap()],
-            }],
-        },
-    })]
-    #[case::lio(Request::LioApply {
-        desired: LioDesired {
-            backstores: vec![LioBackstoreSpec {
-                name: BackstoreName::new("vm1").unwrap(),
-                device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
-            }],
-            targets: vec![LioTargetSpec {
-                iqn: Iqn::new("iqn.2026-06.io.greendot:vm1").unwrap(),
-                enabled: true,
-                demo_mode: false,
-                luns: vec![LioLunSpec { lun: 0, backstore: BackstoreName::new("vm1").unwrap() }],
-                portals: vec![LioPortalSpec { addr: "::1".parse().unwrap(), port: 3260, iser: true }],
-                acls: vec![Iqn::new("iqn.1993-08.org.debian:01:abc").unwrap()],
-            }],
-        },
-    })]
-    #[case::part_resize(Request::PartitionResize {
-        disk: BlockDev::new("sdb").unwrap(),
-        number: 2,
-        size_sectors: 2097152,
-    })]
-    #[case::resize_ext(Request::ResizeExt {
-        device: DevicePath::new("/dev/sdb2").unwrap(),
-        new_size_sectors: 2097152,
-    })]
-    #[case::btrfs_resize(Request::BtrfsResize {
-        mount_path: MountPath::new("/run/greendotrdma/btrfs-resize-sdb2").unwrap(),
-        new_size: 1 << 30,
-    })]
-    #[case::pool_create(Request::PoolCreate {
-        name: PoolName::new("tank").unwrap(),
-        vdev: VdevLayout::Mirror,
-        devices: vec![
-            DevicePath::new("/dev/sdb").unwrap(),
-            DevicePath::new("/dev/sdc").unwrap(),
-        ],
-        ashift: Some(12),
-    })]
-    #[case::pool_add(Request::PoolDeviceAdd {
-        pool: PoolName::new("tank").unwrap(),
-        device: DevicePath::new("/dev/sdd").unwrap(),
-    })]
-    #[case::smart_report(Request::SmartReport { device: BlockDev::new("sda").unwrap() })]
-    #[case::smart_health(Request::SmartHealth {
-        devices: vec![BlockDev::new("sda").unwrap(), BlockDev::new("nvme0n1").unwrap()],
-    })]
-    #[case::lvm_report(Request::LvmReport { what: LvmReport::Lvs })]
-    #[case::vg_create(Request::VgCreate {
-        name: VgName::new("vg0").unwrap(),
-        devices: vec![
-            DevicePath::new("/dev/sdb").unwrap(),
-            DevicePath::new("/dev/sdc").unwrap(),
-        ],
-    })]
-    #[case::thin_lv(Request::ThinLvCreate {
-        vg: VgName::new("vg0").unwrap(),
-        pool: LvName::new("pool0").unwrap(),
-        name: LvName::new("vm1").unwrap(),
-        virtual_size: 20 << 30,
-    })]
-    #[case::lv_rename(Request::LvRename {
-        vg: VgName::new("vg0").unwrap(),
-        name: LvName::new("old").unwrap(),
-        new_name: LvName::new("new").unwrap(),
-    })]
-    #[case::modules(Request::EnsureModules {
-        modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
-    })]
-    #[case::roce_capable_nics(Request::RoceCapableNics)]
-    #[case::enable_roce(Request::EnableRoce {
-        netdev: NetdevName::new("ens16").unwrap(),
-    })]
-    #[case::nic_rdma_advice(Request::NicRdmaAdvice)]
-    #[case::rdma_resources(Request::RdmaResources)]
-    #[case::install(Request::InstallPackages {
-        packages: vec![PackageName::new("nvme-cli").unwrap(), PackageName::new("targetcli-fb").unwrap()],
-    })]
-    #[case::zfs_fs_create(Request::ZfsFsCreate {
-        dataset: DatasetName::new("tank/share").unwrap(),
-        mountpoint: Some(MountPoint::new("/tank/share").unwrap()),
-    })]
-    #[case::zfs_fs_create_default(Request::ZfsFsCreate {
-        dataset: DatasetName::new("tank/share").unwrap(),
-        mountpoint: None,
-    })]
-    #[case::zfs_set_mountpoint(Request::ZfsSetMountpoint {
-        dataset: DatasetName::new("tank/share").unwrap(),
-        mountpoint: MountPoint::new("/srv/share").unwrap(),
-    })]
-    #[case::zfs_mount(Request::ZfsMount { dataset: DatasetName::new("tank/share").unwrap() })]
-    #[case::zfs_unmount(Request::ZfsUnmount { dataset: DatasetName::new("tank/share").unwrap() })]
-    #[case::zfs_destroy(Request::ZfsDestroy { dataset: DatasetName::new("tank/share").unwrap(), recursive: true })]
-    #[case::nfs_apply(Request::NfsApply {
-        desired: NfsDesired {
-            rdma_port: NFS_RDMA_PORT,
-            exports: vec![NfsExportSpec {
-                path: NfsExportPath::new("/tank/share").unwrap(),
-                fsid: 0x6700_0001,
-                clients: vec![NfsClientSpec {
-                    client: NfsClient::new("192.168.101.0/24").unwrap(),
-                    rw: true,
-                }],
-            }],
-        },
-    })]
-    #[case::nfs_report(Request::NfsReport)]
-    fn request_roundtrips(#[case] req: Request) {
-        assert_eq!(roundtrip(&req), req);
-    }
 
     #[rstest]
     // Failed dominates regardless of order or accumulator.
@@ -710,38 +561,6 @@ mod tests {
         #[case] expected: SubStatus,
     ) {
         assert_eq!(SubStatus::fold(acc, s), expected);
-    }
-
-    #[test]
-    fn responses_roundtrip_and_invalid_payloads_are_rejected_on_decode() {
-        for resp in [
-            Response::Ok,
-            Response::OkAuth {
-                username: "alice".into(),
-            },
-            Response::err(ErrKind::CmdFailed, "zfs exited 1: boom"),
-        ] {
-            let json = serde_json::to_string(&resp).unwrap();
-            assert_eq!(serde_json::from_str::<Response>(&json).unwrap(), resp);
-        }
-        // Deserialization must enforce validation (the helper's second line of defense).
-        for bad in [
-            r#"{"op":"zvol_delete","dataset":"../../etc"}"#,
-            r#"{"op":"rxe_link_add","netdev":"eth0/../x"}"#,
-            r#"{"op":"install_packages","packages":["foo;rm -rf"]}"#,
-            r#"{"op":"pool_create","name":"mirror","vdev":"stripe","devices":["/dev/sdb"],"ashift":null}"#,
-            r#"{"op":"lv_delete","vg":"vg0","name":"../x"}"#,
-            r#"{"op":"vg_create","name":"-bad","devices":["/dev/sdb"]}"#,
-            r#"{"op":"btrfs_resize","mount_path":"/run/greendotrdma/btrfs-resize-../etc","new_size":1024}"#,
-            r#"{"op":"enable_roce","netdev":"eth0 ; reboot"}"#,
-            r#"{"op":"zfs_mount","dataset":"../../etc"}"#,
-            r#"{"op":"zfs_set_mountpoint","dataset":"tank/share","mountpoint":"/tank/../etc"}"#,
-            r#"{"op":"nfs_apply","desired":{"rdma_port":20049,"exports":[{"path":"/tank/../etc","fsid":1,"clients":[]}]}}"#,
-            r#"{"op":"nfs_apply","desired":{"rdma_port":20049,"exports":[{"path":"/srv","fsid":1,"clients":[{"client":"h(rw","rw":true}]}]}}"#,
-            r#"{"op":"no_such_op"}"#,
-        ] {
-            assert!(serde_json::from_str::<Request>(bad).is_err(), "{bad}");
-        }
     }
 
     #[test]

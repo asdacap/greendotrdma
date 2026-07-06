@@ -8,14 +8,24 @@ use super::{AppState, page};
 use crate::actual;
 use crate::auth::CurrentUser;
 use crate::dot::Criterion;
-use crate::reconcile::{self, RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
+use crate::dot::DotState;
+use crate::reconcile;
 use crate::state::{IscsiExport, NfsExport, NvmeExport};
 use crate::task_runner::TaskOutcome;
 use askama::Template;
 use axum::response::Response;
-use greendot_proto::{DotState, NFS_RDMA_PORT, Request};
+use greendot_proto::{NFS_RDMA_PORT, Request};
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
+
+/// Web SQLite setting holding the last reconcile pass's error text (empty when
+/// it succeeded), surfaced as the export banner and folded into the dots.
+pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
+
+/// Web SQLite setting holding the id of the most recent reconcile task, so the
+/// export banner and dots can link to it (`/tasks/{id}`). Empty when none has
+/// run.
+pub const RECONCILE_TASK_KEY: &str = "reconcile_task_id";
 
 /// Serialized full reconcile against current desired state. A cheap in-process
 /// drift pre-check keeps the steady state (and the 60 s timer) silent; on drift

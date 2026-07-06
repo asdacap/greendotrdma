@@ -127,9 +127,10 @@ validated_string!(
     /// An NFS client access spec: host / IP / CIDR / `*`.
     NfsClient, validate::nfs_client, "NFS client");
 
-/// A string whose Debug/Display output must never leak (passwords).
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
+/// A string whose Debug output must never leak (passwords). Deliberately not
+/// serializable: the wire is protobuf, so a serialized `Request` (e.g. a
+/// future debug log) can never carry a password.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Secret(pub String);
 
 impl fmt::Debug for Secret {
@@ -226,24 +227,6 @@ pub enum KernelModule {
     /// The kernel's NFS-over-RDMA transport. The real module is `rpcrdma`;
     /// `svcrdma` (server) and `xprtrdma` (client) are aliases for it.
     Rpcrdma,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ChapCreds {
-    pub username: String,
-    pub password: Secret,
-}
-
-/// Export health as shown in the UI.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DotState {
-    /// Served via RDMA.
-    Green,
-    /// Served, but not via RDMA.
-    Yellow,
-    /// Not served.
-    Red,
 }
 
 /// Every export we create lives under these prefixes; reconciliation only
@@ -419,47 +402,6 @@ pub enum TaskEvent {
         error: Option<String>,
     },
 }
-
-/// Maps a required CLI to the Debian/Ubuntu package that provides it. Used
-/// both for the "not installed" hint and the install task.
-pub fn package_for_cli(cli: &str) -> Option<&'static str> {
-    Some(match cli {
-        "zfs" | "zpool" => "zfsutils-linux",
-        "vgs" | "lvs" | "pvs" | "vgcreate" | "vgextend" | "vgreduce" | "vgremove" | "lvcreate"
-        | "lvremove" | "lvextend" | "lvreduce" | "lvrename" => "lvm2",
-        "sfdisk" | "lsblk" | "mount" | "umount" => "util-linux",
-        "resize2fs" | "e2fsck" => "e2fsprogs",
-        "btrfs" => "btrfs-progs",
-        "modprobe" => "kmod",
-        "rdma" | "devlink" => "iproute2",
-        "nvme" => "nvme-cli",
-        "targetcli" | "targetctl" => "targetcli-fb",
-        "exportfs" => "nfs-kernel-server",
-        "smartctl" => "smartmontools",
-        "apt-get" => "apt",
-        _ => return None,
-    })
-}
-
-/// Every CLI GreenDotRDMA may invoke, for the dependency panel.
-pub const REQUIRED_CLIS: &[&str] = &[
-    "zfs",
-    "zpool",
-    "vgs",
-    "lvs",
-    "sfdisk",
-    "lsblk",
-    "resize2fs",
-    "e2fsck",
-    "btrfs",
-    "modprobe",
-    "rdma",
-    "devlink",
-    "nvme",
-    "targetctl",
-    "exportfs",
-    "smartctl",
-];
 
 #[cfg(test)]
 mod tests {
@@ -721,20 +663,6 @@ mod tests {
         let form = keyword.unwrap_or("stripe");
         assert_eq!(VdevLayout::parse(form), Some(layout));
         assert_eq!(VdevLayout::parse("nonsense"), None);
-    }
-
-    #[test]
-    fn cli_to_package_map() {
-        assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
-        assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
-        assert_eq!(package_for_cli("devlink"), Some("iproute2"));
-        assert_eq!(package_for_cli("smartctl"), Some("smartmontools"));
-        assert_eq!(package_for_cli("nonesuch"), None);
-        // every required CLI maps to a valid package name
-        for cli in REQUIRED_CLIS {
-            let pkg = package_for_cli(cli).unwrap_or_else(|| panic!("no package for {cli}"));
-            assert!(PackageName::new(pkg).is_ok(), "{pkg}");
-        }
     }
 
     #[rstest]

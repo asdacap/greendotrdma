@@ -1,5 +1,6 @@
 use super::{AppState, page};
 use crate::auth::CurrentUser;
+use crate::dot::DotState;
 use crate::metrics::{ChartUnit, PromSample, chart_svg, render_prometheus};
 use crate::{actual, dot};
 use askama::Template;
@@ -8,7 +9,6 @@ use axum::http::header;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Extension, Router};
-use greendot_proto::DotState;
 use serde::Deserialize;
 use std::sync::Arc;
 

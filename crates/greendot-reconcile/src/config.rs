@@ -1,36 +1,29 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use std::net::SocketAddr;
 use std::path::PathBuf;
 
+/// The reconcile-relevant subset of `/etc/greendotrdma/config.toml` — the keys
+/// both greendotctl and greendot-web read. The web server's own keys (listen
+/// address, TLS, database paths) live in greendot-web's `Config`, which
+/// flattens this struct; unknown keys are ignored here so both binaries parse
+/// the same file.
 #[derive(Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
+#[serde(default)]
 pub struct Config {
-    pub listen: SocketAddr,
     pub helper_socket: PathBuf,
-    /// Task run-history (SQLite). The desired-state config lives in `state_path`.
-    pub db_path: PathBuf,
     /// Desired-state config (exports, settings, snapshot policies) as TOML.
     pub state_path: PathBuf,
-    pub metrics_db_path: PathBuf,
     pub nvmet_root: PathBuf,
     pub lio_root: PathBuf,
-    pub tls_cert: Option<PathBuf>,
-    pub tls_key: Option<PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Config {
-            listen: "127.0.0.1:8080".parse().unwrap(),
             helper_socket: "/run/greendotrdma/helper.sock".into(),
-            db_path: "/var/lib/greendotrdma/state.db".into(),
             state_path: "/var/lib/greendotrdma/state.toml".into(),
-            metrics_db_path: "/var/lib/greendotrdma/metrics.db".into(),
             nvmet_root: "/sys/kernel/config/nvmet".into(),
             lio_root: "/sys/kernel/config/target".into(),
-            tls_cert: None,
-            tls_key: None,
         }
     }
 }
@@ -63,20 +56,25 @@ mod tests {
     fn defaults_partial_override_and_errors() {
         // No path → built-in defaults.
         let d = Config::load(None).unwrap();
-        assert_eq!(d.listen, "127.0.0.1:8080".parse().unwrap());
-        assert_eq!(d.tls_cert, None);
+        assert_eq!(
+            d.helper_socket,
+            PathBuf::from("/run/greendotrdma/helper.sock")
+        );
 
-        // A partial file overrides only its keys; the rest keep their defaults.
-        let path = temp_toml("ok", "listen = \"0.0.0.0:9000\"\ndb_path = \"/tmp/state.db\"\n");
+        // A partial file overrides only its keys; the rest keep their defaults,
+        // and web-only keys (`listen`, TLS, …) are ignored, not rejected.
+        let path = temp_toml(
+            "ok",
+            "listen = \"0.0.0.0:9000\"\nstate_path = \"/tmp/state.toml\"\n",
+        );
         let c = Config::load(Some(path.clone())).unwrap();
-        assert_eq!(c.listen, "0.0.0.0:9000".parse().unwrap());
-        assert_eq!(c.db_path, PathBuf::from("/tmp/state.db"));
+        assert_eq!(c.state_path, PathBuf::from("/tmp/state.toml"));
         assert_eq!(c.helper_socket, Config::default().helper_socket);
         std::fs::remove_file(&path).ok();
 
-        // A missing file and a value that fails to deserialize both error.
+        // A missing file and a value of the wrong type both error.
         assert!(Config::load(Some("/nonexistent/gd.toml".into())).is_err());
-        let bad = temp_toml("bad", "listen = \"not-a-socket-addr\"\n");
+        let bad = temp_toml("bad", "state_path = 12\n");
         assert!(Config::load(Some(bad.clone())).is_err());
         std::fs::remove_file(&bad).ok();
     }

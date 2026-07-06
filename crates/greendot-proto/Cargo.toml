@@ -6,12 +6,18 @@ license.workspace = true
 
 [dependencies]
 serde = { workspace = true }
-serde_json = { workspace = true }
 prost = { workspace = true }
 tonic = { workspace = true }
-tokio = { workspace = true }
-tower = { version = "0.5", features = ["util"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { workspace = true, optional = true }
+tokio-stream = { workspace = true, optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+
+[features]
+# The lazy unix-socket gRPC client (greendot-web, the reconcile CLI proxy).
+client = ["dep:tokio", "dep:tower", "dep:hyper-util"]
+# The `Validated` server-side ingress adapter (the greendotctl daemon).
+server = ["dep:tokio", "dep:tokio-stream"]
 
 [build-dependencies]
 tonic-build = { workspace = true }

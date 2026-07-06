@@ -24,12 +24,6 @@ use std::net::IpAddr;
 /// collide with foreign numeric `fsid=`s in `/etc/exports`.
 const NFS_FSID_BASE: u32 = 0x6700_0000;
 
-pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
-
-/// Setting holding the id of the most recent reconcile task, so the export
-/// banner and dots can link to it (`/tasks/{id}`). Empty when none has run.
-pub const RECONCILE_TASK_KEY: &str = "reconcile_task_id";
-
 const TRSVCID: u16 = 4420;
 
 /// The IPs an export should listen on: its pinned interfaces resolved to their

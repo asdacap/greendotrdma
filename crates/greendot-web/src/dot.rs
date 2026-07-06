@@ -7,8 +7,18 @@ use crate::actual::nic::{NicAdvice, NicRdmaKind, NicStatus};
 use crate::actual::nvmet::{ActualNvmet, Port};
 use crate::actual::rdma::{RdmaDev, addr_served_by_rdma};
 use crate::state::{IscsiExport, NfsExport, NvmeExport};
-use greendot_proto::DotState;
 use std::net::IpAddr;
+
+/// Export health as shown in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DotState {
+    /// Served via RDMA.
+    Green,
+    /// Served, but not via RDMA.
+    Yellow,
+    /// Not served.
+    Red,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Dot {

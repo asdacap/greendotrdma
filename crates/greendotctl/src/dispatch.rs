@@ -189,7 +189,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::LvDelete { vg, name } => Dispatch::Task(lvm::lv_delete(&vg, &name)),
 
         Request::InstallPackages { packages } => {
-            match install::install(&packages, &greendot_proto::detect()) {
+            match install::install(&packages, &greendot_reconcile::os::detect()) {
                 Ok(Some(spec)) => Dispatch::Task(spec),
                 Ok(None) => Dispatch::OneShot(Response::Ok),
                 Err(msg) => Dispatch::FailedTask {

@@ -4,11 +4,12 @@
 //! the green dot come from the helper's `NfsReport` (root-only reads) + the RDMA
 //! device list.
 
+use super::block_export::{RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
 use super::{AppState, page};
 use crate::actual;
 use crate::auth::CurrentUser;
+use crate::dot::DotState;
 use crate::dot::{Criterion, external_nfs_dot, nfs_diagnostics, nfs_dot};
-use crate::reconcile::{RECONCILE_ERROR_KEY, RECONCILE_TASK_KEY};
 use crate::routes::block_export::reconcile_state;
 use crate::state::{NewNfsExport, NfsClientEntry};
 use askama::Template;
@@ -16,7 +17,7 @@ use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{DotState, NFS_RDMA_PORT, NfsClient, NfsExportPath};
+use greendot_proto::{NFS_RDMA_PORT, NfsClient, NfsExportPath};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::net::IpAddr;

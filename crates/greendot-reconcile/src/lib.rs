@@ -7,5 +7,6 @@
 
 pub mod actual;
 pub mod config;
+pub mod os;
 pub mod reconcile;
 pub mod state;

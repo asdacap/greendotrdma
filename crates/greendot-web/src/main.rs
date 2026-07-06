@@ -25,13 +25,13 @@ async fn main() -> Result<()> {
     };
 
     let state = Arc::new(routes::AppState {
-        helper: helper_client::HelperClient::new(config.helper_socket.clone()),
+        helper: helper_client::HelperClient::new(config.reconcile.helper_socket.clone()),
         sessions: auth::Sessions::new(Duration::from_secs(24 * 3600)),
         secure_cookies: tls.is_some(),
-        db: state::Db::open(&config.db_path, &config.state_path)?,
+        db: state::Db::open(&config.db_path, &config.reconcile.state_path)?,
         metrics: metrics::Metrics::open(&config.metrics_db_path)?,
-        nvmet_root: config.nvmet_root.clone(),
-        lio_root: config.lio_root.clone(),
+        nvmet_root: config.reconcile.nvmet_root.clone(),
+        lio_root: config.reconcile.lio_root.clone(),
         reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
     });

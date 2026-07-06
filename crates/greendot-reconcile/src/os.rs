@@ -1,7 +1,7 @@
-//! Best-effort OS / package-manager detection from `/etc/os-release`, so the
-//! installer can spawn the right install task — or refuse cleanly on a distro
-//! we don't know how to drive. Shared by greendot-web (panel display) and
-//! greendotctl (the actual install task).
+//! OS / packaging knowledge shared by greendot-web (dependency panel) and
+//! greendotctl (install hints and the install task): best-effort OS /
+//! package-manager detection from `/etc/os-release`, and the CLI → Debian
+//! package map.
 
 use std::fs;
 
@@ -120,5 +120,66 @@ mod tests {
         let os = parse_os_release(contents);
         assert_eq!(os.family, family);
         assert_eq!(os.pretty, pretty);
+    }
+}
+
+/// Maps a required CLI to the Debian/Ubuntu package that provides it. Used
+/// both for the "not installed" hint and the install task.
+pub fn package_for_cli(cli: &str) -> Option<&'static str> {
+    Some(match cli {
+        "zfs" | "zpool" => "zfsutils-linux",
+        "vgs" | "lvs" | "pvs" | "vgcreate" | "vgextend" | "vgreduce" | "vgremove" | "lvcreate"
+        | "lvremove" | "lvextend" | "lvreduce" | "lvrename" => "lvm2",
+        "sfdisk" | "lsblk" | "mount" | "umount" => "util-linux",
+        "resize2fs" | "e2fsck" => "e2fsprogs",
+        "btrfs" => "btrfs-progs",
+        "modprobe" => "kmod",
+        "rdma" | "devlink" => "iproute2",
+        "nvme" => "nvme-cli",
+        "targetcli" | "targetctl" => "targetcli-fb",
+        "exportfs" => "nfs-kernel-server",
+        "smartctl" => "smartmontools",
+        "apt-get" => "apt",
+        _ => return None,
+    })
+}
+
+/// Every CLI GreenDotRDMA may invoke, for the dependency panel.
+pub const REQUIRED_CLIS: &[&str] = &[
+    "zfs",
+    "zpool",
+    "vgs",
+    "lvs",
+    "sfdisk",
+    "lsblk",
+    "resize2fs",
+    "e2fsck",
+    "btrfs",
+    "modprobe",
+    "rdma",
+    "devlink",
+    "nvme",
+    "targetctl",
+    "exportfs",
+    "smartctl",
+];
+
+#[cfg(test)]
+mod package_tests {
+    use super::*;
+    use greendot_proto::PackageName;
+
+    #[test]
+    fn cli_to_package_map() {
+        assert_eq!(package_for_cli("targetctl"), Some("targetcli-fb"));
+        assert_eq!(package_for_cli("zpool"), Some("zfsutils-linux"));
+        assert_eq!(package_for_cli("devlink"), Some("iproute2"));
+        assert_eq!(package_for_cli("smartctl"), Some("smartmontools"));
+        assert_eq!(package_for_cli("nonesuch"), None);
+        // every required CLI maps to a valid package name
+        for cli in REQUIRED_CLIS {
+            let pkg = package_for_cli(cli).unwrap_or_else(|| panic!("no package for {cli}"));
+            assert!(PackageName::new(pkg).is_ok(), "{pkg}");
+        }
     }
 }

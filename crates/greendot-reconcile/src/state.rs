@@ -253,7 +253,10 @@ mod tests {
         // Missing file → an empty desired state with the unspecified listen addr.
         let missing = read_desired(Path::new("/nonexistent/gd-state.toml")).unwrap();
         assert!(missing.nvme_exports.is_empty() && missing.iscsi_exports.is_empty());
-        assert_eq!(missing.listen, IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED));
+        assert_eq!(
+            missing.listen,
+            IpAddr::from(std::net::Ipv4Addr::UNSPECIFIED)
+        );
 
         // A pre-split unified `export` table (tagged with `kind`) plus typed NFS
         // and a `listen_addr` setting — exports are split, sorted, and initiators
@@ -301,7 +304,10 @@ path = "/tank/share"
             d.iscsi_exports.iter().map(|e| &e.name).collect::<Vec<_>>(),
             ["tape"]
         );
-        assert_eq!(d.nfs_exports.iter().map(|e| &e.path).collect::<Vec<_>>(), ["/tank/share"]);
+        assert_eq!(
+            d.nfs_exports.iter().map(|e| &e.path).collect::<Vec<_>>(),
+            ["/tank/share"]
+        );
         std::fs::remove_file(&state).ok();
     }
 }

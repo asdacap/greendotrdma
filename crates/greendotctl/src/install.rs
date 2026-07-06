@@ -3,7 +3,8 @@
 //! refuses with a manual-install hint on a distro we don't know how to drive.
 
 use crate::cmd::TaskSpec;
-use greendot_proto::{OsInfo, PackageName, PkgFamily};
+use greendot_proto::PackageName;
+use greendot_reconcile::os::{OsInfo, PkgFamily};
 
 /// Build the install task for `packages` on the detected OS:
 /// - empty list → `Ok(None)` (nothing to install);

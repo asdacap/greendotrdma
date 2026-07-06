@@ -34,7 +34,8 @@ mod zfs;
 use anyhow::{Context, Result, bail};
 use cmd::EventSink;
 use dispatch::{Ctx, Dispatch};
-use greendot_proto::pb::helper_server::{Helper, HelperServer};
+use greendot_proto::pb::helper_server::HelperServer;
+use greendot_proto::server::{DomainHelper, Validated};
 use greendot_proto::{
     ErrKind, Request as GdRequest, Response as GdResponse, SubStatus, Task, TaskEvent, pb,
 };
@@ -45,8 +46,8 @@ use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
-use tonic::{Request as TonicRequest, Response as TonicResponse, Status};
+use tokio_stream::wrappers::UnixListenerStream;
+use tonic::Status;
 use tracing::{info, warn};
 
 /// Ceiling on in-flight requests per gRPC connection. Mutations are further
@@ -184,7 +185,7 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         }
     });
 
-    let svc = HelperServer::new(HelperSvc { ctx })
+    let svc = HelperServer::new(Validated(HelperSvc { ctx }))
         .max_decoding_message_size(MAX_MESSAGE)
         .max_encoding_message_size(MAX_MESSAGE);
 
@@ -210,8 +211,9 @@ fn peer_uid(_stream: &UnixStream) -> nix::Result<u32> {
     Err(nix::errno::Errno::ENOSYS)
 }
 
-/// The gRPC service. Holds the shared dispatch context; each call converts the
-/// incoming protobuf request to the validated domain model and runs it.
+/// The domain-level service behind the [`Validated`] ingress adapter, which
+/// converts (and validates) every incoming protobuf request before it gets
+/// here — this code never sees a raw `pb::Request`.
 struct HelperSvc {
     ctx: Arc<Ctx>,
 }
@@ -257,22 +259,11 @@ impl EventSink for ChannelSink {
 }
 
 #[tonic::async_trait]
-impl Helper for HelperSvc {
-    async fn call(
-        &self,
-        request: TonicRequest<pb::Request>,
-    ) -> std::result::Result<TonicResponse<pb::Response>, Status> {
-        let domain = match GdRequest::try_from(request.into_inner()) {
-            Ok(r) => r,
-            Err(e) => {
-                return Ok(TonicResponse::new(
-                    GdResponse::err(ErrKind::Validation, e.to_string()).into(),
-                ));
-            }
-        };
+impl DomainHelper for HelperSvc {
+    async fn call(&self, domain: GdRequest) -> GdResponse {
         let ctx = Arc::clone(&self.ctx);
         // `Authenticate` runs PAM, which can block; do it off the reactor.
-        let resp = tokio::task::spawn_blocking(move || match dispatch::plan(&ctx, domain) {
+        tokio::task::spawn_blocking(move || match dispatch::plan(&ctx, domain) {
             Dispatch::OneShot(resp) => resp,
             _ => GdResponse::err(
                 ErrKind::Validation,
@@ -280,25 +271,21 @@ impl Helper for HelperSvc {
             ),
         })
         .await
-        .map_err(|e| Status::internal(format!("worker panicked: {e}")))?;
-        Ok(TonicResponse::new(resp.into()))
+        .unwrap_or_else(|e| GdResponse::err(ErrKind::Sys, format!("worker panicked: {e}")))
     }
-
-    type RunTaskStream = ReceiverStream<std::result::Result<pb::TaskEvent, Status>>;
 
     async fn run_task(
         &self,
-        request: TonicRequest<pb::Request>,
-    ) -> std::result::Result<TonicResponse<Self::RunTaskStream>, Status> {
+        req: std::result::Result<GdRequest, String>,
+    ) -> mpsc::Receiver<std::result::Result<pb::TaskEvent, Status>> {
         let (tx, rx) = mpsc::channel::<std::result::Result<pb::TaskEvent, Status>>(128);
-        let pbreq = request.into_inner();
         let ctx = Arc::clone(&self.ctx);
         // All privileged work (commands, configfs, /proc writes) is blocking;
         // run it on a blocking thread and stream its events back via the sink.
         let worker_tx = tx.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let mut sink = ChannelSink(worker_tx);
-            let domain = match GdRequest::try_from(pbreq) {
+            let domain = match req {
                 Ok(r) => r,
                 Err(e) => {
                     // A rejected request still surfaces as a failed task so its
@@ -328,7 +315,7 @@ impl Helper for HelperSvc {
                 let _ = tx.send(Ok(pb::TaskEvent::from(ev))).await;
             }
         });
-        Ok(TonicResponse::new(ReceiverStream::new(rx)))
+        rx
     }
 }
 

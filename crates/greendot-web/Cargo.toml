@@ -56,7 +56,7 @@ start = true
 
 [dependencies]
 anyhow = { workspace = true }
-greendot-proto = { workspace = true }
+greendot-proto = { workspace = true, features = ["client"] }
 greendot-reconcile = { workspace = true }
 nix = { workspace = true }
 serde = { workspace = true }
