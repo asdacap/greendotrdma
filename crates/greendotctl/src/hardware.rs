@@ -1,16 +1,17 @@
 //! NIC hardware vendors behind one trait. All vendor-specific knowledge — the
 //! PCI fingerprint, the privileged `devlink` commands to probe and turn on
-//! hardware RoCE, and the UI label — lives in impls of [`NetworkHardware`].
-//! Adding a vendor is one impl plus a `REGISTRY` entry; nothing in greendot-web
-//! changes. The web only ever asks two vendor-agnostic questions (which NICs are
-//! RoCE-capable hardware, and "enable RoCE on this NIC"); this module answers
-//! both off sysfs and the registry.
+//! hardware RoCE, per-NIC diagnostic advisories, and the UI label — lives in
+//! impls of [`NetworkHardware`]. Adding a vendor is one impl plus a `REGISTRY`
+//! entry; nothing in greendot-web changes. The web only ever asks
+//! vendor-agnostic questions (which NICs are RoCE-capable hardware, "enable
+//! RoCE on this NIC", and per-NIC advisories); this module answers them off
+//! sysfs and the registry.
 
-use crate::cmd::{TaskSpec, run_into};
+use crate::cmd::{TaskSpec, capture_into, run_into};
+use crate::util::read_trimmed;
 use greendot_proto::{NetdevName, PciAddress, SubStatus, SubTask};
 use std::io::{self, Write};
 use std::path::Path;
-use std::process::Command;
 
 /// Default sysfs netdev root (overridable in tests).
 pub const NET_ROOT: &str = "/sys/class/net";
@@ -33,12 +34,28 @@ pub trait NetworkHardware: Sync {
     fn vendor(&self) -> &'static str;
     /// True if this impl handles the given PCI vendor id, e.g. `"0x15b3"`.
     fn matches(&self, vendor_id: &str) -> bool;
-    /// Read-only probe of the RoCE-enable parameter.
+    /// Whether this NIC (its sysfs dir) supports the one-click
+    /// [`probe`](Self::probe)/[`enable`](Self::enable) flow — drives the
+    /// RoCE-capable inventory and vendor-detect for `EnableRoce`.
+    /// Advisory-only vendors return false.
+    fn enableable(&self, net_dir: &Path) -> bool {
+        let _ = net_dir;
+        true
+    }
+    /// Read-only probe of the RoCE-enable parameter. Only reached through
+    /// [`enableable`](Self::enableable) NICs.
     fn probe(&self, pci: &PciAddress) -> TaskSpec;
     /// Interpret the probe's stdout into a vendor-neutral verdict.
     fn interpret(&self, stdout: &str) -> RoceState;
     /// The privileged steps, in order, to turn hardware RoCE on.
     fn enable(&self, pci: &PciAddress) -> Vec<TaskSpec>;
+    /// Per-NIC RDMA advisory `(label, detail)` for a NIC this vendor owns —
+    /// vendor situations invisible from the NIC itself (e.g. host-side driver
+    /// ordering for SR-IOV VFs). Rendered opaquely by the web. Default: none.
+    fn advice(&self, net_dir: &Path) -> Option<(&'static str, &'static str)> {
+        let _ = net_dir;
+        None
+    }
 }
 
 struct Mellanox;
@@ -90,8 +107,64 @@ impl NetworkHardware for Mellanox {
     }
 }
 
+/// Intel NICs. Advisory-only today: no Intel family has a supported one-click
+/// enable flow, but irdma-capable SR-IOV VFs get a diagnostic advisory (the
+/// host-side driver-ordering requirement is invisible from the VF).
+struct Intel;
+
+/// PCI device ids of Intel Ethernet *Adaptive Virtual Functions* (`iavf`) — the
+/// SR-IOV VFs of the irdma-capable families (E810/`ice`, X7xx/`i40e`). These
+/// VFs get RDMA only when the host loads `irdma` before the VF count is set;
+/// non-RDMA Intel VFs (igb/ixgbe) use other ids and are deliberately excluded.
+/// One entry today; extend the slice to cover more irdma VF ids.
+const INTEL_IRDMA_VF_IDS: &[&str] = &["0x1889"];
+
+/// Human advisory for a detected Intel irdma VF that has no RDMA.
+const IRDMA_VF_LABEL: &str = "SR-IOV VF: host must load the RDMA driver before creating VFs";
+const IRDMA_VF_DETAIL: &str = "This is an Intel Ethernet Adaptive virtual function. RDMA on the VF \
+     works only if the host loads the irdma driver (modprobe irdma) BEFORE the \
+     VF count is set via sriov_numvfs. VFs created before irdma is loaded come \
+     up without RDMA — on the host, load irdma, then re-create the VFs.";
+
+impl NetworkHardware for Intel {
+    fn vendor(&self) -> &'static str {
+        "Intel"
+    }
+
+    /// Intel's PCI vendor id.
+    fn matches(&self, vendor_id: &str) -> bool {
+        vendor_id == "0x8086"
+    }
+
+    /// No supported one-click enable flow — advisory-only.
+    fn enableable(&self, _net_dir: &Path) -> bool {
+        false
+    }
+
+    // probe/interpret/enable are unreachable while `enableable` is false; they
+    // state the honest answer anyway (no settable parameter, nothing to run).
+    fn probe(&self, pci: &PciAddress) -> TaskSpec {
+        devlink(&["dev", "param", "show", &format!("pci/{pci}"), "-j"])
+    }
+
+    fn interpret(&self, _stdout: &str) -> RoceState {
+        RoceState::Unavailable
+    }
+
+    fn enable(&self, _pci: &PciAddress) -> Vec<TaskSpec> {
+        Vec::new()
+    }
+
+    fn advice(&self, net_dir: &Path) -> Option<(&'static str, &'static str)> {
+        let dev = device_id(net_dir)?;
+        INTEL_IRDMA_VF_IDS
+            .contains(&dev.as_str())
+            .then_some((IRDMA_VF_LABEL, IRDMA_VF_DETAIL))
+    }
+}
+
 /// Every supported NIC vendor. Append one entry to add a vendor.
-static REGISTRY: &[&dyn NetworkHardware] = &[&Mellanox];
+static REGISTRY: &[&dyn NetworkHardware] = &[&Mellanox, &Intel];
 
 fn devlink(args: &[&str]) -> TaskSpec {
     TaskSpec::new("devlink", args.iter().map(|s| s.to_string()).collect())
@@ -126,13 +199,6 @@ fn enable_roce_from_json(json: &str) -> Option<bool> {
 // ---- sysfs detection (vendor-neutral readers; the vendor decision is the
 // registry's `matches`) ----
 
-/// A trimmed sysfs value, `None` if missing or empty.
-fn read_trimmed(path: &Path) -> Option<String> {
-    let s = std::fs::read_to_string(path).ok()?;
-    let s = s.trim();
-    (!s.is_empty()).then(|| s.to_owned())
-}
-
 /// A physical Ethernet NIC: has a PCI `device` and ARPHRD_ETHER (`type` == 1).
 fn is_ethernet(net_dir: &Path) -> bool {
     net_dir.join("device").symlink_metadata().is_ok()
@@ -156,12 +222,18 @@ fn pci_of(net_dir: &Path) -> Option<PciAddress> {
     PciAddress::new(name.as_ref()).ok()
 }
 
-/// The vendor impl handling `netdev`, plus its PCI address — when both the vendor
-/// matches a registry impl and a PCI address is readable.
+/// The registry impl owning `netdev`'s PCI vendor id, if any.
+fn vendor_impl(net_dir: &Path) -> Option<&'static dyn NetworkHardware> {
+    let id = vendor_id(net_dir)?;
+    REGISTRY.iter().copied().find(|hw| hw.matches(&id))
+}
+
+/// The vendor impl handling `netdev` for the enable flow, plus its PCI address
+/// — when the vendor matches a registry impl, the NIC is enableable, and a PCI
+/// address is readable.
 fn detect(net_root: &Path, netdev: &str) -> Option<(&'static dyn NetworkHardware, PciAddress)> {
     let net_dir = net_root.join(netdev);
-    let id = vendor_id(&net_dir)?;
-    let hw = REGISTRY.iter().copied().find(|hw| hw.matches(&id))?;
+    let hw = vendor_impl(&net_dir).filter(|hw| hw.enableable(&net_dir))?;
     Some((hw, pci_of(&net_dir)?))
 }
 
@@ -176,10 +248,10 @@ pub fn roce_capable(net_root: &Path) -> Vec<(String, &'static str)> {
         .flatten()
         .filter_map(|entry| {
             let net_dir = entry.path();
-            let id = is_ethernet(&net_dir)
-                .then(|| vendor_id(&net_dir))
-                .flatten()?;
-            let hw = REGISTRY.iter().copied().find(|hw| hw.matches(&id))?;
+            let hw = is_ethernet(&net_dir)
+                .then(|| vendor_impl(&net_dir))
+                .flatten()
+                .filter(|hw| hw.enableable(&net_dir))?;
             Some((
                 entry.file_name().to_string_lossy().into_owned(),
                 hw.vendor(),
@@ -190,56 +262,31 @@ pub fn roce_capable(net_root: &Path) -> Vec<(String, &'static str)> {
     out
 }
 
-// ---- per-NIC RDMA advisories (diagnostic-only; vendor knowledge stays here) ----
-
-/// Intel's PCI vendor id.
-const INTEL_VENDOR_ID: &str = "0x8086";
-/// PCI device ids of Intel Ethernet *Adaptive Virtual Functions* (`iavf`) — the
-/// SR-IOV VFs of the irdma-capable families (E810/`ice`, X7xx/`i40e`). These
-/// VFs get RDMA only when the host loads `irdma` before the VF count is set;
-/// non-RDMA Intel VFs (igb/ixgbe) use other ids and are deliberately excluded.
-/// One entry today; extend the slice to cover more irdma VF ids.
-const INTEL_IRDMA_VF_IDS: &[&str] = &["0x1889"];
-
-/// Human advisory for a detected Intel irdma VF that has no RDMA: the host-side
-/// driver-ordering requirement is invisible from the VF, so spell it out.
-const IRDMA_VF_LABEL: &str = "SR-IOV VF: host must load the RDMA driver before creating VFs";
-const IRDMA_VF_DETAIL: &str = "This is an Intel Ethernet Adaptive virtual function. RDMA on the VF \
-     works only if the host loads the irdma driver (modprobe irdma) BEFORE the \
-     VF count is set via sriov_numvfs. VFs created before irdma is loaded come \
-     up without RDMA — on the host, load irdma, then re-create the VFs.";
-
-/// Every ethernet NIC that is an Intel irdma-capable Adaptive VF: matched by
-/// PCI vendor [`INTEL_VENDOR_ID`] and a device id in [`INTEL_IRDMA_VF_IDS`].
-fn intel_irdma_vfs(net_root: &Path) -> Vec<String> {
+/// Per-NIC RDMA advisories as `(netdev, label, detail)` — the vendor-specific
+/// explanations the web renders opaquely on the Diagnose page. Each ethernet
+/// NIC is matched to its registry vendor and asked for
+/// [`NetworkHardware::advice`].
+fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)> {
     let Ok(entries) = std::fs::read_dir(net_root) else {
         return Vec::new();
     };
-    let mut out: Vec<String> = entries
+    let mut out: Vec<(String, &'static str, &'static str)> = entries
         .flatten()
         .filter_map(|entry| {
             let net_dir = entry.path();
-            if !is_ethernet(&net_dir) || vendor_id(&net_dir).as_deref() != Some(INTEL_VENDOR_ID) {
-                return None;
-            }
-            let dev = device_id(&net_dir)?;
-            INTEL_IRDMA_VF_IDS
-                .contains(&dev.as_str())
-                .then(|| entry.file_name().to_string_lossy().into_owned())
+            let hw = is_ethernet(&net_dir)
+                .then(|| vendor_impl(&net_dir))
+                .flatten()?;
+            let (label, detail) = hw.advice(&net_dir)?;
+            Some((
+                entry.file_name().to_string_lossy().into_owned(),
+                label,
+                detail,
+            ))
         })
         .collect();
     out.sort();
     out
-}
-
-/// Per-NIC RDMA advisories as `(netdev, label, detail)` — the vendor-specific
-/// explanations the web renders opaquely on the Diagnose page. Only Intel irdma
-/// VFs produce one today; this is where any future per-NIC advice is added.
-fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)> {
-    intel_irdma_vfs(net_root)
-        .into_iter()
-        .map(|netdev| (netdev, IRDMA_VF_LABEL, IRDMA_VF_DETAIL))
-        .collect()
 }
 
 // ---- streamed handlers (collected/recorded by the web like NfsReport/NfsApply) ----
@@ -284,21 +331,14 @@ pub fn enable_into(
     };
 
     // Confirm the parameter is present and currently off before reloading.
-    let probe = hw.probe(&pci);
-    writeln!(sub.stdout(), "$ {} {}", probe.command, probe.args.join(" "))?;
-    let stdout = match Command::new(&probe.command).args(&probe.args).output() {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {
-            let msg = "devlink is not installed — install the iproute2 package \
-                       (Tasks → Install dependencies)"
-                .to_string();
-            writeln!(sub.stderr(), "{msg}")?;
-            sub.set_result(1, Some(msg));
-            return Ok(SubStatus::Failed);
+    // The probe's output streams into the subtask so a wrong verdict can be
+    // diagnosed from the task page.
+    let stdout = match capture_into(sub, &hw.probe(&pci))? {
+        Ok(stdout) => {
+            sub.stdout().write_all(stdout.as_bytes())?;
+            stdout
         }
-        Err(e) => {
-            let msg = format!("failed to start devlink: {e}");
-            writeln!(sub.stderr(), "{msg}")?;
+        Err(msg) => {
             sub.set_result(1, Some(msg));
             return Ok(SubStatus::Failed);
         }
@@ -392,23 +432,31 @@ mod tests {
     }
 
     #[test]
-    fn intel_irdma_vfs_match_only_the_adaptive_vf_id() {
+    fn intel_advice_matches_only_the_adaptive_vf_id_and_never_enables() {
         let f = Fixture::new("ivf");
-        // Intel Adaptive VF (8086:1889) → detected, with an advisory.
+        // Intel Adaptive VF (8086:1889) → an advisory.
         f.netdev("ens16v0", "1", Some(("0000:00:10.1", "0x8086", "0x1889")));
-        // Intel non-RDMA VF (different device id) → not detected.
+        // Intel non-RDMA VF (different device id) → no advisory.
         f.netdev("eth2", "1", Some(("0000:02:10.1", "0x8086", "0x10ed")));
-        // Non-Intel vendor with the same device id → not detected (vendor gates).
+        // Non-Intel vendor with the same device id → no advisory (vendor gates).
         f.netdev("eth3", "1", Some(("0000:03:00.0", "0x15b3", "0x1889")));
-        // Virtual interface (no PCI device) → not detected.
+        // Virtual interface (no PCI device) → no advisory.
         f.netdev("br0", "1", None);
 
-        assert_eq!(intel_irdma_vfs(&f.net_root()), vec!["ens16v0".to_owned()]);
         let advice = nic_rdma_advice(&f.net_root());
         assert_eq!(advice.len(), 1);
         assert_eq!(advice[0].0, "ens16v0");
         assert_eq!(advice[0].1, IRDMA_VF_LABEL);
         assert!(advice[0].2.contains("sriov_numvfs"), "{}", advice[0].2);
+
+        // Advisory-only vendor: Intel NICs are neither in the RoCE-capable
+        // inventory nor detected for the enable flow (Mellanox eth3 is).
+        assert_eq!(
+            roce_capable(&f.net_root()),
+            vec![("eth3".to_owned(), "Mellanox")]
+        );
+        assert!(detect(&f.net_root(), "ens16v0").is_none());
+        assert!(detect(&f.net_root(), "eth3").is_some());
     }
 
     #[test]

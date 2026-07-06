@@ -28,6 +28,7 @@ mod pam;
 mod partition;
 mod reconcile;
 mod smart;
+mod util;
 mod zfs;
 
 use anyhow::{Context, Result, bail};
@@ -216,17 +217,42 @@ struct HelperSvc {
 }
 
 /// An [`EventSink`] that forwards task events into the gRPC response stream.
-/// `blocking_send` is safe here because the sink only ever runs inside
-/// `spawn_blocking`. A send failure means the client hung up — surfaced as an
-/// `io::Error` so the streaming apply/command code stops (as it did when a
-/// socket write failed).
+/// Sending only ever runs inside `spawn_blocking`. A closed channel means the
+/// client hung up; a channel that stays full past [`SEND_STALL_LIMIT`] means a
+/// connected client stopped reading. Both surface as an `io::Error` so the
+/// streaming apply/command code stops — otherwise a stalled client would pin
+/// the worker (and with it `Ctx::mutate_lock`) forever.
 struct ChannelSink(mpsc::Sender<std::result::Result<pb::TaskEvent, Status>>);
+
+/// How long a full event channel may stall a worker before the client is
+/// declared dead.
+const SEND_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
 
 impl EventSink for ChannelSink {
     fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {
-        self.0
-            .blocking_send(Ok(pb::TaskEvent::from(ev)))
-            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "client disconnected"))
+        let mut ev = Ok(pb::TaskEvent::from(ev));
+        let deadline = std::time::Instant::now() + SEND_STALL_LIMIT;
+        loop {
+            match self.0.try_send(ev) {
+                Ok(()) => return Ok(()),
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::BrokenPipe,
+                        "client disconnected",
+                    ));
+                }
+                Err(mpsc::error::TrySendError::Full(unsent)) => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            "client stopped reading task events",
+                        ));
+                    }
+                    ev = unsent;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+        }
     }
 }
 
@@ -370,10 +396,10 @@ fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Resu
             let status = hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, &mut sub)?;
             sub.complete(status);
         }
-        Dispatch::FailedTask(msg) => {
+        Dispatch::FailedTask { label, message } => {
             // A refused operation (e.g. install on an unsupported distro)
             // recorded as a failed subtask carrying its reason.
-            task.begin_subtask("install").fail(msg);
+            task.begin_subtask(label).fail(message);
         }
     }
     task.complete()

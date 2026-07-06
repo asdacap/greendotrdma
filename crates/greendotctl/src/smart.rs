@@ -2,14 +2,10 @@
 //! web collects verbatim; the batch health read runs `smartctl -Hj -A` per
 //! device and streams one merged JSON line, like `hardware::report_capable_into`.
 
-use crate::cmd::TaskSpec;
+use crate::cmd::{TaskSpec, capture_into};
+use crate::util::dev;
 use greendot_proto::{BlockDev, SubStatus, SubTask};
 use std::io::{self, Write};
-use std::process::Command;
-
-fn dev(device: &BlockDev) -> String {
-    format!("/dev/{device}")
-}
 
 /// `smartctl -x /dev/<device>` — the full human-readable dump (identity, health,
 /// attributes, error/self-test logs). The web shows its output verbatim.
@@ -43,22 +39,20 @@ pub fn parse_health(stdout: &str) -> (Option<bool>, Option<i32>) {
 /// `smartctl` once per device; a missing binary or unreadable device degrades
 /// that entry to `passed:null,temp_c:null` (the web renders it gray).
 pub fn report_health_into(devices: &[BlockDev], sub: &mut SubTask) -> io::Result<SubStatus> {
-    let rows: Vec<serde_json::Value> = devices
-        .iter()
-        .map(|device| {
-            let (passed, temp_c) = match Command::new("smartctl").args(health_argv(device)).output()
-            {
-                // smartctl exits nonzero on healthy drives: parse stdout regardless.
-                Ok(out) => parse_health(&String::from_utf8_lossy(&out.stdout)),
-                Err(_) => (None, None),
-            };
-            serde_json::json!({
-                "device": device.as_str(),
-                "passed": passed,
-                "temp_c": temp_c,
-            })
-        })
-        .collect();
+    let mut rows = Vec::with_capacity(devices.len());
+    for device in devices {
+        let spec = TaskSpec::new("smartctl", health_argv(device));
+        let (passed, temp_c) = match capture_into(sub, &spec)? {
+            // smartctl exits nonzero on healthy drives: parse stdout regardless.
+            Ok(stdout) => parse_health(&stdout),
+            Err(_) => (None, None),
+        };
+        rows.push(serde_json::json!({
+            "device": device.as_str(),
+            "passed": passed,
+            "temp_c": temp_c,
+        }));
+    }
     write!(sub.stdout(), "{}", serde_json::Value::Array(rows))?;
     Ok(SubStatus::Success)
 }

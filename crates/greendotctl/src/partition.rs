@@ -1,15 +1,8 @@
 //! GPT partitioning as `sfdisk` CLI tasks. sfdisk re-reads the table itself.
 
 use crate::cmd::TaskSpec;
+use crate::util::{dev, s};
 use greendot_proto::{BlockDev, PartLabel};
-
-fn dev(disk: &BlockDev) -> String {
-    format!("/dev/{disk}")
-}
-
-fn s(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
-}
 
 /// Writes a brand-new empty GPT — destroys the existing table.
 pub fn table_create(disk: &BlockDev) -> TaskSpec {

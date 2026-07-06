@@ -186,6 +186,32 @@ pub(crate) fn run_into(sub: &mut SubTask, spec: &TaskSpec) -> io::Result<SubStat
     Ok(status)
 }
 
+/// Runs `spec` to completion, capturing its stdout for the caller instead of
+/// streaming it — for probes and reads whose stdout the caller parses, or
+/// whose subtask stdout must stay machine-readable. The `$ cmd` echo and the
+/// child's stderr go to the subtask's *stderr* so the run stays visible on the
+/// task page without polluting stdout. A missing binary maps to the same
+/// install hint as [`run`]. Outer `Err` = sink failure; inner `Err` = the
+/// spawn-failure message (already echoed; the caller decides whether that
+/// fails the subtask or degrades).
+pub(crate) fn capture_into(
+    sub: &mut SubTask,
+    spec: &TaskSpec,
+) -> io::Result<Result<String, String>> {
+    writeln!(sub.stderr(), "$ {} {}", spec.command, spec.args.join(" "))?;
+    match Command::new(&spec.command).args(&spec.args).output() {
+        Ok(out) => {
+            sub.stderr().write_all(&out.stderr)?;
+            Ok(Ok(String::from_utf8_lossy(&out.stdout).into_owned()))
+        }
+        Err(e) => {
+            let msg = spawn_error(&spec.command, &e);
+            writeln!(sub.stderr(), "{msg}")?;
+            Ok(Err(msg))
+        }
+    }
+}
+
 /// Spawns the command, streams stdout/stderr into `sub`'s pipes, waits, and
 /// returns `(status, exit, error)`. A spawn failure echoes the install hint to
 /// the subtask's stderr and returns `(Failed, -1, hint)`. `Err` only when the

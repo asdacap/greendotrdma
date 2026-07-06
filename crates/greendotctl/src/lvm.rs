@@ -3,11 +3,8 @@
 //! the `B` suffix; LVM rounds up to the physical-extent boundary.
 
 use crate::cmd::TaskSpec;
+use crate::util::s;
 use greendot_proto::{DevicePath, LvName, LvmReport, VgName};
-
-fn s(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
-}
 
 /// `vgs`/`lvs`/`pvs` as machine-readable JSON in bytes. Run as a task so the web
 /// side gets the output stream; it parses the JSON.

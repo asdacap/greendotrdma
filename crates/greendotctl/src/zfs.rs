@@ -1,6 +1,7 @@
 //! ZFS mutations as `zfs` CLI tasks. Reads happen unprivileged in greendot-web.
 
 use crate::cmd::TaskSpec;
+use crate::util::s;
 use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, SnapName, VdevLayout};
 
 fn spec(args: Vec<String>) -> TaskSpec {
@@ -9,10 +10,6 @@ fn spec(args: Vec<String>) -> TaskSpec {
 
 fn zpool_spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zpool", args)
-}
-
-fn s(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
 }
 
 pub fn zvol_create(

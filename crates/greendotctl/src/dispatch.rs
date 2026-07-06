@@ -48,9 +48,13 @@ pub enum Dispatch {
     /// Turn on hardware RoCE for a NIC: vendor-detect, probe, then set+reload —
     /// the multi-step vendor-specific flow streamed as one task.
     EnableRoce(NetdevName),
-    /// A refused operation recorded as a failed task carrying this message
-    /// (e.g. install on an unsupported distro), so the reason reaches the UI.
-    FailedTask(String),
+    /// A refused operation recorded as a failed task carrying the subtask
+    /// label and the reason (e.g. install on an unsupported distro), so the
+    /// reason reaches the UI.
+    FailedTask {
+        label: &'static str,
+        message: String,
+    },
 }
 
 pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
@@ -188,7 +192,10 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             match install::install(&packages, &greendot_proto::detect()) {
                 Ok(Some(spec)) => Dispatch::Task(spec),
                 Ok(None) => Dispatch::OneShot(Response::Ok),
-                Err(msg) => Dispatch::FailedTask(msg),
+                Err(msg) => Dispatch::FailedTask {
+                    label: "install",
+                    message: msg,
+                },
             }
         }
     }

@@ -4,6 +4,7 @@
 //! untouched. Creating a `ports/<id>/subsystems/<nqn>` symlink is what binds the
 //! RDMA/TCP listener — its failure (e.g. no usable RDMA) surfaces as a task error.
 
+use crate::util::read_trim;
 use greendot_proto::{
     NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask,
     Transport,
@@ -219,12 +220,6 @@ fn apply_port(root: &Path, p: &NvmetPortSpec) -> io::Result<()> {
         }
     }
     Ok(())
-}
-
-fn read_trim(path: &Path) -> String {
-    std::fs::read_to_string(path)
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
 }
 
 fn dir_entries(dir: &Path) -> Vec<String> {

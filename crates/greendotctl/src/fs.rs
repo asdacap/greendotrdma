@@ -3,11 +3,8 @@
 //! command.
 
 use crate::cmd::TaskSpec;
+use crate::util::s;
 use greendot_proto::{DevicePath, MountPath};
-
-fn s(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
-}
 
 /// `e2fsck -f -y <device>` — resize2fs refuses to shrink an unchecked fs.
 pub fn fsck(device: &DevicePath) -> TaskSpec {

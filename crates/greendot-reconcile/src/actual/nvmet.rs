@@ -1,6 +1,7 @@
 //! Read-only view of the nvmet configfs tree. A missing tree (module not
 //! loaded) reads as empty; malformed entries are skipped.
 
+use super::{dir_names, read_attr};
 use std::path::Path;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -31,25 +32,6 @@ pub struct Port {
     pub traddr: String,
     pub trsvcid: String,
     pub subsystems: Vec<String>,
-}
-
-fn read_attr(dir: &Path, attr: &str) -> String {
-    std::fs::read_to_string(dir.join(attr))
-        .map(|s| s.trim().to_owned())
-        .unwrap_or_default()
-}
-
-fn dir_names(dir: &Path) -> Vec<String> {
-    let mut names: Vec<String> = std::fs::read_dir(dir)
-        .map(|entries| {
-            entries
-                .flatten()
-                .filter_map(|e| e.file_name().into_string().ok())
-                .collect()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
 }
 
 pub fn read(root: &Path) -> ActualNvmet {

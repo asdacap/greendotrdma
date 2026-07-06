@@ -7,7 +7,8 @@
 //! listener is asserted by writing `rdma <port>` to `/proc/fs/nfsd/portlist`
 //! (idempotent, root-only), mirroring how `nvmet::apply` writes configfs.
 
-use crate::cmd::{TaskSpec, run_into};
+use crate::cmd::{TaskSpec, capture_into, run_into};
+use crate::util::s;
 use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, SubStatus, SubTask};
 use std::collections::BTreeSet;
 use std::io::{self, Write};
@@ -117,10 +118,6 @@ fn ensure_portlist_rdma(portlist: &Path, port: u16) -> io::Result<bool> {
     Ok(true)
 }
 
-fn s(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| p.to_string()).collect()
-}
-
 /// Applies `desired` into the caller-opened subtask: each `exportfs`/`systemctl`
 /// command streams as a `$ …` echo + output, and their statuses fold into the
 /// returned subtask status. `Err` only when the sink fails; operation failures
@@ -212,29 +209,43 @@ pub fn apply(
     Ok(acc.unwrap_or(SubStatus::Success))
 }
 
-/// Reads NFS actual state (a privileged read): the live export table
-/// (`exportfs -s`, exports(5) syntax), the nfsd portlist, and greendot's own
-/// managed exports file (what it last applied — for drift detection), separated
-/// by the report sentinels. Missing tools/files read as empty so the dashboard
-/// simply shows nothing exported. Parsed back by `actual::nfs::from_report`.
+/// Formats NFS actual state for `actual::nfs::from_report`: the live export
+/// table (exports(5) syntax), the nfsd portlist, and greendot's own managed
+/// exports file (what it last applied — for drift detection), separated by the
+/// report sentinels. Missing files read as empty so the dashboard simply shows
+/// nothing exported.
+fn format_report(exports: &str, portlist: &Path, exports_file: &Path) -> String {
+    let portlist = std::fs::read_to_string(portlist).unwrap_or_default();
+    let managed = std::fs::read_to_string(exports_file).unwrap_or_default();
+    format!("{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}")
+}
+
+/// [`format_report`] with the export table read via `exportfs -s`, degraded to
+/// empty when the tool is missing or fails — for the in-process reconcile
+/// drift check, which has no subtask to stream into.
 pub fn report(portlist: &Path, exports_file: &Path) -> String {
     let exports = Command::new("exportfs")
         .arg("-s")
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
-    let portlist = std::fs::read_to_string(portlist).unwrap_or_default();
-    let managed = std::fs::read_to_string(exports_file).unwrap_or_default();
-    format!("{exports}\n{NFS_PORTLIST_SENTINEL}\n{portlist}\n{NFS_MANAGED_SENTINEL}\n{managed}")
+    format_report(&exports, portlist, exports_file)
 }
 
-/// Streams [`report`] into the subtask, for the socket `NfsReport` request.
+/// Streams the report into the subtask, for the socket `NfsReport` request.
+/// `exportfs -s` runs via [`capture_into`] so the command and its stderr stay
+/// visible; a failure degrades to an empty export table like [`report`].
 pub fn report_into(
     portlist: &Path,
     exports_file: &Path,
     sub: &mut SubTask,
 ) -> io::Result<SubStatus> {
-    write!(sub.stdout(), "{}", report(portlist, exports_file))?;
+    let exports = capture_into(sub, &TaskSpec::new("exportfs", s(&["-s"])))?.unwrap_or_default();
+    write!(
+        sub.stdout(),
+        "{}",
+        format_report(&exports, portlist, exports_file)
+    )?;
     Ok(SubStatus::Success)
 }
 
@@ -346,13 +357,10 @@ mod tests {
                 &[("192.168.101.0/24", true)],
             )],
         };
-        // systemctl/exportfs are absent in CI → overall status is Failed, but the
-        // file + portlist side effects (which don't depend on them) still happen.
-        assert_eq!(
-            apply_status(&desired, &file, &pl),
-            SubStatus::Failed,
-            "missing exportfs/systemctl"
-        );
+        // The folded status depends on whether exportfs/systemctl exist (and
+        // can run) on this host, so it is deliberately not asserted; the file +
+        // portlist side effects below never depend on them.
+        apply_status(&desired, &file, &pl);
         assert_eq!(
             std::fs::read_to_string(&file).unwrap(),
             render_exports(&desired)
