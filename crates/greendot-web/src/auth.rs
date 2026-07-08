@@ -150,12 +150,12 @@ pub async fn login_post(
     let Ok(username) = Username::new(form.username) else {
         return login_failed("invalid username or password");
     };
-    let req = greendot_proto::CallRequest::Authenticate {
+    let req = greendot_proto::ops::Authenticate {
         username,
         password: Secret(form.password),
     };
-    match state.helper.call(req).await {
-        Ok(greendot_proto::Response::OkAuth { username }) => {
+    match state.helper.authenticate(req).await {
+        Ok(greendot_proto::AuthResult::Ok { username }) => {
             let (token, _) = state.sessions.create(username, Instant::now());
             (
                 [(
@@ -166,12 +166,8 @@ pub async fn login_post(
             )
                 .into_response()
         }
-        Ok(greendot_proto::Response::Err {
-            kind: ErrKind::Busy,
-            message,
-        }) => login_failed(message),
-        Ok(greendot_proto::Response::Err {
-            kind: ErrKind::NotInAdminGroup,
+        Ok(greendot_proto::AuthResult::Err {
+            kind: ErrKind::Busy | ErrKind::NotInAdminGroup,
             message,
         }) => login_failed(message),
         Ok(_) => login_failed("invalid username or password"),

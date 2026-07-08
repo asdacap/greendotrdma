@@ -1,23 +1,22 @@
 //! Protocol between greendot-web (unprivileged) and greendotctl (root).
 //!
-//! This module holds the *validated domain model* — [`CallRequest`]/
-//! [`TaskRequest`]/[`Response`]/[`TaskEvent`] and the newtypes in `types`. Every
-//! request variant is one allowlisted privileged operation, and all strings that
-//! end up as path components or command arguments are validated newtypes.
+//! This crate holds the *validated domain model*: one op struct per rpc in
+//! [`ops`], the newtypes in `types`, the shared actual-state DTOs in
+//! [`actual`], and the task event stream ([`TaskEvent`]). Every op is one
+//! allowlisted privileged operation, and all strings that end up as path
+//! components or command arguments are validated newtypes.
 //!
-//! A request is one of two kinds, split by what the helper answers with: a
-//! [`CallRequest`] gets a single [`Response`], a [`TaskRequest`] gets a recorded
-//! stream of [`TaskEvent`]s. Only the two ops that must not be recorded are
-//! calls (see [`CallRequest`]); everything else is a task.
+//! The service has one rpc per operation. Mutations (and the reads whose
+//! payload is a foreign tool's output) reply with a recorded [`TaskEvent`]
+//! stream; the structural reads reply with typed messages mirroring the
+//! `actual::*` DTOs; `Ping`/`Authenticate` are one-shot and never recorded.
 //!
 //! The transport is gRPC (tonic): the generated protobuf types live in [`pb`],
-//! and [`convert`] provides the conversions. Crucially, protobuf messages are
-//! plain strings that prost does *not* validate on decode, so every incoming
-//! `pb::CallRequest`/`pb::TaskRequest` must pass the `TryFrom` conversion (in
-//! `convert`), which re-runs the validators. The `server::Validated` adapter
-//! (feature `server`) performs that conversion in exactly one place, so daemon
-//! code only ever handles the validated domain types — the security choke point
-//! cannot be skipped.
+//! and [`ops`]/[`convert`] provide the conversions. Crucially, protobuf
+//! messages are plain strings that prost does *not* validate on decode, so
+//! every incoming `pb::X` request must pass `TryFrom<pb::X> for ops::X`, which
+//! re-runs the validators. The daemon's generic rpc middleware requires that
+//! bound on every method, so the security choke point cannot be skipped.
 
 /// Actual-state DTOs and their pure parsers (the read half of the contract).
 pub mod actual;
@@ -28,15 +27,16 @@ pub mod config;
 mod convert;
 /// Desired-state config model and the read-only TOML loader (the write half).
 pub mod desired;
+/// The validated domain ops — one struct per rpc, with the ingress-validating
+/// `TryFrom` conversions that are the security choke point.
+pub mod ops;
 /// OS / package-manager knowledge shared by the daemon and the web dep panel.
 pub mod os;
-#[cfg(feature = "server")]
-pub mod server;
 mod types;
 mod validate;
 
 /// Generated protobuf/gRPC transport types. Kept separate from the validated
-/// domain model (`Request`/`Response`/`TaskEvent` below); see `convert` for the
+/// domain model (`ops`, `actual`, `TaskEvent`); see `ops`/`convert` for the
 /// validating conversions between the two.
 pub mod pb {
     #![allow(clippy::all, clippy::pedantic, clippy::nursery, missing_docs)]
@@ -46,271 +46,16 @@ pub mod pb {
 pub use convert::ConvertError;
 pub use types::*;
 
-/// The ops the helper answers with one [`Response`] instead of a recorded task.
-///
-/// Membership is not a performance choice: a task records the request that
-/// started it, so `Authenticate` must never be one — that would write the
-/// password into the task log. `Ping` is here because a liveness probe with a
-/// task record per call is useless. Everything else is a [`TaskRequest`].
+/// The `Authenticate` rpc's reply: PAM + admin-group verdict.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CallRequest {
-    Ping,
-    /// PAM authentication + admin-group check, run by root because the web is
-    /// unprivileged and only root can read `/etc/shadow`.
-    Authenticate {
-        username: Username,
-        password: Secret,
-    },
-}
-
-/// Every mutating operation and every privileged read: the helper answers these
-/// with a stream of [`TaskEvent`]s that the web records as a task.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskRequest {
-    // ZFS (reads happen unprivileged in greendot-web)
-    ZvolCreate {
-        dataset: DatasetName,
-        size: u64,
-        volblocksize: Option<u32>,
-        sparse: bool,
-    },
-    ZvolDelete {
-        dataset: DatasetName,
-    },
-    ZvolResize {
-        dataset: DatasetName,
-        new_size: u64,
-    },
-    SnapshotCreate {
-        dataset: DatasetName,
-        snap: SnapName,
-    },
-    SnapshotDestroy {
-        dataset: DatasetName,
-        snap: SnapName,
-    },
-
-    // ZFS filesystem datasets (mount lifecycle). Reads happen unprivileged in
-    // greendot-web; these mutations are imperative one-shots (no desired state).
-    ZfsFsCreate {
-        dataset: DatasetName,
-        /// `None` inherits the default `<pool>/<path>` mountpoint.
-        mountpoint: Option<MountPoint>,
-    },
-    ZfsSetMountpoint {
-        dataset: DatasetName,
-        mountpoint: MountPoint,
-    },
-    ZfsMount {
-        dataset: DatasetName,
-    },
-    ZfsUnmount {
-        dataset: DatasetName,
-    },
-    ZfsDestroy {
-        dataset: DatasetName,
-        recursive: bool,
-    },
-
-    // Partitioning (sfdisk)
-    PartitionTableCreate {
-        disk: BlockDev,
-    },
-    PartitionCreate {
-        disk: BlockDev,
-        start_sector: Option<u64>,
-        size_sectors: Option<u64>,
-        label: PartLabel,
-    },
-    PartitionDelete {
-        disk: BlockDev,
-        number: u32,
-    },
-    /// Shrink a partition *and its filesystem* in place (start sector
-    /// preserved), as one operation: the helper probes the filesystem itself,
-    /// refuses mounted or unshrinkable filesystems, shrinks the filesystem
-    /// first, then the partition — the whole sequence under one mutate lock.
-    /// How each filesystem shrinks (ext* offline, btrfs via a helper-owned
-    /// temp mount) is the helper's business and never crosses the wire.
-    PartitionShrink {
-        disk: BlockDev,
-        number: u32,
-        size_sectors: u64,
-    },
-
-    // ZFS pools (zvol ops are above; reads happen unprivileged in greendot-web)
-    PoolCreate {
-        name: PoolName,
-        vdev: VdevLayout,
-        devices: Vec<DevicePath>,
-        ashift: Option<u8>,
-    },
-    PoolDeviceAdd {
-        pool: PoolName,
-        device: DevicePath,
-    },
-
-    // SMART (privileged reads via smartctl, which needs root). The full report
-    // is a plain task the web collects (not recorded on the Tasks page); the
-    // batch health read is a special arm that merges per-device JSON, like
-    // RoceCapableNics. The web prepends `/dev/` to the validated bare name.
-    /// Full `smartctl -x` dump for one device, collected verbatim by the web.
-    SmartReport {
-        device: BlockDev,
-    },
-    /// Per-device SMART health + temperature for a batch of devices, streamed as
-    /// `[{device, passed, temp_c}]` JSON — the dots/temps on the list.
-    SmartHealth {
-        devices: Vec<BlockDev>,
-    },
-
-    // LVM. Reads need root, so they go through the helper too (LvmReport),
-    // unlike ZFS reads which the web service runs unprivileged.
-    LvmReport {
-        what: LvmReport,
-    },
-    VgCreate {
-        name: VgName,
-        devices: Vec<DevicePath>,
-    },
-    VgExtend {
-        vg: VgName,
-        device: DevicePath,
-    },
-    VgReduce {
-        vg: VgName,
-        device: DevicePath,
-    },
-    VgRemove {
-        vg: VgName,
-    },
-    LvCreate {
-        vg: VgName,
-        name: LvName,
-        size: u64,
-    },
-    ThinPoolCreate {
-        vg: VgName,
-        name: LvName,
-        size: u64,
-    },
-    ThinLvCreate {
-        vg: VgName,
-        pool: LvName,
-        name: LvName,
-        virtual_size: u64,
-    },
-    /// Grow a logical volume (`lvextend`).
-    LvResize {
-        vg: VgName,
-        name: LvName,
-        new_size: u64,
-    },
-    /// Shrink a logical volume (`lvreduce -f`; destructive).
-    LvShrink {
-        vg: VgName,
-        name: LvName,
-        new_size: u64,
-    },
-    LvRename {
-        vg: VgName,
-        name: LvName,
-        new_name: LvName,
-    },
-    LvDelete {
-        vg: VgName,
-        name: LvName,
-    },
-
-    // NVMe-oF / iSCSI targets: the helper applies NvmetDesired directly to
-    // configfs, and renders LioDesired to targetctl JSON (restore command).
-    NvmetApply {
-        desired: NvmetDesired,
-    },
-    LioApply {
-        desired: LioDesired,
-    },
-    // NFS: the helper writes our exports file directly, applies it surgically
-    // with `exportfs -o`/`-u`, and asserts the nfsd RDMA listener.
-    NfsApply {
-        desired: NfsDesired,
-    },
-    /// Privileged read of NFS actual state (`exportfs -s` + `/proc/fs/nfsd/portlist`),
-    /// which the unprivileged web service cannot read directly.
-    NfsReport,
-    /// Run the full desired-state reconcile inline in the daemon: render the
-    /// NVMe-oF/iSCSI/NFS desired state from the config's state TOML and apply
-    /// whatever drifted, one subtask per area. Deliberately carries nothing:
-    /// the daemon reconciles against its own `--config`, so the peer cannot
-    /// name a file for root to read.
-    Reconcile,
-
-    // System
-    /// Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
-    /// (skipped if already loaded), then add the rdma link.
-    RxeAdd {
-        netdev: NetdevName,
-    },
-    /// Inventory of RoCE-capable NIC hardware (a privileged read): the helper
-    /// classifies vendors via its `NetworkHardware` registry and returns
-    /// `[{netdev, vendor}]` JSON. The web overlays this onto its structural NIC
-    /// classification — it carries no vendor knowledge itself.
-    RoceCapableNics,
-    /// Turn on hardware RoCE for `netdev`. The helper detects the vendor, probes
-    /// its enable parameter, and (only if present and off) sets it and reloads
-    /// the device — the whole vendor-specific flow lives behind the helper.
-    EnableRoce {
-        netdev: NetdevName,
-    },
-    /// Per-NIC RDMA *advisories* (a privileged read): the helper inspects each
-    /// NIC's hardware via its vendor knowledge and returns opaque
-    /// `[{netdev, label, detail}]` JSON explaining why a NIC may lack RDMA and
-    /// how to fix it (e.g. an SR-IOV VF whose host must load the RDMA driver
-    /// before setting the VF count). The web renders these verbatim on the
-    /// per-NIC Diagnose page — it carries no vendor knowledge itself.
-    NicRdmaAdvice,
-    /// Read live RDMA connections (`rdma -j resource show cm_id`): a privileged
-    /// *read* used to surface NVMe-oF/iSER peers the kernel exposes no other
-    /// way (this kernel lacks CONFIG_NVME_TARGET_DEBUGFS).
-    RdmaResources,
-    InstallPackages {
-        packages: Vec<PackageName>,
-    },
-
-    // Structural/privileged reads collected by the web (JSON on the task's
-    // stdout). The daemon reads the canonical system paths and serializes a
-    // shared `actual::*` DTO; the web deserializes and renders it, so no
-    // hardware/configfs/sysfs read happens in the unprivileged process.
-    /// The nvmet configfs tree as [`actual::nvmet::ActualNvmet`] JSON.
-    NvmetReport,
-    /// The LIO configfs tree as [`actual::lio::ActualLio`] JSON.
-    LioReport,
-    /// Live iSCSI sessions as `Vec<`[`actual::lio::IscsiSession`]`>` JSON.
-    LioSessions,
-    /// RDMA devices as `Vec<`[`actual::rdma::RdmaDev`]`>` JSON.
-    RdmaDevices,
-    /// Live PCI-address → IPs map (`/sys/class/net` + getifaddrs) as JSON.
-    NicPciAddrs,
-    /// Every NIC's RDMA status as `Vec<`[`actual::nic::NicStatus`]`>` JSON —
-    /// the structural sysfs classification overlaid with the vendor RoCE map,
-    /// combined daemon-side so the web stays vendor-free.
-    NicInterfaces,
-    /// The desired-vs-actual drift pre-check: renders the daemon's own desired
-    /// state, reads actual, and returns `{nvmet_ok, lio_ok, nfs_ok}` JSON
-    /// *without applying* — the web's cheap "is a reconcile needed?" probe.
-    ReconcileDryRun,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Response {
-    Ok,
-    OkAuth { username: String },
+pub enum AuthResult {
+    Ok { username: String },
     Err { kind: ErrKind, message: String },
 }
 
-impl Response {
+impl AuthResult {
     pub fn err(kind: ErrKind, message: impl Into<String>) -> Self {
-        Response::Err {
+        AuthResult::Err {
             kind,
             message: message.into(),
         }
@@ -596,7 +341,7 @@ mod tests {
 
     #[test]
     fn secret_debug_is_redacted() {
-        let req = CallRequest::Authenticate {
+        let req = ops::Authenticate {
             username: Username::new("alice").unwrap(),
             password: Secret("hunter2".into()),
         };

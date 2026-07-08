@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{BlockDev, PartLabel, TaskRequest};
+use greendot_proto::{BlockDev, PartLabel, ops};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -411,12 +411,12 @@ async fn disk_detail_page(
 /// detail partial with the outcome.
 async fn run(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
     kind: &str,
     title: &str,
     disk: &str,
 ) -> Response {
-    let view = match crate::task_runner::start(state, req, kind, title) {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
         Ok(id) => {
             gather_disk_detail(
                 state,
@@ -529,10 +529,10 @@ async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<Table
         return disk_detail_failed(&state, &scope, format!("invalid disk name {:?}", form.disk))
             .await;
     };
-    let req = TaskRequest::PartitionTableCreate { disk: disk.clone() };
+    let req = ops::PartitionTableCreate { disk: disk.clone() };
     run(
         &state,
-        req,
+        state.helper.partition_table_create(req),
         "gpt-create",
         &format!("new GPT on {disk}"),
         &scope,
@@ -575,7 +575,7 @@ async fn part_create(
             None => return disk_detail_failed(&state, &scope, "invalid size").await,
         },
     };
-    let req = TaskRequest::PartitionCreate {
+    let req = ops::PartitionCreate {
         disk: disk.clone(),
         start_sector: None,
         size_sectors,
@@ -583,7 +583,7 @@ async fn part_create(
     };
     run(
         &state,
-        req,
+        state.helper.partition_create(req),
         "partition-create",
         &format!("create partition on {disk}"),
         &scope,
@@ -615,14 +615,19 @@ async fn part_delete(
         )
         .await;
     };
-    let req = TaskRequest::PartitionDelete {
+    let req = ops::PartitionDelete {
         disk: disk.clone(),
         number: form.number,
     };
     let title = format!("delete partition {} on {disk}", form.number);
     // Removing the partition means its page no longer applies — go back to the
     // disk; the delete task is viewable on /tasks.
-    match crate::task_runner::start(&state, req, "partition-delete", &title) {
+    match crate::task_runner::start(
+        &state,
+        state.helper.partition_delete(req),
+        "partition-delete",
+        &title,
+    ) {
         Ok(_) => nav_redirect(&headers, &format!("/disks/{scope}")),
         Err(e) => part_detail_failed(&state, &scope, form.number, format!("{e:#}")).await,
     }
@@ -715,13 +720,18 @@ async fn part_shrink(
         )
         .await;
     }
-    let req = TaskRequest::PartitionShrink {
+    let req = ops::PartitionShrink {
         disk: disk.clone(),
         number: form.number,
         size_sectors: bytes / 512,
     };
     let title = format!("shrink {device}");
-    match crate::task_runner::start(&state, req, "partition-shrink", &title) {
+    match crate::task_runner::start(
+        &state,
+        state.helper.partition_shrink(req),
+        "partition-shrink",
+        &title,
+    ) {
         Ok(id) => page(PartDetailPartial {
             view: gather_part_detail(
                 &state,

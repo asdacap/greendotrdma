@@ -143,10 +143,7 @@ pub(crate) mod testutil {
     use axum::http::Request;
     use greendot_proto::pb;
     use greendot_proto::pb::helper_server::{Helper, HelperServer};
-    use greendot_proto::{
-        CallRequest as HelperCall, ErrKind, LvmReport, Response as HelperResponse, SubStatus,
-        TaskEvent, TaskRequest as HelperTask,
-    };
+    use greendot_proto::{AuthResult, ErrKind, SubStatus, TaskEvent, ops};
     use http_body_util::BodyExt;
     use std::pin::Pin;
     use std::time::Duration;
@@ -154,126 +151,228 @@ pub(crate) mod testutil {
     use tower::ServiceExt;
 
     /// A fake helper — a real in-process tonic server — accepting alice/secret
-    /// and answering Ok to everything else, with canned reads for the report
-    /// ops so the pages build real rows.
+    /// and answering success to every task rpc, with canned replies for the
+    /// reads so the pages build real rows.
     struct FakeHelper;
 
-    /// Canned task-event stream for a request (the read ops carry the JSON the
-    /// pages parse; everything else is a Started + successful Finished).
-    fn fake_events(req: &HelperTask) -> Vec<TaskEvent> {
-        let started = TaskEvent::SubtaskStarted {
+    type FakeStream =
+        Pin<Box<dyn tokio_stream::Stream<Item = Result<pb::TaskEvent, tonic::Status>> + Send>>;
+
+    fn stream_of(events: Vec<TaskEvent>) -> tonic::Response<FakeStream> {
+        let events: Vec<Result<pb::TaskEvent, tonic::Status>> = events
+            .into_iter()
+            .map(|e| Ok(pb::TaskEvent::from(e)))
+            .collect();
+        tonic::Response::new(Box::pin(tokio_stream::iter(events)))
+    }
+
+    fn started() -> TaskEvent {
+        TaskEvent::SubtaskStarted {
             name: "fake".into(),
             command: Some("fake".into()),
             args: vec![],
             stdin: None,
-        };
-        let sub_ok = TaskEvent::SubtaskFinished {
-            status: SubStatus::Success,
-            exit: 0,
-            error: None,
-        };
-        let ok_finished = TaskEvent::Finished {
-            status: SubStatus::Success,
-            error: None,
-        };
-        let stdout = |data: &str| TaskEvent::Stdout { data: data.into() };
-        match req {
-            HelperTask::LvmReport { what } => {
-                let json = match what {
-                    LvmReport::Vgs => {
-                        r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
-                    }
-                    LvmReport::Lvs => {
-                        r#"{"report":[{"lv":[{"vg_name":"vg0","lv_name":"data","lv_size":"10737418240","lv_attr":"-wi-a-----","pool_lv":"","data_percent":""},{"vg_name":"vg0","lv_name":"pool0","lv_size":"53687091200","lv_attr":"twi-aotz--","pool_lv":"","data_percent":"5.00"}]}]}"#
-                    }
-                    LvmReport::Pvs => {
-                        r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
-                    }
-                };
-                vec![started, stdout(json), sub_ok, ok_finished]
-            }
-            // RoCE-capable NIC inventory: eth0 with a sample vendor so the NIC
-            // table shows a capable-disabled row (the web renders it opaquely).
-            HelperTask::RoceCapableNics => {
-                vec![
-                    started,
-                    stdout(r#"[{"netdev":"eth0","vendor":"Acme"}]"#),
-                    sub_ok,
-                    ok_finished,
-                ]
-            }
-            // SMART batch health: a small canned inventory (dot + temperature).
-            HelperTask::SmartHealth { .. } => {
-                vec![
-                    started,
-                    stdout(r#"[{"device":"sda","passed":true,"temp_c":38}]"#),
-                    sub_ok,
-                    ok_finished,
-                ]
-            }
-            // SMART full report: smartctl exits nonzero on healthy drives, so the
-            // subtask/task finish Failed to prove the web shows stdout regardless.
-            HelperTask::SmartReport { .. } => vec![
-                started,
-                stdout("smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n"),
-                TaskEvent::SubtaskFinished {
-                    status: SubStatus::Failed,
-                    exit: 4,
-                    error: None,
-                },
-                TaskEvent::Finished {
-                    status: SubStatus::Failed,
-                    error: None,
-                },
-            ],
-            // Everything else (incl. EnableRoce, RxeAdd, PartitionShrink) is a
-            // plain successful task.
-            _ => vec![started, sub_ok, ok_finished],
         }
     }
 
-    #[tonic::async_trait]
-    impl Helper for FakeHelper {
-        async fn call(
-            &self,
-            request: tonic::Request<pb::CallRequest>,
-        ) -> std::result::Result<tonic::Response<pb::Response>, tonic::Status> {
-            let req = HelperCall::try_from(request.into_inner())
-                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
-            let resp = match req {
-                HelperCall::Ping => HelperResponse::Ok,
-                HelperCall::Authenticate { username, password } => {
-                    if username.as_str() == "alice" && password.0 == "secret" {
-                        HelperResponse::OkAuth {
-                            username: username.to_string(),
-                        }
-                    } else {
-                        HelperResponse::err(ErrKind::AuthFailed, "invalid username or password")
-                    }
-                }
-            };
-            Ok(tonic::Response::new(resp.into()))
+    /// Started + one successful subtask + successful Finished — the canned
+    /// happy path for every plain task rpc.
+    fn ok_events(stdout: Option<&str>) -> Vec<TaskEvent> {
+        let mut events = vec![started()];
+        if let Some(data) = stdout {
+            events.push(TaskEvent::Stdout { data: data.into() });
         }
+        events.extend([
+            TaskEvent::SubtaskFinished {
+                status: SubStatus::Success,
+                exit: 0,
+                error: None,
+            },
+            TaskEvent::Finished {
+                status: SubStatus::Success,
+                error: None,
+            },
+        ]);
+        events
+    }
 
-        type RunTaskStream = Pin<
-            Box<
-                dyn tokio_stream::Stream<Item = std::result::Result<pb::TaskEvent, tonic::Status>>
-                    + Send,
-            >,
-        >;
+    /// Generates the whole fake `Helper` impl in one macro (like the daemon's
+    /// real impl) so `#[tonic::async_trait]` sees expanded methods. Every task
+    /// rpc answers the canned success stream; the customs are written inline.
+    macro_rules! fake_helper_impl {
+        (tasks { $($method:ident, $stream:ident, $wire:ty;)* }
+         reads { $($rmethod:ident, $rwire:ty, $reply:ty;)* }) => {
+            #[tonic::async_trait]
+            impl Helper for FakeHelper {
+                async fn ping(
+                    &self,
+                    _r: tonic::Request<pb::Empty>,
+                ) -> Result<tonic::Response<pb::Empty>, tonic::Status> {
+                    Ok(tonic::Response::new(pb::Empty {}))
+                }
 
-        #[allow(clippy::result_large_err)] // tonic::Status is large; fine for a test stub
-        async fn run_task(
-            &self,
-            request: tonic::Request<pb::TaskRequest>,
-        ) -> std::result::Result<tonic::Response<Self::RunTaskStream>, tonic::Status> {
-            let req = HelperTask::try_from(request.into_inner())
-                .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
-            let events: Vec<std::result::Result<pb::TaskEvent, tonic::Status>> = fake_events(&req)
-                .into_iter()
-                .map(|e| Ok(pb::TaskEvent::from(e)))
-                .collect();
-            Ok(tonic::Response::new(Box::pin(tokio_stream::iter(events))))
+                async fn authenticate(
+                    &self,
+                    request: tonic::Request<pb::Authenticate>,
+                ) -> Result<tonic::Response<pb::AuthReply>, tonic::Status> {
+                    let auth = ops::Authenticate::try_from(request.into_inner())
+                        .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
+                    let result =
+                        if auth.username.as_str() == "alice" && auth.password.0 == "secret" {
+                            AuthResult::Ok {
+                                username: auth.username.to_string(),
+                            }
+                        } else {
+                            AuthResult::err(ErrKind::AuthFailed, "invalid username or password")
+                        };
+                    Ok(tonic::Response::new(result.into()))
+                }
+
+                // SMART full report: smartctl exits nonzero on healthy drives,
+                // so the subtask/task finish Failed to prove the web shows
+                // stdout regardless.
+                type SmartReportStream = FakeStream;
+                async fn smart_report(
+                    &self,
+                    _r: tonic::Request<pb::SmartReport>,
+                ) -> Result<tonic::Response<Self::SmartReportStream>, tonic::Status> {
+                    Ok(stream_of(vec![
+                        started(),
+                        TaskEvent::Stdout {
+                            data: "smartctl 7.3\nSMART overall-health self-assessment \
+                                   test result: PASSED\n"
+                                .into(),
+                        },
+                        TaskEvent::SubtaskFinished {
+                            status: SubStatus::Failed,
+                            exit: 4,
+                            error: None,
+                        },
+                        TaskEvent::Finished {
+                            status: SubStatus::Failed,
+                            error: None,
+                        },
+                    ]))
+                }
+
+                // LVM report: canned lvm JSON on stdout so the pages build rows.
+                type LvmReportStream = FakeStream;
+                async fn lvm_report(
+                    &self,
+                    request: tonic::Request<pb::LvmReport>,
+                ) -> Result<tonic::Response<Self::LvmReportStream>, tonic::Status> {
+                    let json = match pb::LvmReportKind::try_from(request.into_inner().what) {
+                        Ok(pb::LvmReportKind::Vgs) => {
+                            r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
+                        }
+                        Ok(pb::LvmReportKind::Lvs) => {
+                            r#"{"report":[{"lv":[{"vg_name":"vg0","lv_name":"data","lv_size":"10737418240","lv_attr":"-wi-a-----","pool_lv":"","data_percent":""},{"vg_name":"vg0","lv_name":"pool0","lv_size":"53687091200","lv_attr":"twi-aotz--","pool_lv":"","data_percent":"5.00"}]}]}"#
+                        }
+                        _ => {
+                            r#"{"report":[{"pv":[{"pv_name":"/dev/sdb","vg_name":"vg0","pv_size":"107374182400","pv_free":"53687091200"}]}]}"#
+                        }
+                    };
+                    Ok(stream_of(ok_events(Some(json))))
+                }
+
+                // Batch SMART health: a small canned inventory (dot + temp).
+                async fn smart_health(
+                    &self,
+                    _r: tonic::Request<pb::SmartHealth>,
+                ) -> Result<tonic::Response<pb::SmartHealthReply>, tonic::Status> {
+                    Ok(tonic::Response::new(pb::SmartHealthReply {
+                        devices: vec![pb::SmartHealthMsg {
+                            device: "sda".into(),
+                            passed: Some(true),
+                            temp_c: Some(38),
+                        }],
+                    }))
+                }
+
+                // RoCE-capable inventory: eth0 with a sample vendor so the NIC
+                // table shows a capable-disabled row (rendered opaquely).
+                async fn roce_capable_nics(
+                    &self,
+                    _r: tonic::Request<pb::Empty>,
+                ) -> Result<tonic::Response<pb::RoceCapableNicsReply>, tonic::Status> {
+                    Ok(tonic::Response::new(pb::RoceCapableNicsReply {
+                        nics: vec![pb::RoceCapableNic {
+                            netdev: "eth0".into(),
+                            vendor: "Acme".into(),
+                        }],
+                    }))
+                }
+
+                // Everything else: plain successful tasks / empty typed replies.
+                $(
+                    type $stream = FakeStream;
+                    async fn $method(
+                        &self,
+                        _r: tonic::Request<$wire>,
+                    ) -> Result<tonic::Response<Self::$stream>, tonic::Status> {
+                        Ok(stream_of(ok_events(None)))
+                    }
+                )*
+                $(
+                    async fn $rmethod(
+                        &self,
+                        _r: tonic::Request<$rwire>,
+                    ) -> Result<tonic::Response<$reply>, tonic::Status> {
+                        Ok(tonic::Response::new(<$reply>::default()))
+                    }
+                )*
+            }
+        };
+    }
+
+    fake_helper_impl! {
+        tasks {
+            zvol_create, ZvolCreateStream, pb::ZvolCreate;
+            zvol_delete, ZvolDeleteStream, pb::ZvolDelete;
+            zvol_resize, ZvolResizeStream, pb::ZvolResize;
+            snapshot_create, SnapshotCreateStream, pb::SnapshotCreate;
+            snapshot_destroy, SnapshotDestroyStream, pb::SnapshotDestroy;
+            zfs_fs_create, ZfsFsCreateStream, pb::ZfsFsCreate;
+            zfs_set_mountpoint, ZfsSetMountpointStream, pb::ZfsSetMountpoint;
+            zfs_mount, ZfsMountStream, pb::ZfsMount;
+            zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount;
+            zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy;
+            pool_create, PoolCreateStream, pb::PoolCreate;
+            pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd;
+            partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate;
+            partition_create, PartitionCreateStream, pb::PartitionCreate;
+            partition_delete, PartitionDeleteStream, pb::PartitionDelete;
+            partition_shrink, PartitionShrinkStream, pb::PartitionShrink;
+            vg_create, VgCreateStream, pb::VgCreate;
+            vg_extend, VgExtendStream, pb::VgExtend;
+            vg_reduce, VgReduceStream, pb::VgReduce;
+            vg_remove, VgRemoveStream, pb::VgRemove;
+            lv_create, LvCreateStream, pb::LvCreate;
+            thin_pool_create, ThinPoolCreateStream, pb::ThinPoolCreate;
+            thin_lv_create, ThinLvCreateStream, pb::ThinLvCreate;
+            lv_resize, LvResizeStream, pb::LvResize;
+            lv_shrink, LvShrinkStream, pb::LvShrink;
+            lv_rename, LvRenameStream, pb::LvRename;
+            lv_delete, LvDeleteStream, pb::LvDelete;
+            nvmet_apply, NvmetApplyStream, pb::NvmetApply;
+            lio_apply, LioApplyStream, pb::LioApply;
+            nfs_apply, NfsApplyStream, pb::NfsApply;
+            reconcile, ReconcileStream, pb::Reconcile;
+            rxe_add, RxeAddStream, pb::RxeAdd;
+            enable_roce, EnableRoceStream, pb::EnableRoce;
+            install_packages, InstallPackagesStream, pb::InstallPackages;
+            rdma_resources, RdmaResourcesStream, pb::Empty;
+        }
+        reads {
+            nfs_report, pb::Empty, pb::NfsReportReply;
+            nvmet_report, pb::Empty, pb::NvmetReportReply;
+            lio_report, pb::Empty, pb::LioReportReply;
+            lio_sessions, pb::Empty, pb::LioSessionsReply;
+            rdma_devices, pb::Empty, pb::RdmaDevicesReply;
+            nic_pci_addrs, pb::Empty, pb::NicPciAddrsReply;
+            nic_interfaces, pb::Empty, pb::NicInterfacesReply;
+            nic_rdma_advice, pb::Empty, pb::NicRdmaAdviceReply;
+            reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
         }
     }
 
@@ -292,9 +391,9 @@ pub(crate) mod testutil {
         socket
     }
 
-    /// A test `AppState` backed by the fake helper, whose canned `RunTask`
-    /// stream answers `TaskRequest::Reconcile` with a successful task — so the
-    /// drift gate + record/stream path is exercised without a real daemon.
+    /// A test `AppState` backed by the fake helper, whose canned streams
+    /// answer the `Reconcile` rpc with a successful task — so the drift gate +
+    /// record/stream path is exercised without a real daemon.
     pub fn test_state() -> Arc<AppState> {
         Arc::new(AppState {
             helper: HelperClient::new(fake_helper_socket()),

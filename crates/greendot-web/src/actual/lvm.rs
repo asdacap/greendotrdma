@@ -2,9 +2,9 @@
 //! reporting needs root, so these run through the helper ([`HelperClient::collect`])
 //! rather than as a direct subprocess. The JSON parsers here are pure and tested.
 
-use crate::helper_client::HelperClient;
+use crate::helper_client::{self, HelperClient};
 use anyhow::{Context, Result};
-use greendot_proto::{LvmReport, TaskRequest};
+use greendot_proto::LvmReport;
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +171,8 @@ pub fn parse_pvs_json(out: &str) -> Result<Vec<Pv>> {
 /// Runs an LVM report through the helper. A missing binary (`is not installed`)
 /// maps to `None`, the "LVM not installed" state, mirroring `zfs::run`.
 async fn report(helper: &HelperClient, what: LvmReport) -> Result<Option<String>> {
-    let out = helper.collect(TaskRequest::LvmReport { what }).await;
+    let out =
+        helper_client::collect(helper.lvm_report(greendot_proto::ops::LvmReport { what })).await;
     if out
         .error
         .as_deref()

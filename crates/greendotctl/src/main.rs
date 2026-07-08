@@ -5,19 +5,19 @@
 //! the configured uid may connect (SO_PEERCRED, enforced on each accepted Unix
 //! socket). `greendotctl reconcile` heals drift through a running daemon (any
 //! uid with socket access), or applies inline as root when given a config or
-//! when no daemon is up; the web reconciles through the daemon's
-//! `TaskRequest::Reconcile`, which reads the daemon's own `--config` — never a
-//! peer-supplied path (see [`reconcile`]).
+//! when no daemon is up; the web reconciles through the daemon's `Reconcile`
+//! rpc, which reads the daemon's own `--config` — never a peer-supplied path
+//! (see [`reconcile`]).
 //!
-//! Transport is gRPC (tonic) over the Unix socket. Every incoming protobuf
-//! request is converted to its validated domain type (`CallRequest` for `Call`,
-//! `TaskRequest` for `RunTask`) via `TryFrom`, which re-runs the validators —
-//! the daemon's second line of defense (prost does not validate on decode the
-//! way serde did).
+//! Transport is gRPC (tonic), one rpc per operation. Every incoming protobuf
+//! request is converted to its validated domain op (`ops::X`) via `TryFrom` —
+//! required by bound in the generic middleware ([`HelperSvc::spawn_task`] /
+//! [`HelperSvc::read_op`]), so no method can skip the validation choke point
+//! (prost does not validate on decode the way serde did).
 
 mod actual;
 mod cmd;
-mod dispatch;
+mod exec;
 mod fs;
 mod hardware;
 mod install;
@@ -28,7 +28,6 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
-mod reads;
 mod reconcile;
 mod render;
 mod smart;
@@ -37,21 +36,17 @@ mod zfs;
 
 use anyhow::{Context, Result, bail};
 use cmd::EventSink;
-use dispatch::{Ctx, Dispatch};
-use greendot_proto::pb::helper_server::HelperServer;
-use greendot_proto::server::{DomainHelper, Validated};
-use greendot_proto::{
-    CallRequest as GdCall, ErrKind, Response as GdResponse, SubStatus, Task, TaskEvent,
-    TaskRequest as GdTask, pb,
-};
+use exec::{Ctx, ReadOp, TaskOp};
+use greendot_proto::pb::helper_server::{Helper, HelperServer};
+use greendot_proto::{AuthResult, ErrKind, SubStatus, Task, TaskEvent, ops, pb};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
-use tokio_stream::wrappers::UnixListenerStream;
+use tokio_stream::wrappers::{ReceiverStream, UnixListenerStream};
 use tonic::Status;
 use tracing::{info, warn};
 
@@ -68,7 +63,7 @@ struct Opts {
     allow_uid: Option<u32>,
     pam_service: String,
     admin_group: String,
-    /// Config TOML for `TaskRequest::Reconcile` (`None` = built-in defaults).
+    /// Config TOML for the `Reconcile` rpc (`None` = built-in defaults).
     config: Option<String>,
 }
 
@@ -155,7 +150,7 @@ async fn serve_forever(opts: Opts) -> Result<()> {
     }
     info!(socket = %opts.socket.display(), allowed_uid, "listening");
 
-    let ctx = Arc::new(dispatch::Ctx {
+    let ctx = Arc::new(Ctx {
         auth: pam::AuthConfig {
             pam_service: opts.pam_service,
             admin_group: opts.admin_group,
@@ -190,7 +185,7 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         }
     });
 
-    let svc = HelperServer::new(Validated(HelperSvc { ctx }))
+    let svc = HelperServer::new(HelperSvc { ctx })
         .max_decoding_message_size(MAX_MESSAGE)
         .max_encoding_message_size(MAX_MESSAGE);
 
@@ -216,9 +211,10 @@ fn peer_uid(_stream: &UnixStream) -> nix::Result<u32> {
     Err(nix::errno::Errno::ENOSYS)
 }
 
-/// The domain-level service behind the [`Validated`] ingress adapter, which
-/// converts (and validates) every incoming protobuf request before it gets
-/// here — this code never sees a raw `pb::TaskRequest`.
+/// The service. Every generated rpc method is one `task_rpc!`/`read_rpc!` line
+/// delegating to the two generic middleware paths below, so the pipeline —
+/// validation, blocking-thread execution, the mutate lock, task framing, panic
+/// folding — is written once and cannot be skipped per method.
 struct HelperSvc {
     ctx: Arc<Ctx>,
 }
@@ -263,41 +259,47 @@ impl EventSink for ChannelSink {
     }
 }
 
-#[tonic::async_trait]
-impl DomainHelper for HelperSvc {
-    async fn call(&self, domain: GdCall) -> GdResponse {
-        let ctx = Arc::clone(&self.ctx);
-        // `Authenticate` runs PAM, which can block; do it off the reactor.
-        tokio::task::spawn_blocking(move || dispatch::plan_call(&ctx, domain))
-            .await
-            .unwrap_or_else(|e| GdResponse::err(ErrKind::Sys, format!("worker panicked: {e}")))
-    }
+/// The reply type of every task rpc.
+type TaskStream = ReceiverStream<std::result::Result<pb::TaskEvent, Status>>;
 
-    async fn run_task(
-        &self,
-        req: std::result::Result<GdTask, String>,
-    ) -> mpsc::Receiver<std::result::Result<pb::TaskEvent, Status>> {
+/// Runs a validated op as one framed task: mutate lock per `O::MUTATES`, one
+/// terminal `Finished`. `Err` only when the sink fails (the client is gone).
+fn run_op<O: TaskOp>(ctx: &Ctx, op: O, sink: &mut dyn EventSink) -> io::Result<()> {
+    let mut task = Task::new(sink);
+    let _guard = O::MUTATES.then(|| ctx.mutate_lock.lock().unwrap());
+    op.exec(ctx, &mut task)?;
+    task.complete()
+}
+
+/// Emit a rejected (unvalidatable) request as a failed task.
+fn emit_reject(sink: &mut dyn EventSink, msg: String) -> io::Result<()> {
+    let mut task = Task::new(sink);
+    task.begin_subtask("Validate request").fail(msg);
+    task.complete()
+}
+
+impl HelperSvc {
+    /// The task middleware: validate (the `TryFrom` bound on [`TaskOp`]), run
+    /// on a blocking thread streaming events back, and fold a worker panic
+    /// into the recorded task — otherwise the web could only record "task
+    /// ended without a result" while the cause sat in our journal.
+    fn spawn_task<O: TaskOp>(&self, wire: O::Wire) -> TaskStream {
         let (tx, rx) = mpsc::channel::<std::result::Result<pb::TaskEvent, Status>>(128);
         let ctx = Arc::clone(&self.ctx);
-        // All privileged work (commands, configfs, /proc writes) is blocking;
-        // run it on a blocking thread and stream its events back via the sink.
         let worker_tx = tx.clone();
         let worker = tokio::task::spawn_blocking(move || {
             let mut sink = ChannelSink(worker_tx);
-            let domain = match req {
-                Ok(r) => r,
-                Err(e) => {
-                    // A rejected request still surfaces as a failed task so its
-                    // reason reaches the UI (the web records the stream).
-                    let _ = emit_reject(&mut sink, format!("invalid request: {e}"));
-                    return;
+            // A rejected request still surfaces as a failed task so its
+            // reason reaches the UI (the web records the stream).
+            match O::try_from(wire) {
+                Ok(op) => {
+                    let _ = run_op(&ctx, op, &mut sink);
                 }
-            };
-            let _ = run_dispatch(&ctx, domain, &mut sink);
+                Err(e) => {
+                    let _ = emit_reject(&mut sink, format!("invalid request: {e}"));
+                }
+            }
         });
-        // A worker panic would otherwise just drop the stream, and the web
-        // could only record "task ended without a result" while the cause sat
-        // in our journal. Fold the panic message into the recorded task.
         tokio::spawn(async move {
             if let Err(e) = worker.await
                 && let Ok(panic) = e.try_into_panic()
@@ -314,147 +316,148 @@ impl DomainHelper for HelperSvc {
                 let _ = tx.send(Ok(pb::TaskEvent::from(ev))).await;
             }
         });
-        rx
+        ReceiverStream::new(rx)
+    }
+
+    /// The typed-read middleware: validate, run the producer off the reactor
+    /// (sysfs/configfs/tool reads are blocking), answer with the reply.
+    async fn read_op<O: ReadOp>(
+        &self,
+        wire: O::Wire,
+    ) -> std::result::Result<tonic::Response<O::Reply>, Status> {
+        let op = O::try_from(wire).map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ctx = Arc::clone(&self.ctx);
+        tokio::task::spawn_blocking(move || op.read(&ctx))
+            .await
+            .map(tonic::Response::new)
+            .map_err(|e| Status::internal(format!("helper worker panicked: {e}")))
     }
 }
 
-/// Executes a planned request, streaming its output to `sink`. This is the old
-/// synchronous `serve` match body, unchanged except that a one-shot response is
-/// translated into terminal task events (RunTask always yields a stream).
-fn run_dispatch(ctx: &Ctx, req: GdTask, sink: &mut dyn EventSink) -> io::Result<()> {
-    let mut task = Task::new(sink);
-    match dispatch::plan(req) {
-        Dispatch::OneShot(resp) => emit_oneshot(&mut task, resp),
-        Dispatch::Task(spec) => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            cmd::run(&mut task, spec.command.clone(), &spec)?;
+/// Generates the whole `Helper` impl: the two one-shot methods plus one line
+/// per rpc. The whole block is produced by one macro so `#[tonic::async_trait]`
+/// sees fully-expanded methods (an unexpanded macro call inside the impl would
+/// reach it too late). Adding an rpc is one line in the right section — the
+/// middleware bound (`TaskOp`/`ReadOp`, and through them `TryFrom` validation)
+/// applies automatically.
+macro_rules! helper_impl {
+    (
+        tasks { $($method:ident, $stream:ident, $wire:ty, $op:ty;)* }
+        reads { $($rmethod:ident, $rwire:ty, $rop:ty;)* }
+    ) => {
+        #[tonic::async_trait]
+        impl Helper for HelperSvc {
+            // One-shot ops (never recorded; auth must not land in a task log).
+            async fn ping(
+                &self,
+                _request: tonic::Request<pb::Empty>,
+            ) -> std::result::Result<tonic::Response<pb::Empty>, Status> {
+                Ok(tonic::Response::new(pb::Empty {}))
+            }
+
+            async fn authenticate(
+                &self,
+                request: tonic::Request<pb::Authenticate>,
+            ) -> std::result::Result<tonic::Response<pb::AuthReply>, Status> {
+                let result = match ops::Authenticate::try_from(request.into_inner()) {
+                    // PAM can block; do it off the reactor.
+                    Ok(auth) => {
+                        let ctx = Arc::clone(&self.ctx);
+                        tokio::task::spawn_blocking(move || {
+                            pam::authenticate(
+                                &ctx.auth,
+                                &ctx.auth_limiter,
+                                &auth.username,
+                                &auth.password,
+                            )
+                        })
+                        .await
+                        .unwrap_or_else(|e| {
+                            AuthResult::err(ErrKind::Sys, format!("worker panicked: {e}"))
+                        })
+                    }
+                    Err(e) => AuthResult::err(ErrKind::Validation, e.to_string()),
+                };
+                Ok(tonic::Response::new(result.into()))
+            }
+
+            // Task ops.
+            $(
+                type $stream = TaskStream;
+                async fn $method(
+                    &self,
+                    request: tonic::Request<$wire>,
+                ) -> std::result::Result<tonic::Response<Self::$stream>, Status> {
+                    Ok(tonic::Response::new(
+                        self.spawn_task::<$op>(request.into_inner()),
+                    ))
+                }
+            )*
+
+            // Typed reads.
+            $(
+                async fn $rmethod(
+                    &self,
+                    request: tonic::Request<$rwire>,
+                ) -> std::result::Result<tonic::Response<<$rop as ReadOp>::Reply>, Status> {
+                    self.read_op::<$rop>(request.into_inner()).await
+                }
+            )*
         }
-        Dispatch::NvmetApply(desired) => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            let mut sub = task.begin_subtask("Apply NVMe-oF configuration");
-            let status = nvmet::apply(&desired, Path::new(nvmet::NVMET_ROOT), &mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::NfsApply(desired) => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            let mut sub = task.begin_subtask("Apply NFS configuration");
-            let status = nfs::apply(
-                &desired,
-                Path::new(nfs::NFS_EXPORTS_FILE),
-                Path::new(nfs::NFSD_PORTLIST),
-                &mut sub,
-            )?;
-            sub.complete(status);
-        }
-        // The driver loads the config and takes the mutate lock itself, for
-        // the whole pass.
-        Dispatch::Reconcile => {
-            reconcile::run(ctx.reconcile_config.clone(), &ctx.mutate_lock, &mut task)?
-        }
-        // Reads: no mutate_lock (they stream like the old serve loop).
-        Dispatch::NfsReport => {
-            let mut sub = task.begin_subtask("Read NFS state");
-            let status = nfs::report_into(
-                Path::new(nfs::NFSD_PORTLIST),
-                Path::new(nfs::NFS_EXPORTS_FILE),
-                &mut sub,
-            )?;
-            sub.complete(status);
-        }
-        Dispatch::RoceCapableNics => {
-            let mut sub = task.begin_subtask("Read RoCE-capable NICs");
-            let status = hardware::report_capable_into(Path::new(hardware::NET_ROOT), &mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::SmartHealth(devices) => {
-            let mut sub = task.begin_subtask("Read SMART health");
-            let status = smart::report_health_into(&devices, &mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::NicRdmaAdvice => {
-            let mut sub = task.begin_subtask("Read NIC RDMA advice");
-            let status = hardware::report_nic_advice_into(Path::new(hardware::NET_ROOT), &mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::EnableRoce(netdev) => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            let mut sub = task.begin_subtask(format!("Enable RoCE on {netdev}"));
-            let status = hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, &mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::RxeAdd(netdev) => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            modules::rxe_add(&mut task, &netdev)?;
-        }
-        // The whole shrink sequence — probe, filesystem, partition — under one
-        // lock acquisition, so nothing interleaves between its steps.
-        Dispatch::PartitionShrink {
-            disk,
-            number,
-            size_sectors,
-        } => {
-            let _guard = ctx.mutate_lock.lock().unwrap();
-            fs::shrink(&mut task, &disk, number, size_sectors)?;
-        }
-        Dispatch::FailedTask { label, message } => {
-            // A refused operation (e.g. install on an unsupported distro)
-            // recorded as a failed subtask carrying its reason.
-            task.begin_subtask(label).fail(message);
-        }
-        // Structural reads: no mutate_lock; each streams one JSON blob the web
-        // collects and deserializes into a shared `actual::*` DTO.
-        Dispatch::NvmetReport => {
-            let mut sub = task.begin_subtask("Read nvmet state");
-            let status = reads::nvmet_report_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::LioReport => {
-            let mut sub = task.begin_subtask("Read LIO state");
-            let status = reads::lio_report_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::LioSessions => {
-            let mut sub = task.begin_subtask("Read iSCSI sessions");
-            let status = reads::lio_sessions_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::RdmaDevices => {
-            let mut sub = task.begin_subtask("Read RDMA devices");
-            let status = reads::rdma_devices_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::NicPciAddrs => {
-            let mut sub = task.begin_subtask("Read NIC PCI addresses");
-            let status = reads::nic_pci_addrs_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::NicInterfaces => {
-            let mut sub = task.begin_subtask("Read NIC RDMA status");
-            let status = reads::nic_interfaces_into(&mut sub)?;
-            sub.complete(status);
-        }
-        Dispatch::ReconcileDryRun => {
-            let mut sub = task.begin_subtask("Check reconcile drift");
-            let status = reconcile::dry_run_into(ctx.reconcile_config.clone(), &mut sub)?;
-            sub.complete(status);
-        }
-    }
-    task.complete()
+    };
 }
 
-/// Translate a one-shot response into the one-subtask task RunTask must still
-/// emit (e.g. `InstallPackages` with an empty package set).
-fn emit_oneshot(task: &mut Task, resp: GdResponse) {
-    let sub = task.begin_subtask("Apply");
-    match resp {
-        GdResponse::Ok | GdResponse::OkAuth { .. } => sub.complete(SubStatus::Success),
-        GdResponse::Err { message, .. } => sub.fail(message),
+helper_impl! {
+    tasks {
+            zvol_create, ZvolCreateStream, pb::ZvolCreate, ops::ZvolCreate;
+            zvol_delete, ZvolDeleteStream, pb::ZvolDelete, ops::ZvolDelete;
+            zvol_resize, ZvolResizeStream, pb::ZvolResize, ops::ZvolResize;
+            snapshot_create, SnapshotCreateStream, pb::SnapshotCreate, ops::SnapshotCreate;
+            snapshot_destroy, SnapshotDestroyStream, pb::SnapshotDestroy, ops::SnapshotDestroy;
+            zfs_fs_create, ZfsFsCreateStream, pb::ZfsFsCreate, ops::ZfsFsCreate;
+            zfs_set_mountpoint, ZfsSetMountpointStream, pb::ZfsSetMountpoint, ops::ZfsSetMountpoint;
+            zfs_mount, ZfsMountStream, pb::ZfsMount, ops::ZfsMount;
+            zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount, ops::ZfsUnmount;
+            zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy, ops::ZfsDestroy;
+            pool_create, PoolCreateStream, pb::PoolCreate, ops::PoolCreate;
+            pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd, ops::PoolDeviceAdd;
+            partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate, ops::PartitionTableCreate;
+            partition_create, PartitionCreateStream, pb::PartitionCreate, ops::PartitionCreate;
+            partition_delete, PartitionDeleteStream, pb::PartitionDelete, ops::PartitionDelete;
+            partition_shrink, PartitionShrinkStream, pb::PartitionShrink, ops::PartitionShrink;
+            lvm_report, LvmReportStream, pb::LvmReport, ops::LvmReport;
+            vg_create, VgCreateStream, pb::VgCreate, ops::VgCreate;
+            vg_extend, VgExtendStream, pb::VgExtend, ops::VgExtend;
+            vg_reduce, VgReduceStream, pb::VgReduce, ops::VgReduce;
+            vg_remove, VgRemoveStream, pb::VgRemove, ops::VgRemove;
+            lv_create, LvCreateStream, pb::LvCreate, ops::LvCreate;
+            thin_pool_create, ThinPoolCreateStream, pb::ThinPoolCreate, ops::ThinPoolCreate;
+            thin_lv_create, ThinLvCreateStream, pb::ThinLvCreate, ops::ThinLvCreate;
+            lv_resize, LvResizeStream, pb::LvResize, ops::LvResize;
+            lv_shrink, LvShrinkStream, pb::LvShrink, ops::LvShrink;
+            lv_rename, LvRenameStream, pb::LvRename, ops::LvRename;
+            lv_delete, LvDeleteStream, pb::LvDelete, ops::LvDelete;
+            nvmet_apply, NvmetApplyStream, pb::NvmetApply, ops::NvmetApply;
+            lio_apply, LioApplyStream, pb::LioApply, ops::LioApply;
+            nfs_apply, NfsApplyStream, pb::NfsApply, ops::NfsApply;
+            reconcile, ReconcileStream, pb::Reconcile, ops::Reconcile;
+            rxe_add, RxeAddStream, pb::RxeAdd, ops::RxeAdd;
+            enable_roce, EnableRoceStream, pb::EnableRoce, ops::EnableRoce;
+            install_packages, InstallPackagesStream, pb::InstallPackages, ops::InstallPackages;
+            smart_report, SmartReportStream, pb::SmartReport, ops::SmartReport;
+            rdma_resources, RdmaResourcesStream, pb::Empty, ops::RdmaResources;
     }
-}
-
-/// Emit a rejected (unvalidatable) request as a failed task.
-fn emit_reject(sink: &mut dyn EventSink, msg: String) -> io::Result<()> {
-    let mut task = Task::new(sink);
-    task.begin_subtask("Validate request").fail(msg);
-    task.complete()
+    reads {
+            nfs_report, pb::Empty, ops::NfsReport;
+            nvmet_report, pb::Empty, ops::NvmetReport;
+            lio_report, pb::Empty, ops::LioReport;
+            lio_sessions, pb::Empty, ops::LioSessions;
+            rdma_devices, pb::Empty, ops::RdmaDevices;
+            nic_pci_addrs, pb::Empty, ops::NicPciAddrs;
+            nic_interfaces, pb::Empty, ops::NicInterfaces;
+            roce_capable_nics, pb::Empty, ops::RoceCapableNics;
+            nic_rdma_advice, pb::Empty, ops::NicRdmaAdvice;
+            smart_health, pb::SmartHealth, ops::SmartHealth;
+            reconcile_dry_run, pb::Empty, ops::ReconcileDryRun;
+    }
 }

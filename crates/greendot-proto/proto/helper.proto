@@ -3,26 +3,98 @@ syntax = "proto3";
 // gRPC transport for the greendot-web (unprivileged) <-> greendotctl (root)
 // helper protocol. These messages are a "dumb string" transport layer: unlike
 // the validated newtypes in the domain model, prost decoding does NOT re-run
-// the validators, so the daemon MUST convert every incoming request through
-// `TryFrom<pb::CallRequest>` / `TryFrom<pb::TaskRequest>` (src/convert.rs),
-// which re-validate every field. Those conversions are the security choke point.
+// the validators, so the daemon MUST convert every incoming request into its
+// validated domain op (`TryFrom<pb::X> for ops::X`, src/ops.rs) before acting
+// on it. Those conversions are the security choke point; the daemon's generic
+// rpc middleware requires them by bound, so no method can skip them.
 package greendot.helper.v1;
 
-// The privileged helper. The two RPCs differ in reply shape, and each takes the
-// request message holding exactly the ops that can produce that reply:
+// The privileged helper: one rpc per operation. Reply shapes:
 //
-//   Call    -> one `Response`. Only `Ping` and `Authenticate`, which are never
-//              recorded as tasks (a task records its request, so recording
-//              `Authenticate` would write the password into the task log).
-//   RunTask -> the recorded task stream (Started/Stdout/Stderr/Finished), for
-//              every mutating operation and every privileged read.
+//   - `stream TaskEvent` — every mutation, plus the reads whose payload is a
+//     foreign tool's output (SmartReport dumps smartctl, LvmReport streams
+//     lvm's JSON, RdmaResources streams the rdma tool's JSON). Recorded as a
+//     task: Started/Stdout/Stderr/Finished frames the web persists.
+//   - typed replies — the structural reads: the daemon reads the canonical
+//     system paths and answers with the shared actual-state DTO as a proto
+//     message (no JSON-on-stdout round trip).
+//   - `Ping`/`Authenticate` — one-shot, never recorded (a task records its
+//     request, so recording Authenticate would write the password into the
+//     task log).
 //
-// The two request messages partition the ops between them, so the RPC you call
-// decides *in the type system* which ops you may name: there is no "task op sent
-// to Call" case for the daemon to reject at runtime.
+// The daemon-side rule for adding ops: one rpc = one user-level intent. An op
+// whose only caller would be a client-side sequence belongs in the daemon as
+// part of an existing rpc (see PartitionShrink).
 service Helper {
-  rpc Call(CallRequest) returns (Response);
-  rpc RunTask(TaskRequest) returns (stream TaskEvent);
+  // One-shot (never recorded).
+  rpc Ping(Empty) returns (Empty);
+  rpc Authenticate(.greendot.helper.v1.Authenticate) returns (AuthReply);
+
+  // ZFS zvols and snapshots (reads happen unprivileged in greendot-web).
+  rpc ZvolCreate(.greendot.helper.v1.ZvolCreate) returns (stream TaskEvent);
+  rpc ZvolDelete(.greendot.helper.v1.ZvolDelete) returns (stream TaskEvent);
+  rpc ZvolResize(.greendot.helper.v1.ZvolResize) returns (stream TaskEvent);
+  rpc SnapshotCreate(.greendot.helper.v1.SnapshotCreate) returns (stream TaskEvent);
+  rpc SnapshotDestroy(.greendot.helper.v1.SnapshotDestroy) returns (stream TaskEvent);
+
+  // ZFS filesystem datasets (mount lifecycle).
+  rpc ZfsFsCreate(.greendot.helper.v1.ZfsFsCreate) returns (stream TaskEvent);
+  rpc ZfsSetMountpoint(.greendot.helper.v1.ZfsSetMountpoint) returns (stream TaskEvent);
+  rpc ZfsMount(.greendot.helper.v1.ZfsMount) returns (stream TaskEvent);
+  rpc ZfsUnmount(.greendot.helper.v1.ZfsUnmount) returns (stream TaskEvent);
+  rpc ZfsDestroy(.greendot.helper.v1.ZfsDestroy) returns (stream TaskEvent);
+
+  // ZFS pools.
+  rpc PoolCreate(.greendot.helper.v1.PoolCreate) returns (stream TaskEvent);
+  rpc PoolDeviceAdd(.greendot.helper.v1.PoolDeviceAdd) returns (stream TaskEvent);
+
+  // Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
+  rpc PartitionTableCreate(.greendot.helper.v1.PartitionTableCreate) returns (stream TaskEvent);
+  rpc PartitionCreate(.greendot.helper.v1.PartitionCreate) returns (stream TaskEvent);
+  rpc PartitionDelete(.greendot.helper.v1.PartitionDelete) returns (stream TaskEvent);
+  rpc PartitionShrink(.greendot.helper.v1.PartitionShrink) returns (stream TaskEvent);
+
+  // LVM.
+  rpc LvmReport(.greendot.helper.v1.LvmReport) returns (stream TaskEvent);
+  rpc VgCreate(.greendot.helper.v1.VgCreate) returns (stream TaskEvent);
+  rpc VgExtend(.greendot.helper.v1.VgExtend) returns (stream TaskEvent);
+  rpc VgReduce(.greendot.helper.v1.VgReduce) returns (stream TaskEvent);
+  rpc VgRemove(.greendot.helper.v1.VgRemove) returns (stream TaskEvent);
+  rpc LvCreate(.greendot.helper.v1.LvCreate) returns (stream TaskEvent);
+  rpc ThinPoolCreate(.greendot.helper.v1.ThinPoolCreate) returns (stream TaskEvent);
+  rpc ThinLvCreate(.greendot.helper.v1.ThinLvCreate) returns (stream TaskEvent);
+  rpc LvResize(.greendot.helper.v1.LvResize) returns (stream TaskEvent);
+  rpc LvShrink(.greendot.helper.v1.LvShrink) returns (stream TaskEvent);
+  rpc LvRename(.greendot.helper.v1.LvRename) returns (stream TaskEvent);
+  rpc LvDelete(.greendot.helper.v1.LvDelete) returns (stream TaskEvent);
+
+  // NVMe-oF / iSCSI / NFS desired-state applies + the full reconcile pass.
+  rpc NvmetApply(.greendot.helper.v1.NvmetApply) returns (stream TaskEvent);
+  rpc LioApply(.greendot.helper.v1.LioApply) returns (stream TaskEvent);
+  rpc NfsApply(.greendot.helper.v1.NfsApply) returns (stream TaskEvent);
+  rpc Reconcile(.greendot.helper.v1.Reconcile) returns (stream TaskEvent);
+
+  // System setup.
+  rpc RxeAdd(.greendot.helper.v1.RxeAdd) returns (stream TaskEvent);
+  rpc EnableRoce(.greendot.helper.v1.EnableRoce) returns (stream TaskEvent);
+  rpc InstallPackages(.greendot.helper.v1.InstallPackages) returns (stream TaskEvent);
+
+  // Tool-output reads (streamed; the web collects stdout verbatim).
+  rpc SmartReport(.greendot.helper.v1.SmartReport) returns (stream TaskEvent);
+  rpc RdmaResources(Empty) returns (stream TaskEvent);
+
+  // Structural reads: typed actual-state replies.
+  rpc NfsReport(Empty) returns (NfsReportReply);
+  rpc NvmetReport(Empty) returns (NvmetReportReply);
+  rpc LioReport(Empty) returns (LioReportReply);
+  rpc LioSessions(Empty) returns (LioSessionsReply);
+  rpc RdmaDevices(Empty) returns (RdmaDevicesReply);
+  rpc NicPciAddrs(Empty) returns (NicPciAddrsReply);
+  rpc NicInterfaces(Empty) returns (NicInterfacesReply);
+  rpc RoceCapableNics(Empty) returns (RoceCapableNicsReply);
+  rpc NicRdmaAdvice(Empty) returns (NicRdmaAdviceReply);
+  rpc SmartHealth(.greendot.helper.v1.SmartHealth) returns (SmartHealthReply);
+  rpc ReconcileDryRun(Empty) returns (ReconcileDryRunReply);
 }
 
 // Placeholder for unit request variants (Ping, NfsReport, ...). A oneof arm
@@ -137,24 +209,26 @@ message NfsClientSpec {
   bool rw = 2;
 }
 
-// ---- Call: the one-shot ops. ----
+// ---- One-shot ops. ----
 
 // PAM authentication plus the admin-group check, answered with `OkAuth` or an
 // `AUTH_FAILED`/`NOT_IN_ADMIN_GROUP`/`BUSY` (rate-limited) error. It lives
 // behind the root helper because greendot-web is unprivileged and only root can
-// read `/etc/shadow`. It is a `Call` rather than a `RunTask` so the password
-// never reaches a recorded task.
+// read `/etc/shadow`. Its own rpc (not a task stream) so the password never
+// reaches a recorded task.
 message Authenticate { string username = 1; string password = 2; }
 
-// The ops answered by a single `Response`. Exactly one arm is set.
-message CallRequest {
-  oneof op {
-    Empty ping = 1;
-    Authenticate authenticate = 2;
+message OkAuth { string username = 1; }
+message ErrResponse { ErrKind kind = 1; string message = 2; }
+
+message AuthReply {
+  oneof result {
+    OkAuth ok = 1;
+    ErrResponse err = 2;
   }
 }
 
-// ---- Task request variants (one message per domain TaskRequest variant). ----
+// ---- Task-op request messages (one per rpc; also the domain op's wire twin). ----
 
 message ZvolCreate {
   string dataset = 1;
@@ -227,107 +301,96 @@ message RxeAdd { string netdev = 1; }
 message EnableRoce { string netdev = 1; }
 message InstallPackages { repeated string packages = 1; }
 
-// The ops answered by a recorded task stream: every mutation, plus the reads
-// that need root. Exactly one arm is set.
-message TaskRequest {
-  // 1 and 2 stayed with `CallRequest` when the original single `Request` oneof
-  // was split; the arms below keep the numbers they had there.
-  reserved 1, 2;
-  // 16–21 were the per-command shrink steps (partition_resize, fsck,
-  // resize_ext, btrfs_mount, btrfs_resize, umount), replaced by the single
-  // partition_shrink op; 42–43 were ensure_modules/rxe_link_add, replaced by
-  // rxe_add. Sub-intent primitives must not come back: an op whose only caller
-  // is a web-side sequence belongs in the helper as one request.
-  reserved 16, 17, 18, 19, 20, 21, 42, 43;
+// ---- Typed read replies. Each mirrors a shared `actual::*` DTO; addresses
+// travel as strings (parsed on ingress, unparseable entries dropped). ----
 
-  oneof op {
-    // ZFS zvols and snapshots (reads happen unprivileged in greendot-web).
-    ZvolCreate zvol_create = 3;
-    ZvolDelete zvol_delete = 4;
-    ZvolResize zvol_resize = 5;
-    SnapshotCreate snapshot_create = 6;
-    SnapshotDestroy snapshot_destroy = 7;
+message NfsReportReply {
+  repeated NfsExportEntryMsg exports = 1;
+  optional uint32 rdma_port = 2;   // u16
+  repeated NfsManagedSpec managed = 3;
+}
+message NfsExportEntryMsg { string path = 1; repeated string clients = 2; }
+message NfsManagedSpec { string path = 1; string client = 2; bool rw = 3; }
 
-    // ZFS filesystem datasets (mount lifecycle).
-    ZfsFsCreate zfs_fs_create = 8;
-    ZfsSetMountpoint zfs_set_mountpoint = 9;
-    ZfsMount zfs_mount = 10;
-    ZfsUnmount zfs_unmount = 11;
-    ZfsDestroy zfs_destroy = 12;
-
-    // Partitioning (sfdisk). Shrink is the one compound op: filesystem then
-    // partition, sequenced by the helper (see PartitionShrink above).
-    PartitionTableCreate partition_table_create = 13;
-    PartitionCreate partition_create = 14;
-    PartitionDelete partition_delete = 15;
-    PartitionShrink partition_shrink = 57;
-
-    // ZFS pools.
-    PoolCreate pool_create = 22;
-    PoolDeviceAdd pool_device_add = 23;
-
-    // SMART: privileged reads, since smartctl needs root.
-    SmartReport smart_report = 24;
-    SmartHealth smart_health = 25;
-
-    // LVM. Its reads need root too (unlike the ZFS reads), so they come here.
-    LvmReport lvm_report = 26;
-    VgCreate vg_create = 27;
-    VgExtend vg_extend = 28;
-    VgReduce vg_reduce = 29;
-    VgRemove vg_remove = 30;
-    LvCreate lv_create = 31;
-    ThinPoolCreate thin_pool_create = 32;
-    ThinLvCreate thin_lv_create = 33;
-    LvResize lv_resize = 34;
-    LvShrink lv_shrink = 35;
-    LvRename lv_rename = 36;
-    LvDelete lv_delete = 37;
-
-    // NVMe-oF / iSCSI / NFS desired-state applies, plus the NFS privileged read.
-    NvmetApply nvmet_apply = 38;
-    LioApply lio_apply = 39;
-    NfsApply nfs_apply = 40;
-    Empty nfs_report = 41;
-
-    // System: Soft-RoCE setup, RoCE enablement, package installs.
-    RxeAdd rxe_add = 58;
-    Empty roce_capable_nics = 44;
-    EnableRoce enable_roce = 45;
-    Empty nic_rdma_advice = 46;
-    Empty rdma_resources = 47;
-    InstallPackages install_packages = 48;
-
-    // The full desired-state reconcile pass, one subtask per area.
-    Reconcile reconcile = 49;
-
-    // Privileged/structural reads collected by the web (JSON on the task's
-    // stdout, like nfs_report). All fieldless — the daemon reads the canonical
-    // system paths and serializes a shared actual-state DTO.
-    Empty nvmet_report = 50;
-    Empty lio_report = 51;
-    Empty lio_sessions = 52;
-    Empty rdma_devices = 53;
-    Empty nic_pci_addrs = 54;
-    Empty nic_interfaces = 55;
-    Empty reconcile_dry_run = 56;
-  }
+message NvmetReportReply {
+  repeated ActualNvmetSubsys subsystems = 1;
+  repeated ActualNvmetPort ports = 2;
+}
+message ActualNvmetSubsys {
+  string nqn = 1;
+  bool allow_any_host = 2;
+  repeated string allowed_hosts = 3;
+  repeated ActualNvmetNs namespaces = 4;
+}
+message ActualNvmetNs { uint32 nsid = 1; string device_path = 2; bool enabled = 3; }
+message ActualNvmetPort {
+  uint32 id = 1;          // u16
+  string trtype = 2;
+  string traddr = 3;
+  string trsvcid = 4;
+  repeated string subsystems = 5;
 }
 
-// ---- Response (reply to Call). ----
+message LioReportReply {
+  repeated ActualLioBackstore backstores = 1;
+  repeated ActualLioTarget targets = 2;
+}
+message ActualLioBackstore { string name = 1; string udev_path = 2; bool enabled = 3; }
+message ActualLioTarget {
+  string iqn = 1;
+  bool enabled = 2;
+  bool demo_mode = 3;
+  repeated string luns = 4;
+  repeated ActualLioPortal portals = 5;
+  repeated string acls = 6;
+}
+message ActualLioPortal { string addr_port = 1; bool iser = 2; }
 
-message OkAuth { string username = 1; }
-message ErrResponse { ErrKind kind = 1; string message = 2; }
+message LioSessionsReply { repeated IscsiSessionMsg sessions = 1; }
+message IscsiSessionMsg { string target_iqn = 1; string initiator_iqn = 2; string detail = 3; }
 
-message Response {
-  oneof result {
-    Empty ok = 1;
-    OkAuth ok_auth = 2;
-    ErrResponse err = 3;
-  }
+message RdmaDevicesReply { repeated RdmaDevMsg devices = 1; }
+message RdmaDevMsg {
+  string name = 1;
+  optional string netdev = 2;
+  bool active = 3;
+  repeated string addrs = 4;   // IpAddr
 }
 
-// ---- Task streaming (RunTask response). A task is a sequence of subtasks,
+message NicPciAddrsReply { repeated PciAddrIps entries = 1; }
+message PciAddrIps { string pci = 1; repeated string addrs = 2; }   // IpAddr
+
+message NicInterfacesReply { repeated NicStatusMsg nics = 1; }
+message NicStatusMsg {
+  string netdev = 1;
+  optional string rdma = 2;
+  optional string pci = 3;     // PciAddress
+  repeated string addrs = 4;   // IpAddr
+  NicRdmaKind kind = 5;
+  // The helper-reported vendor label; set iff kind == CAPABLE_DISABLED.
+  optional string vendor = 6;
+}
+enum NicRdmaKind {
+  NIC_RDMA_KIND_UNSPECIFIED = 0;
+  NIC_RDMA_KIND_ACTIVE = 1;
+  NIC_RDMA_KIND_INACTIVE = 2;
+  NIC_RDMA_KIND_CAPABLE_DISABLED = 3;
+  NIC_RDMA_KIND_SOFT_ROCEABLE = 4;
+  NIC_RDMA_KIND_UNSUPPORTED = 5;
+}
+
+message RoceCapableNicsReply { repeated RoceCapableNic nics = 1; }
+message RoceCapableNic { string netdev = 1; string vendor = 2; }
+
+message NicRdmaAdviceReply { repeated NicAdviceMsg advice = 1; }
+message NicAdviceMsg { string netdev = 1; string label = 2; string detail = 3; }
+
+message SmartHealthReply { repeated SmartHealthMsg devices = 1; }
+message SmartHealthMsg { string device = 1; optional bool passed = 2; optional int32 temp_c = 3; }
+
+message ReconcileDryRunReply { bool nvmet_ok = 1; bool lio_ok = 2; bool nfs_ok = 3; }
+
+// ---- Task streaming (the task-op reply). A task is a sequence of subtasks,
 // each with its own recorded output and terminal status; Stdout/Stderr belong
 // to the most-recent still-open subtask. Terminated by exactly one Finished. ----
 

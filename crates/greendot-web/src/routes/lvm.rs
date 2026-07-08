@@ -13,7 +13,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DevicePath, LvName, TaskRequest, VgName};
+use greendot_proto::{DevicePath, LvName, VgName, ops};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -292,12 +292,12 @@ async fn vg_detail_page(
 /// partial with the outcome.
 async fn run_lv(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
     kind: &str,
     title: &str,
     vg: &str,
 ) -> Response {
-    let view = match crate::task_runner::start(state, req, kind, title) {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
         Ok(id) => {
             gather_vg_detail(state, vg, Some(format!("started {title}")), None, Some(id)).await
         }
@@ -386,13 +386,13 @@ async fn lv_detail_page(
 /// partial with the outcome (stay-on-page ops: grow / shrink / rename).
 async fn run_lv_detail(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
     kind: &str,
     title: &str,
     vg: &str,
     name: &str,
 ) -> Response {
-    let view = match crate::task_runner::start(state, req, kind, title) {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
         Ok(id) => {
             gather_lv_detail(
                 state,
@@ -521,7 +521,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
     let Some(size) = parse_size(&form.size, &form.unit) else {
         return lv_failed(&state, &scope, "invalid size").await;
     };
-    let (req, title) = if form.thin.is_some() {
+    let (rx, title) = if form.thin.is_some() {
         // Thin volume: the chosen pool (`vg/pool`) determines the VG.
         let Some((vg, pool)) = form.pool.split_once('/') else {
             return lv_failed(&state, &scope, "choose a thin pool").await;
@@ -530,12 +530,12 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
             return lv_failed(&state, &scope, "invalid thin pool").await;
         };
         (
-            TaskRequest::ThinLvCreate {
+            state.helper.thin_lv_create(ops::ThinLvCreate {
                 vg: vg.clone(),
                 pool,
                 name: name.clone(),
                 virtual_size: size,
-            },
+            }),
             format!("create thin volume {vg}/{name}"),
         )
     } else {
@@ -543,15 +543,15 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
             return lv_failed(&state, &scope, "choose a volume group").await;
         };
         (
-            TaskRequest::LvCreate {
+            state.helper.lv_create(ops::LvCreate {
                 vg: vg.clone(),
                 name: name.clone(),
                 size,
-            },
+            }),
             format!("create LV {vg}/{name}"),
         )
     };
-    run_lv(&state, req, "lv-create", &title, &scope).await
+    run_lv(&state, rx, "lv-create", &title, &scope).await
 }
 
 #[derive(Deserialize)]
@@ -573,14 +573,14 @@ async fn thin_pool_create(
     let Some(size) = parse_size(&form.size, &form.unit) else {
         return lv_failed(&state, &scope, "invalid size").await;
     };
-    let req = TaskRequest::ThinPoolCreate {
+    let req = ops::ThinPoolCreate {
         vg: vg.clone(),
         name: name.clone(),
         size,
     };
     run_lv(
         &state,
-        req,
+        state.helper.thin_pool_create(req),
         "thin-pool-create",
         &format!("create thin pool {vg}/{name}"),
         &scope,
@@ -611,14 +611,14 @@ async fn lv_resize(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         Ok(v) => v,
         Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
-    let req = TaskRequest::LvResize {
+    let req = ops::LvResize {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
     run_lv_detail(
         &state,
-        req,
+        state.helper.lv_resize(req),
         "lv-resize",
         &format!("grow {vg}/{name}"),
         &scope_vg,
@@ -633,14 +633,14 @@ async fn lv_shrink(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         Ok(v) => v,
         Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
-    let req = TaskRequest::LvShrink {
+    let req = ops::LvShrink {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
     };
     run_lv_detail(
         &state,
-        req,
+        state.helper.lv_shrink(req),
         "lv-shrink",
         &format!("shrink {vg}/{name}"),
         &scope_vg,
@@ -671,7 +671,7 @@ async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRename
         )
         .await;
     };
-    let req = TaskRequest::LvRename {
+    let req = ops::LvRename {
         vg: vg.clone(),
         name: name.clone(),
         new_name: new_name.clone(),
@@ -679,7 +679,7 @@ async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRename
     // The LV now lives under `new_name`, so re-gather (and stay) on that name.
     run_lv_detail(
         &state,
-        req,
+        state.helper.lv_rename(req),
         "lv-rename",
         &format!("rename {vg}/{name} to {new_name}"),
         &scope_vg,
@@ -706,11 +706,11 @@ async fn lv_delete(
         return lv_detail_failed(&state, &scope_vg, &scope_name, "invalid logical volume").await;
     };
     let title = format!("delete {vg}/{name}");
-    let req = TaskRequest::LvDelete {
+    let req = ops::LvDelete {
         vg: vg.clone(),
         name: name.clone(),
     };
-    match crate::task_runner::start(&state, req, "lv-delete", &title) {
+    match crate::task_runner::start(&state, state.helper.lv_delete(req), "lv-delete", &title) {
         Ok(_) => nav_redirect(&headers, &format!("/lvm/vg/{scope_vg}")),
         Err(e) => lv_detail_failed(&state, &scope_vg, &scope_name, format!("{e:#}")).await,
     }
@@ -734,13 +734,13 @@ async fn vg_extend(State(state): State<Arc<AppState>>, Form(form): Form<VgDevice
     ) else {
         return lv_failed(&state, &scope, "invalid volume group or device").await;
     };
-    let req = TaskRequest::VgExtend {
+    let req = ops::VgExtend {
         vg: vg.clone(),
         device: device.clone(),
     };
     run_lv(
         &state,
-        req,
+        state.helper.vg_extend(req),
         "vg-extend",
         &format!("extend {vg} with {device}"),
         &scope,
@@ -763,11 +763,11 @@ async fn vg_reduce(
         return pv_detail_failed(&state, &device_scope, "invalid volume group or device").await;
     };
     let title = format!("remove {device} from {vg}");
-    let req = TaskRequest::VgReduce {
+    let req = ops::VgReduce {
         vg: vg.clone(),
         device: device.clone(),
     };
-    match crate::task_runner::start(&state, req, "vg-reduce", &title) {
+    match crate::task_runner::start(&state, state.helper.vg_reduce(req), "vg-reduce", &title) {
         Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => pv_detail_failed(&state, &device_scope, format!("{e:#}")).await,
     }
@@ -790,8 +790,8 @@ async fn vg_remove(
         return lv_failed(&state, &scope, "invalid volume group").await;
     };
     let title = format!("remove volume group {vg}");
-    let req = TaskRequest::VgRemove { vg: vg.clone() };
-    match crate::task_runner::start(&state, req, "vg-remove", &title) {
+    let req = ops::VgRemove { vg: vg.clone() };
+    match crate::task_runner::start(&state, state.helper.vg_remove(req), "vg-remove", &title) {
         Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => lv_failed(&state, &scope, format!("{e:#}")).await,
     }
@@ -922,11 +922,11 @@ async fn vg_create(
         return vg_create_failed(&state, selected, "select at least one device".into()).await;
     }
     let title = format!("create volume group {vg}");
-    let req = TaskRequest::VgCreate {
+    let req = ops::VgCreate {
         name: vg,
         devices: device_paths,
     };
-    match crate::task_runner::start(&state, req, "vg-create", &title) {
+    match crate::task_runner::start(&state, state.helper.vg_create(req), "vg-create", &title) {
         Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => vg_create_failed(&state, selected, format!("{e:#}")).await,
     }

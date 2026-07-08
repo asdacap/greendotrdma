@@ -1,11 +1,10 @@
 //! SMART reads via `smartctl` (needs root). The full report is a plain task the
 //! web collects verbatim; the batch health read runs `smartctl -Hj -A` per
-//! device and streams one merged JSON line, like `hardware::report_capable_into`.
+//! device for the typed `SmartHealth` reply.
 
-use crate::cmd::{TaskSpec, capture_into};
+use crate::cmd::TaskSpec;
 use crate::util::dev;
-use greendot_proto::{BlockDev, SubStatus, SubTask};
-use std::io::{self, Write};
+use greendot_proto::BlockDev;
 
 /// `smartctl -x /dev/<device>` — the full human-readable dump (identity, health,
 /// attributes, error/self-test logs). The web shows its output verbatim.
@@ -34,27 +33,15 @@ pub fn parse_health(stdout: &str) -> (Option<bool>, Option<i32>) {
     (passed, temp_c)
 }
 
-/// Streams per-device SMART health+temp as one JSON line — a privileged read the
-/// web collects: `[{"device":"sda","passed":true,"temp_c":38}, …]`. Runs
-/// `smartctl` once per device; a missing binary or unreadable device degrades
-/// that entry to `passed:null,temp_c:null` (the web renders it gray).
-pub fn report_health_into(devices: &[BlockDev], sub: &mut SubTask) -> io::Result<SubStatus> {
-    let mut rows = Vec::with_capacity(devices.len());
-    for device in devices {
-        let spec = TaskSpec::new("smartctl", health_argv(device));
-        let (passed, temp_c) = match capture_into(sub, &spec)? {
-            // smartctl exits nonzero on healthy drives: parse stdout regardless.
-            Ok(stdout) => parse_health(&stdout),
-            Err(_) => (None, None),
-        };
-        rows.push(serde_json::json!({
-            "device": device.as_str(),
-            "passed": passed,
-            "temp_c": temp_c,
-        }));
-    }
-    write!(sub.stdout(), "{}", serde_json::Value::Array(rows))?;
-    Ok(SubStatus::Success)
+/// One device's SMART health+temp for the typed `SmartHealth` reply. smartctl
+/// exits nonzero on healthy drives, so stdout is parsed regardless; a missing
+/// binary or unreadable device degrades to `(None, None)` (rendered gray).
+pub fn health(device: &BlockDev) -> (Option<bool>, Option<i32>) {
+    std::process::Command::new("smartctl")
+        .args(health_argv(device))
+        .output()
+        .map(|o| parse_health(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or((None, None))
 }
 
 #[cfg(test)]
@@ -95,39 +82,10 @@ mod tests {
         assert_eq!(parse_health(json), expected);
     }
 
+    /// smartctl is absent (or the device is) in CI: the typed health read
+    /// degrades to unknown instead of failing.
     #[test]
-    fn report_health_into_emits_one_json_array() {
-        use crate::cmd::test::Collector;
-        use greendot_proto::{Task, TaskEvent};
-        // A device whose smartctl call fails (binary may be absent in CI) still
-        // produces a row with null health — the array shape is what matters.
-        let mut c = Collector::default();
-        let status = {
-            let mut task = Task::new(&mut c);
-            let mut sub = task.begin_subtask("Read SMART health");
-            let s = report_health_into(&[BlockDev::new("sda").unwrap()], &mut sub).unwrap();
-            sub.complete(s);
-            task.complete().unwrap();
-            s
-        };
-        let stdout: String = c
-            .events
-            .iter()
-            .filter_map(|e| match e {
-                TaskEvent::Stdout { data } => Some(data.as_str()),
-                _ => None,
-            })
-            .collect();
-        let rows: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-        assert_eq!(rows.as_array().unwrap().len(), 1);
-        assert_eq!(rows[0]["device"], "sda");
-        assert_eq!(status, SubStatus::Success);
-        assert!(matches!(
-            c.events.last().unwrap(),
-            TaskEvent::Finished {
-                status: SubStatus::Success,
-                ..
-            }
-        ));
+    fn health_degrades_to_unknown_without_smartctl() {
+        assert_eq!(health(&BlockDev::new("sda").unwrap()), (None, None));
     }
 }

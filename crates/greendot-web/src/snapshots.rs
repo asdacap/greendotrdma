@@ -4,7 +4,7 @@
 use crate::routes::AppState;
 use crate::state::SnapshotPolicy;
 use chrono::{DateTime, Utc};
-use greendot_proto::{DatasetName, SnapName, TaskRequest};
+use greendot_proto::{DatasetName, SnapName, ops};
 
 /// Whether a policy is due: its cron has an occurrence after `last_run`
 /// that is not in the future. Invalid cron expressions are never due.
@@ -76,12 +76,19 @@ async fn run_policy(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc
         tracing::error!(policy = policy.id, "invalid dataset or snapshot name");
         return;
     };
-    let req = TaskRequest::SnapshotCreate {
+    let req = ops::SnapshotCreate {
         dataset: dataset.clone(),
         snap: snap.clone(),
     };
     let title = format!("scheduled snapshot {dataset}@{snap}");
-    match crate::task_runner::run(state, req, "snapshot-create", &title).await {
+    match crate::task_runner::run(
+        state,
+        state.helper.snapshot_create(req),
+        "snapshot-create",
+        &title,
+    )
+    .await
+    {
         Ok(o) if o.ok => {}
         outcome => {
             tracing::error!(?outcome, dataset = %dataset, "scheduled snapshot failed");
@@ -121,10 +128,10 @@ async fn retention(state: &AppState, policy: &SnapshotPolicy, now: DateTime<Utc>
             continue;
         };
         tracing::info!(snapshot = %full, "retention destroying");
-        let req = TaskRequest::SnapshotDestroy { dataset, snap };
+        let req = ops::SnapshotDestroy { dataset, snap };
         if let Err(e) = crate::task_runner::run(
             state,
-            req,
+            state.helper.snapshot_destroy(req),
             "snapshot-retention",
             &format!("retention destroy {full}"),
         )

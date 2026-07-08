@@ -3,8 +3,8 @@
 //! dumped verbatim. This module reads only the standardized `smart_status.passed`
 //! and `temperature.current` fields — it carries no device-vendor knowledge.
 
-use crate::helper_client::HelperClient;
-use greendot_proto::{BlockDev, TaskRequest};
+use crate::helper_client::{self, HelperClient};
+use greendot_proto::BlockDev;
 use std::collections::HashMap;
 
 /// Per-device SMART health and current temperature.
@@ -23,28 +23,17 @@ pub async fn health(helper: &HelperClient, devices: &[BlockDev]) -> HashMap<Stri
     if devices.is_empty() {
         return HashMap::new();
     }
-    let req = TaskRequest::SmartHealth {
-        devices: devices.to_vec(),
-    };
-    parse_health(&helper.collect(req).await.stdout)
-}
-
-fn parse_health(stdout: &str) -> HashMap<String, SmartHealth> {
-    #[derive(serde::Deserialize)]
-    struct Row {
-        device: String,
-        passed: Option<bool>,
-        temp_c: Option<i32>,
-    }
-    serde_json::from_str::<Vec<Row>>(stdout)
-        .unwrap_or_default()
+    helper
+        .smart_health(devices.to_vec())
+        .await
+        .devices
         .into_iter()
-        .map(|r| {
+        .map(|d| {
             (
-                r.device,
+                d.device,
                 SmartHealth {
-                    passed: r.passed,
-                    temp_c: r.temp_c,
+                    passed: d.passed,
+                    temp_c: d.temp_c,
                 },
             )
         })
@@ -87,11 +76,10 @@ fn report_installed(error: Option<&str>) -> bool {
 }
 
 pub async fn report(helper: &HelperClient, device: &BlockDev) -> SmartReportOut {
-    let out = helper
-        .collect(TaskRequest::SmartReport {
-            device: device.clone(),
-        })
-        .await;
+    let out = helper_client::collect(helper.smart_report(greendot_proto::ops::SmartReport {
+        device: device.clone(),
+    }))
+    .await;
     SmartReportOut {
         installed: report_installed(out.error.as_deref()),
         stdout: out.stdout,
@@ -103,40 +91,6 @@ pub async fn report(helper: &HelperClient, device: &BlockDev) -> SmartReportOut 
 mod tests {
     use super::*;
     use rstest::rstest;
-
-    #[test]
-    fn parses_health_inventory() {
-        let json = r#"[
-            {"device":"sda","passed":true,"temp_c":38},
-            {"device":"nvme0n1","passed":false,"temp_c":61},
-            {"device":"vdb","passed":null,"temp_c":null}
-        ]"#;
-        let map = parse_health(json);
-        assert_eq!(
-            map["sda"],
-            SmartHealth {
-                passed: Some(true),
-                temp_c: Some(38)
-            }
-        );
-        assert_eq!(
-            map["nvme0n1"],
-            SmartHealth {
-                passed: Some(false),
-                temp_c: Some(61)
-            }
-        );
-        assert_eq!(
-            map["vdb"],
-            SmartHealth {
-                passed: None,
-                temp_c: None
-            }
-        );
-        // Malformed / empty input degrades to an empty map (all gray).
-        assert!(parse_health("not json").is_empty());
-        assert!(parse_health("[]").is_empty());
-    }
 
     #[rstest]
     #[case::healthy(Some(SmartHealth { passed: Some(true), temp_c: Some(38) }), "dot-green", "38 °C")]

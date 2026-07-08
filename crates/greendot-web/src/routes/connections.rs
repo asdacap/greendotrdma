@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Extension, Router};
-use greendot_proto::{NFS_RDMA_PORT, TaskRequest};
+use greendot_proto::NFS_RDMA_PORT;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -86,7 +86,7 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
     let mut nfs_unavailable = false;
     // One `rdma resource show cm_id` read serves both NVMe-oF and NFS peers.
     if has_nvme || has_nfs {
-        let out = state.helper.collect(TaskRequest::RdmaResources).await;
+        let out = crate::helper_client::collect(state.helper.rdma_resources()).await;
         let peers = actual::rdma::peers_from_json(&out.stdout);
         let row = |p: &actual::rdma::RdmaPeer| NvmeRow {
             listen: match p.src_port {

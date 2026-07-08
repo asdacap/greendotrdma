@@ -266,7 +266,7 @@ pub fn roce_capable(net_root: &Path) -> Vec<(String, &'static str)> {
 /// explanations the web renders opaquely on the Diagnose page. Each ethernet
 /// NIC is matched to its registry vendor and asked for
 /// [`NetworkHardware::advice`].
-fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)> {
+pub fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)> {
     let Ok(entries) = std::fs::read_dir(net_root) else {
         return Vec::new();
     };
@@ -287,32 +287,6 @@ fn nic_rdma_advice(net_root: &Path) -> Vec<(String, &'static str, &'static str)>
         .collect();
     out.sort();
     out
-}
-
-// ---- streamed handlers (collected/recorded by the web like NfsReport/NfsApply) ----
-
-/// Streams the RoCE-capable NIC inventory as one JSON line — a privileged read
-/// the web collects: `[{"netdev":"ens16","vendor":"Mellanox"}, …]`.
-pub fn report_capable_into(net_root: &Path, sub: &mut SubTask) -> io::Result<SubStatus> {
-    let nics: Vec<serde_json::Value> = roce_capable(net_root)
-        .into_iter()
-        .map(|(netdev, vendor)| serde_json::json!({ "netdev": netdev, "vendor": vendor }))
-        .collect();
-    write!(sub.stdout(), "{}", serde_json::Value::Array(nics))?;
-    Ok(SubStatus::Success)
-}
-
-/// Streams the per-NIC RDMA advisories as one JSON line — a privileged read the
-/// web collects: `[{"netdev":"ens16v0","label":"…","detail":"…"}, …]`.
-pub fn report_nic_advice_into(net_root: &Path, sub: &mut SubTask) -> io::Result<SubStatus> {
-    let advice: Vec<serde_json::Value> = nic_rdma_advice(net_root)
-        .into_iter()
-        .map(|(netdev, label, detail)| {
-            serde_json::json!({ "netdev": netdev, "label": label, "detail": detail })
-        })
-        .collect();
-    write!(sub.stdout(), "{}", serde_json::Value::Array(advice))?;
-    Ok(SubStatus::Success)
 }
 
 /// Turns on hardware RoCE for `netdev`: detect the vendor, probe its RoCE-enable

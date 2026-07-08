@@ -3,7 +3,7 @@
 
 use crate::routes::AppState;
 use crate::state::{SubTaskRecord, TaskStatus};
-use greendot_proto::{SubStatus, TaskEvent, TaskRequest};
+use greendot_proto::{SubStatus, TaskEvent};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
@@ -148,18 +148,18 @@ pub(crate) fn begin(state: &AppState, kind: &str, title: &str) -> anyhow::Result
     Ok(id)
 }
 
-/// Dispatches helper request `req` as task `kind`/`title` and returns its id
-/// *without* waiting for it: the run is driven to completion — recorded and
-/// streamed — on a background task. Handlers respond at once and surface a link
-/// to /tasks/{id}.
+/// Records the task rpc stream `rx` (from a typed `HelperClient` method) as
+/// task `kind`/`title` and returns its id *without* waiting for it: the run is
+/// driven to completion — recorded and streamed — on a background task.
+/// Handlers respond at once and surface a link to /tasks/{id}. (Events buffer
+/// in the client channel until `drive` starts, so nothing is lost.)
 pub fn start(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: mpsc::Receiver<TaskEvent>,
     kind: &str,
     title: &str,
 ) -> anyhow::Result<i64> {
     let id = begin(state, kind, title)?;
-    let rx = state.helper.run_task(req);
     let state = state.clone();
     tokio::spawn(async move {
         let _ = drive(&state, id, rx).await;
@@ -168,17 +168,18 @@ pub fn start(
     Ok(id)
 }
 
-/// Runs helper request `req` as task `kind`/`title`, persisting and streaming
-/// it, and awaits completion. For non-HTTP callers (the snapshot scheduler) and
-/// tests that need the outcome synchronously; HTTP handlers use [`start`].
+/// Records the task rpc stream `rx` as task `kind`/`title`, persisting and
+/// streaming it, and awaits completion. For non-HTTP callers (the snapshot
+/// scheduler) and tests that need the outcome synchronously; HTTP handlers use
+/// [`start`].
 pub async fn run(
     state: &AppState,
-    req: TaskRequest,
+    rx: mpsc::Receiver<TaskEvent>,
     kind: &str,
     title: &str,
 ) -> anyhow::Result<TaskOutcome> {
     let id = begin(state, kind, title)?;
-    let outcome = drive(state, id, state.helper.run_task(req)).await?;
+    let outcome = drive(state, id, rx).await?;
     state.tasks.unregister(id);
     Ok(outcome)
 }

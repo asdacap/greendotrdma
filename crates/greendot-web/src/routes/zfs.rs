@@ -8,7 +8,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, TaskRequest, VdevLayout};
+use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, VdevLayout, ops};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -243,12 +243,12 @@ fn pool_of(dataset: &str) -> &str {
 /// detail partial with the outcome.
 async fn run_pool_op(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
     kind: &str,
     title: &str,
     pool: &str,
 ) -> Response {
-    let view = match crate::task_runner::start(state, req, kind, title) {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
         Ok(id) => {
             gather_pool_detail(
                 state,
@@ -350,13 +350,13 @@ async fn zvol_detail_page(
 /// detail partial with the outcome.
 async fn run_zvol_op(
     state: &Arc<AppState>,
-    req: TaskRequest,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
     kind: &str,
     title: &str,
     pool: &str,
     rest: &str,
 ) -> Response {
-    let view = match crate::task_runner::start(state, req, kind, title) {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
         Ok(id) => {
             gather_zvol_detail(pool, rest, Some(format!("started {title}")), None, Some(id)).await
         }
@@ -405,7 +405,7 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
             Err(_) => return pool_op_failed(&state, &pool, "invalid volblocksize").await,
         },
     };
-    let req = TaskRequest::ZvolCreate {
+    let req = ops::ZvolCreate {
         dataset: dataset.clone(),
         size,
         volblocksize,
@@ -413,7 +413,7 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
     };
     run_pool_op(
         &state,
-        req,
+        state.helper.zvol_create(req),
         "zvol-create",
         &format!("create zvol {dataset}"),
         &pool,
@@ -437,13 +437,13 @@ async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<Resize
     let Some(new_size) = parse_size(&form.size, &form.unit) else {
         return zvol_detail_failed(&pool, &rest, "invalid size").await;
     };
-    let req = TaskRequest::ZvolResize {
+    let req = ops::ZvolResize {
         dataset: dataset.clone(),
         new_size,
     };
     run_zvol_op(
         &state,
-        req,
+        state.helper.zvol_resize(req),
         "zvol-resize",
         &format!("resize {dataset}"),
         &pool,
@@ -467,12 +467,17 @@ async fn zvol_delete(
     let Ok(dataset) = DatasetName::new(form.dataset) else {
         return zvol_detail_failed(&pool, &rest, "invalid dataset name").await;
     };
-    let req = TaskRequest::ZvolDelete {
+    let req = ops::ZvolDelete {
         dataset: dataset.clone(),
     };
     // Removing the zvol means its page no longer applies — go back to the pool;
     // the delete task is viewable on /tasks.
-    match crate::task_runner::start(&state, req, "zvol-delete", &format!("delete {dataset}")) {
+    match crate::task_runner::start(
+        &state,
+        state.helper.zvol_delete(req),
+        "zvol-delete",
+        &format!("delete {dataset}"),
+    ) {
         Ok(_) => nav_redirect(&headers, &format!("/zfs/pool/{pool}")),
         Err(e) => zvol_detail_failed(&pool, &rest, format!("{e:#}")).await,
     }
@@ -507,13 +512,13 @@ async fn fs_create(State(state): State<Arc<AppState>>, Form(form): Form<FsCreate
             }
         },
     };
-    let req = TaskRequest::ZfsFsCreate {
+    let req = ops::ZfsFsCreate {
         dataset: dataset.clone(),
         mountpoint,
     };
     run_pool_op(
         &state,
-        req,
+        state.helper.zfs_fs_create(req),
         "fs-create",
         &format!("create filesystem {dataset}"),
         &pool,
@@ -533,9 +538,9 @@ async fn fs_mount(State(state): State<Arc<AppState>>, Form(form): Form<FsDataset
     };
     run_pool_op(
         &state,
-        TaskRequest::ZfsMount {
+        state.helper.zfs_mount(ops::ZfsMount {
             dataset: dataset.clone(),
-        },
+        }),
         "fs-mount",
         &format!("mount {dataset}"),
         &pool,
@@ -553,9 +558,9 @@ async fn fs_unmount(
     };
     run_pool_op(
         &state,
-        TaskRequest::ZfsUnmount {
+        state.helper.zfs_unmount(ops::ZfsUnmount {
             dataset: dataset.clone(),
-        },
+        }),
         "fs-unmount",
         &format!("unmount {dataset}"),
         &pool,
@@ -587,10 +592,10 @@ async fn fs_set_mountpoint(
     };
     run_pool_op(
         &state,
-        TaskRequest::ZfsSetMountpoint {
+        state.helper.zfs_set_mountpoint(ops::ZfsSetMountpoint {
             dataset: dataset.clone(),
             mountpoint: mountpoint.clone(),
-        },
+        }),
         "fs-set-mountpoint",
         &format!("set {dataset} mountpoint={mountpoint}"),
         &pool,
@@ -613,13 +618,13 @@ async fn fs_destroy(
     let Ok(dataset) = DatasetName::new(form.dataset) else {
         return pool_op_failed(&state, &pool, "invalid dataset name").await;
     };
-    let req = TaskRequest::ZfsDestroy {
+    let req = ops::ZfsDestroy {
         dataset: dataset.clone(),
         recursive: form.recursive.is_some(),
     };
     run_pool_op(
         &state,
-        req,
+        state.helper.zfs_destroy(req),
         "fs-destroy",
         &format!("destroy {dataset}"),
         &pool,
@@ -645,13 +650,13 @@ async fn pool_add_device(
     let Ok(device) = DevicePath::new(form.device.trim()) else {
         return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
     };
-    let req = TaskRequest::PoolDeviceAdd {
+    let req = ops::PoolDeviceAdd {
         pool: pool.clone(),
         device: device.clone(),
     };
     run_pool_op(
         &state,
-        req,
+        state.helper.pool_device_add(req),
         "pool-add",
         &format!("add {device} to {pool}"),
         &name,
@@ -800,13 +805,13 @@ async fn pool_create(
         },
     };
     let title = format!("create pool {pool}");
-    let req = TaskRequest::PoolCreate {
+    let req = ops::PoolCreate {
         name: pool,
         vdev: layout,
         devices: device_paths,
         ashift,
     };
-    match crate::task_runner::start(&state, req, "pool-create", &title) {
+    match crate::task_runner::start(&state, state.helper.pool_create(req), "pool-create", &title) {
         Ok(_) => nav_redirect(&headers, "/zfs"),
         Err(e) => pool_create_failed(&state, selected, format!("{e:#}")).await,
     }

@@ -2,7 +2,7 @@
 //! [config.toml]` subcommand. Reconcile runs everything inline, in-process —
 //! the render/diff comes from `crate::render`, the applies are this crate's
 //! own — so the *caller* supplies the privilege: the daemon runs
-//! [`run`] on `TaskRequest::Reconcile` (the path greendot-web takes), and the
+//! [`run`] on the `Reconcile` rpc (the path greendot-web takes), and the
 //! standalone subcommand proxies to a running daemon or, given an explicit
 //! config (or no daemon), applies locally as root.
 
@@ -15,14 +15,14 @@ use crate::{cmd, lio, modules, nfs, nvmet};
 use anyhow::Result;
 use greendot_proto::actual::nfs::from_report;
 use greendot_proto::config::Config;
-use greendot_proto::{NFS_RDMA_PORT, SubStatus, SubTask, Task, TaskEvent, TaskRequest, pb};
+use greendot_proto::{NFS_RDMA_PORT, SubStatus, SubTask, Task, TaskEvent, pb};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
 /// Runs the `reconcile` subcommand and exits with status 1 if any step failed.
 /// With no explicit config it prefers a running daemon — proxying
-/// `TaskRequest::Reconcile` over its socket, so an unprivileged caller can heal
+/// the `Reconcile` rpc over its socket, so an unprivileged caller can heal
 /// drift and the daemon's mutate lock keeps every privileged task serialized.
 /// With an explicit config, or no daemon, it applies in-process, which needs
 /// root (the daemon reconciles only against its own `--config`, so a custom
@@ -60,10 +60,7 @@ fn proxy(socket: std::path::PathBuf) -> Result<()> {
         .build()?;
     runtime.block_on(async {
         let mut client = greendot_proto::client::connect_uds(socket)?;
-        let mut stream = client
-            .run_task(pb::TaskRequest::from(TaskRequest::Reconcile))
-            .await?
-            .into_inner();
+        let mut stream = client.reconcile(pb::Reconcile {}).await?.into_inner();
         let mut sink = StdoutSink;
         let mut failed = false;
         while let Some(ev) = stream.message().await? {
@@ -84,23 +81,11 @@ fn proxy(socket: std::path::PathBuf) -> Result<()> {
     })
 }
 
-/// The web's cheap drift pre-check: render the daemon's own desired state, read
-/// actual, and emit `{nvmet_ok, lio_ok, nfs_ok}` JSON *without applying* and
-/// without the mutate lock. A config/desired read error reports drift on all
-/// three areas, so the web then dispatches a real `Reconcile` that surfaces it.
-pub fn dry_run_into(cfg_path: Option<String>, sub: &mut SubTask) -> io::Result<SubStatus> {
-    let (nvmet_ok, lio_ok, nfs_ok) = drift(cfg_path);
-    write!(
-        sub.stdout(),
-        "{}",
-        serde_json::json!({ "nvmet_ok": nvmet_ok, "lio_ok": lio_ok, "nfs_ok": nfs_ok })
-    )?;
-    Ok(SubStatus::Success)
-}
-
-/// Computes the three per-area drift-satisfied flags (config/desired read errors
-/// read as "all drifted").
-fn drift(cfg_path: Option<String>) -> (bool, bool, bool) {
+/// The web's cheap drift pre-check (`ReconcileDryRun`): the three per-area
+/// drift-satisfied flags, *without applying* and without the mutate lock. A
+/// config/desired read error reports drift on all three areas, so the web then
+/// dispatches a real `Reconcile` that surfaces it.
+pub fn drift(cfg_path: Option<String>) -> (bool, bool, bool) {
     let Ok(cfg) = Config::load(cfg_path) else {
         return (false, false, false);
     };

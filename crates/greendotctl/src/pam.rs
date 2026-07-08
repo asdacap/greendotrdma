@@ -4,7 +4,7 @@
 //! stack (covered by the dev-VM smoke tests); the rate limiter and the
 //! membership rule are pure and unit-tested here.
 
-use greendot_proto::{ErrKind, Response, Secret, Username};
+use greendot_proto::{AuthResult, ErrKind, Secret, Username};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -72,26 +72,26 @@ pub fn authenticate(
     limiter: &Mutex<RateLimiter>,
     username: &Username,
     password: &Secret,
-) -> Response {
+) -> AuthResult {
     if !limiter.lock().unwrap().allow(Instant::now()) {
-        return Response::err(
+        return AuthResult::err(
             ErrKind::Busy,
             "too many authentication attempts, try again later",
         );
     }
     if let Err(e) = pam_check(&cfg.pam_service, username.as_str(), &password.0) {
         tracing::warn!(user = %username, error = %e, "PAM authentication failed");
-        return Response::err(ErrKind::AuthFailed, "invalid username or password");
+        return AuthResult::err(ErrKind::AuthFailed, "invalid username or password");
     }
     if !in_admin_group(username.as_str(), &cfg.admin_group) {
         tracing::warn!(user = %username, group = %cfg.admin_group, "authenticated but not in admin group");
-        return Response::err(
+        return AuthResult::err(
             ErrKind::NotInAdminGroup,
             format!("user is not a member of the {} group", cfg.admin_group),
         );
     }
     tracing::info!(user = %username, "login successful");
-    Response::OkAuth {
+    AuthResult::Ok {
         username: username.to_string(),
     }
 }

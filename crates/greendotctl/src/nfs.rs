@@ -7,7 +7,7 @@
 //! listener is asserted by writing `rdma <port>` to `/proc/fs/nfsd/portlist`
 //! (idempotent, root-only), mirroring how `nvmet::apply` writes configfs.
 
-use crate::cmd::{TaskSpec, capture_into, run_into};
+use crate::cmd::{TaskSpec, run_into};
 use crate::util::s;
 use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL, NfsDesired, SubStatus, SubTask};
 use std::collections::BTreeSet;
@@ -230,23 +230,6 @@ pub fn report(portlist: &Path, exports_file: &Path) -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
         .unwrap_or_default();
     format_report(&exports, portlist, exports_file)
-}
-
-/// Streams the report into the subtask, for the socket `NfsReport` request.
-/// `exportfs -s` runs via [`capture_into`] so the command and its stderr stay
-/// visible; a failure degrades to an empty export table like [`report`].
-pub fn report_into(
-    portlist: &Path,
-    exports_file: &Path,
-    sub: &mut SubTask,
-) -> io::Result<SubStatus> {
-    let exports = capture_into(sub, &TaskSpec::new("exportfs", s(&["-s"])))?.unwrap_or_default();
-    write!(
-        sub.stdout(),
-        "{}",
-        format_report(&exports, portlist, exports_file)
-    )?;
-    Ok(SubStatus::Success)
 }
 
 #[cfg(test)]

@@ -7,7 +7,7 @@ description = "GreenDotRDMA root daemon (serve) and standalone reconcile tool"
 
 [dependencies]
 anyhow = { workspace = true }
-greendot-proto = { workspace = true, features = ["client", "server"] }
+greendot-proto = { workspace = true, features = ["client"] }
 nix = { workspace = true }
 pam = "0.7"
 serde = { workspace = true }

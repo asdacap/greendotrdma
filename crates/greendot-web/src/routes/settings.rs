@@ -9,7 +9,7 @@ use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{NetdevName, TaskRequest};
+use greendot_proto::{NetdevName, ops};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -426,7 +426,7 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
     let st = state.clone();
     let nd = netdev.clone();
     tokio::spawn(async move {
-        let rx = st.helper.run_task(TaskRequest::RxeAdd { netdev: nd });
+        let rx = st.helper.rxe_add(ops::RxeAdd { netdev: nd });
         let added = crate::task_runner::drive(&st, id, rx)
             .await
             .map(|o| o.ok)
@@ -475,9 +475,9 @@ async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>
     let title = format!("enable RoCE on {netdev}");
     let view = match crate::task_runner::start(
         &state,
-        TaskRequest::EnableRoce {
+        state.helper.enable_roce(ops::EnableRoce {
             netdev: netdev.clone(),
-        },
+        }),
         "roce",
         &title,
     ) {
@@ -538,9 +538,14 @@ async fn install_deps(
         .map(|p| p.to_string())
         .collect::<Vec<_>>()
         .join(", ");
-    let req = TaskRequest::InstallPackages { packages };
+    let req = ops::InstallPackages { packages };
     let title = format!("install {names}");
-    let view = match crate::task_runner::start(&state, req, "install", &title) {
+    let view = match crate::task_runner::start(
+        &state,
+        state.helper.install_packages(req),
+        "install",
+        &title,
+    ) {
         Ok(id) => gather(&state, Some(format!("started {title}")), None, Some(id)).await,
         Err(e) => gather(&state, None, Some(format!("{e:#}")), None).await,
     };

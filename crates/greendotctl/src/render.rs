@@ -4,7 +4,7 @@
 //!
 //! Everything here is a pure render/compare — the applies run inline in the
 //! reconcile driver (`crate::reconcile`), the privileged caller: the daemon on
-//! `TaskRequest::Reconcile`/`ReconcileDryRun`, or the root-only standalone
+//! the `Reconcile`/`ReconcileDryRun` rpcs, or the root-only standalone
 //! `greendotctl reconcile`.
 
 use crate::actual::lio::ActualLio;
