@@ -382,6 +382,20 @@ fn run_dispatch(ctx: &Ctx, req: GdTask, sink: &mut dyn EventSink) -> io::Result<
             let status = hardware::enable_into(Path::new(hardware::NET_ROOT), &netdev, &mut sub)?;
             sub.complete(status);
         }
+        Dispatch::RxeAdd(netdev) => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            modules::rxe_add(&mut task, &netdev)?;
+        }
+        // The whole shrink sequence — probe, filesystem, partition — under one
+        // lock acquisition, so nothing interleaves between its steps.
+        Dispatch::PartitionShrink {
+            disk,
+            number,
+            size_sectors,
+        } => {
+            let _guard = ctx.mutate_lock.lock().unwrap();
+            fs::shrink(&mut task, &disk, number, size_sectors)?;
+        }
         Dispatch::FailedTask { label, message } => {
             // A refused operation (e.g. install on an unsupported distro)
             // recorded as a failed subtask carrying its reason.
@@ -429,7 +443,7 @@ fn run_dispatch(ctx: &Ctx, req: GdTask, sink: &mut dyn EventSink) -> io::Result<
 }
 
 /// Translate a one-shot response into the one-subtask task RunTask must still
-/// emit (e.g. `EnsureModules` when every module is already loaded).
+/// emit (e.g. `InstallPackages` with an empty package set).
 fn emit_oneshot(task: &mut Task, resp: GdResponse) {
     let sub = task.begin_subtask("Apply");
     match resp {

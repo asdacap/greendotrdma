@@ -126,36 +126,16 @@ pub enum TaskRequest {
         disk: BlockDev,
         number: u32,
     },
-    /// Shrink a partition in place (start sector preserved). The web side runs
-    /// the filesystem shrink first, then this.
-    PartitionResize {
+    /// Shrink a partition *and its filesystem* in place (start sector
+    /// preserved), as one operation: the helper probes the filesystem itself,
+    /// refuses mounted or unshrinkable filesystems, shrinks the filesystem
+    /// first, then the partition — the whole sequence under one mutate lock.
+    /// How each filesystem shrinks (ext* offline, btrfs via a helper-owned
+    /// temp mount) is the helper's business and never crosses the wire.
+    PartitionShrink {
         disk: BlockDev,
         number: u32,
         size_sectors: u64,
-    },
-
-    // Filesystem shrink steps (each one CLI command; the web side sequences
-    // them, filesystem always before the partition). ext* shrinks offline and
-    // names the device (`Fsck` + `ResizeExt`); btrfs has no offline shrink —
-    // `btrfs filesystem resize` names a *mount point* — so it needs the
-    // mount/resize/umount trio against a helper-owned temp path.
-    Fsck {
-        device: DevicePath,
-    },
-    ResizeExt {
-        device: DevicePath,
-        new_size_sectors: u64,
-    },
-    BtrfsMount {
-        device: DevicePath,
-        mount_path: MountPath,
-    },
-    BtrfsResize {
-        mount_path: MountPath,
-        new_size: u64,
-    },
-    Umount {
-        mount_path: MountPath,
     },
 
     // ZFS pools (zvol ops are above; reads happen unprivileged in greendot-web)
@@ -266,12 +246,9 @@ pub enum TaskRequest {
     Reconcile,
 
     // System
-    /// `modprobe` the Linux kernel modules an enabled feature needs. Modules
-    /// already loaded are skipped; an empty set is a no-op.
-    EnsureModules {
-        modules: Vec<KernelModule>,
-    },
-    RxeLinkAdd {
+    /// Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
+    /// (skipped if already loaded), then add the rdma link.
+    RxeAdd {
         netdev: NetdevName,
     },
     /// Inventory of RoCE-capable NIC hardware (a privileged read): the helper

@@ -55,17 +55,6 @@ enum LvmReportKind {
   LVM_REPORT_KIND_PVS = 3;
 }
 
-enum KernelModule {
-  KERNEL_MODULE_UNSPECIFIED = 0;
-  KERNEL_MODULE_NVMET_LOOP = 1;
-  KERNEL_MODULE_NVMET_TCP = 2;
-  KERNEL_MODULE_NVMET_RDMA = 3;
-  KERNEL_MODULE_ISCSI = 4;
-  KERNEL_MODULE_ISER = 5;
-  KERNEL_MODULE_RXE = 6;
-  KERNEL_MODULE_RPCRDMA = 7;
-}
-
 enum ErrKind {
   ERR_KIND_UNSPECIFIED = 0;
   ERR_KIND_AUTH_FAILED = 1;
@@ -192,19 +181,14 @@ message PartitionCreate {
   string label = 4;
 }
 message PartitionDelete { string disk = 1; uint32 number = 2; }
-message PartitionResize { string disk = 1; uint32 number = 2; uint64 size_sectors = 3; }
 
-// Filesystem shrink steps. ext* shrinks offline, addressing the device
-// directly (`e2fsck` then `resize2fs`). btrfs has no offline shrink — `btrfs
-// filesystem resize` only works on a *mounted* filesystem, and it names the
-// mount point, not the device. So a btrfs shrink is three steps: mount the
-// device at a helper-owned temp path under `/run/greendotrdma`, resize, unmount.
-// That is the only reason a filesystem type appears by name in this protocol.
-message Fsck { string device = 1; }
-message ResizeExt { string device = 1; uint64 new_size_sectors = 2; }
-message BtrfsMount { string device = 1; string mount_path = 2; }
-message BtrfsResize { string mount_path = 1; uint64 new_size = 2; }
-message Umount { string mount_path = 1; }
+// Shrink a partition *and its filesystem* as one operation (start sector
+// preserved). The helper probes the filesystem itself, refuses mounted or
+// unshrinkable filesystems, shrinks the filesystem first, then the partition —
+// the whole sequence under one mutate lock, one subtask per step. How a given
+// filesystem shrinks (ext* offline, btrfs via a helper-owned temp mount — it
+// has no offline shrink) is the helper's business and never crosses this wire.
+message PartitionShrink { string disk = 1; uint32 number = 2; uint64 size_sectors = 3; }
 
 message PoolCreate {
   string name = 1;
@@ -237,11 +221,9 @@ message NfsApply { NfsDesired desired = 1; }
 // peer cannot name a file for root to read.
 message Reconcile { reserved 1; reserved "config"; }
 
-// `modprobe` the Linux kernel modules an enabled feature needs (see the
-// `KernelModule` enum: nvmet_rdma, iscsi_target_mod, rdma_rxe, ...). Modules
-// already loaded are skipped, and an empty set is a no-op.
-message EnsureModules { repeated KernelModule modules = 1; }
-message RxeLinkAdd { string netdev = 1; }
+// Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
+// (skipped if already loaded), then add the rdma link.
+message RxeAdd { string netdev = 1; }
 message EnableRoce { string netdev = 1; }
 message InstallPackages { repeated string packages = 1; }
 
@@ -251,6 +233,12 @@ message TaskRequest {
   // 1 and 2 stayed with `CallRequest` when the original single `Request` oneof
   // was split; the arms below keep the numbers they had there.
   reserved 1, 2;
+  // 16–21 were the per-command shrink steps (partition_resize, fsck,
+  // resize_ext, btrfs_mount, btrfs_resize, umount), replaced by the single
+  // partition_shrink op; 42–43 were ensure_modules/rxe_link_add, replaced by
+  // rxe_add. Sub-intent primitives must not come back: an op whose only caller
+  // is a web-side sequence belongs in the helper as one request.
+  reserved 16, 17, 18, 19, 20, 21, 42, 43;
 
   oneof op {
     // ZFS zvols and snapshots (reads happen unprivileged in greendot-web).
@@ -267,20 +255,12 @@ message TaskRequest {
     ZfsUnmount zfs_unmount = 11;
     ZfsDestroy zfs_destroy = 12;
 
-    // Partitioning (sfdisk).
+    // Partitioning (sfdisk). Shrink is the one compound op: filesystem then
+    // partition, sequenced by the helper (see PartitionShrink above).
     PartitionTableCreate partition_table_create = 13;
     PartitionCreate partition_create = 14;
     PartitionDelete partition_delete = 15;
-    PartitionResize partition_resize = 16;
-
-    // Filesystem shrink steps, one command each; the web sequences them, the
-    // filesystem always before the partition. See the messages above for why
-    // btrfs needs its own mount/umount pair and ext* does not.
-    Fsck fsck = 17;
-    ResizeExt resize_ext = 18;
-    BtrfsMount btrfs_mount = 19;
-    BtrfsResize btrfs_resize = 20;
-    Umount umount = 21;
+    PartitionShrink partition_shrink = 57;
 
     // ZFS pools.
     PoolCreate pool_create = 22;
@@ -310,9 +290,8 @@ message TaskRequest {
     NfsApply nfs_apply = 40;
     Empty nfs_report = 41;
 
-    // System: kernel modules, RDMA link setup, RoCE enablement, package installs.
-    EnsureModules ensure_modules = 42;
-    RxeLinkAdd rxe_link_add = 43;
+    // System: Soft-RoCE setup, RoCE enablement, package installs.
+    RxeAdd rxe_add = 58;
     Empty roce_capable_nics = 44;
     EnableRoce enable_roce = 45;
     Empty nic_rdma_advice = 46;

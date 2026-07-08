@@ -4,7 +4,7 @@
 //! password). Only `plan_call` needs the [`Ctx`] — task planning is pure.
 
 use crate::cmd::TaskSpec;
-use crate::{fs, install, lio, lvm, modules, pam, partition, smart, zfs};
+use crate::{install, lio, lvm, modules, pam, partition, smart, zfs};
 use greendot_proto::{
     BlockDev, CallRequest, NetdevName, NfsDesired, NvmetDesired, Response, TaskRequest,
 };
@@ -52,6 +52,17 @@ pub enum Dispatch {
     /// Turn on hardware RoCE for a NIC: vendor-detect, probe, then set+reload —
     /// the multi-step vendor-specific flow streamed as one task.
     EnableRoce(NetdevName),
+    /// Enable Soft-RoCE: load the rxe module, then add the rdma link — two
+    /// ordered commands streamed as one task (see `modules::rxe_add`).
+    RxeAdd(NetdevName),
+    /// Shrink a partition and its filesystem as one multi-step task: probe,
+    /// filesystem shrink (fs-specific flow in `fs::shrink`), partition resize —
+    /// the filesystem always before the partition boundary.
+    PartitionShrink {
+        disk: BlockDev,
+        number: u32,
+        size_sectors: u64,
+    },
     /// A refused operation recorded as a failed task carrying the subtask
     /// label and the reason (e.g. install on an unsupported distro), so the
     /// reason reaches the UI.
@@ -127,11 +138,7 @@ pub fn plan(req: TaskRequest) -> Dispatch {
         TaskRequest::NicInterfaces => Dispatch::NicInterfaces,
         TaskRequest::ReconcileDryRun => Dispatch::ReconcileDryRun,
 
-        TaskRequest::EnsureModules { modules: list } => match modules::ensure(&list) {
-            Some(spec) => Dispatch::Task(spec),
-            None => Dispatch::OneShot(Response::Ok),
-        },
-        TaskRequest::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
+        TaskRequest::RxeAdd { netdev } => Dispatch::RxeAdd(netdev),
         TaskRequest::RoceCapableNics => Dispatch::RoceCapableNics,
         TaskRequest::NicRdmaAdvice => Dispatch::NicRdmaAdvice,
         TaskRequest::EnableRoce { netdev } => Dispatch::EnableRoce(netdev),
@@ -154,25 +161,15 @@ pub fn plan(req: TaskRequest) -> Dispatch {
         TaskRequest::PartitionDelete { disk, number } => {
             Dispatch::Task(partition::partition_delete(&disk, number))
         }
-        TaskRequest::PartitionResize {
+        TaskRequest::PartitionShrink {
             disk,
             number,
             size_sectors,
-        } => Dispatch::Task(partition::partition_resize(&disk, number, size_sectors)),
-
-        TaskRequest::Fsck { device } => Dispatch::Task(fs::fsck(&device)),
-        TaskRequest::ResizeExt {
-            device,
-            new_size_sectors,
-        } => Dispatch::Task(fs::resize_ext(&device, new_size_sectors)),
-        TaskRequest::BtrfsMount { device, mount_path } => {
-            Dispatch::Task(fs::btrfs_mount(&device, &mount_path))
-        }
-        TaskRequest::BtrfsResize {
-            mount_path,
-            new_size,
-        } => Dispatch::Task(fs::btrfs_resize(&mount_path, new_size)),
-        TaskRequest::Umount { mount_path } => Dispatch::Task(fs::umount(&mount_path)),
+        } => Dispatch::PartitionShrink {
+            disk,
+            number,
+            size_sectors,
+        },
 
         TaskRequest::PoolCreate {
             name,
@@ -276,9 +273,6 @@ mod tests {
     fn disk(s: &str) -> BlockDev {
         BlockDev::new(s).unwrap()
     }
-    fn mp(s: &str) -> MountPath {
-        MountPath::new(s).unwrap()
-    }
 
     /// Each task request must route to exactly the command its dedicated builder
     /// produces; the builder is the oracle, so a mis-wired arm (wrong function or
@@ -326,12 +320,6 @@ mod tests {
     #[case::lio_apply(
         TaskRequest::LioApply { desired: LioDesired::default() },
         lio::apply_spec(&LioDesired::default()))]
-    #[case::ensure_modules(
-        TaskRequest::EnsureModules { modules: vec![KernelModule::Rxe] },
-        modules::ensure(&[KernelModule::Rxe]).unwrap())]
-    #[case::rxe_link_add(
-        TaskRequest::RxeLinkAdd { netdev: NetdevName::new("eth0").unwrap() },
-        modules::rxe_link_add(&NetdevName::new("eth0").unwrap()))]
     #[case::partition_table_create(
         TaskRequest::PartitionTableCreate { disk: disk("sdb") },
         partition::table_create(&disk("sdb")))]
@@ -341,24 +329,6 @@ mod tests {
     #[case::partition_delete(
         TaskRequest::PartitionDelete { disk: disk("sdb"), number: 2 },
         partition::partition_delete(&disk("sdb"), 2))]
-    #[case::partition_resize(
-        TaskRequest::PartitionResize { disk: disk("sdb"), number: 2, size_sectors: 1 << 21 },
-        partition::partition_resize(&disk("sdb"), 2, 1 << 21))]
-    #[case::fsck(
-        TaskRequest::Fsck { device: dev("/dev/sdb2") },
-        fs::fsck(&dev("/dev/sdb2")))]
-    #[case::resize_ext(
-        TaskRequest::ResizeExt { device: dev("/dev/sdb2"), new_size_sectors: 1 << 21 },
-        fs::resize_ext(&dev("/dev/sdb2"), 1 << 21))]
-    #[case::btrfs_mount(
-        TaskRequest::BtrfsMount { device: dev("/dev/sdb2"), mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
-        fs::btrfs_mount(&dev("/dev/sdb2"), &mp("/run/greendotrdma/btrfs-resize-sdb2")))]
-    #[case::btrfs_resize(
-        TaskRequest::BtrfsResize { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2"), new_size: 1 << 30 },
-        fs::btrfs_resize(&mp("/run/greendotrdma/btrfs-resize-sdb2"), 1 << 30))]
-    #[case::umount(
-        TaskRequest::Umount { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
-        fs::umount(&mp("/run/greendotrdma/btrfs-resize-sdb2")))]
     #[case::lvm_report(
         TaskRequest::LvmReport { what: LvmReport::Vgs },
         lvm::report(LvmReport::Vgs))]
@@ -424,11 +394,7 @@ mod tests {
     /// shortcuts that need no command at all.
     #[test]
     fn oneshot_and_special_arms() {
-        // Empty module / package sets resolve to a no-op reply, not a task.
-        assert!(matches!(
-            plan(TaskRequest::EnsureModules { modules: vec![] }),
-            Dispatch::OneShot(Response::Ok)
-        ));
+        // An empty package set resolves to a no-op reply, not a task.
         assert!(matches!(
             plan(TaskRequest::InstallPackages { packages: vec![] }),
             Dispatch::OneShot(Response::Ok)
@@ -459,6 +425,16 @@ mod tests {
         assert!(matches!(
             plan(TaskRequest::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
             Dispatch::EnableRoce(nd) if nd.as_str() == "ens16"
+        ));
+        // The two helper-sequenced compound ops route to their special arms
+        // (multiple commands, one task — a single TaskSpec can't express them).
+        assert!(matches!(
+            plan(TaskRequest::RxeAdd { netdev: NetdevName::new("eth0").unwrap() }),
+            Dispatch::RxeAdd(nd) if nd.as_str() == "eth0"
+        ));
+        assert!(matches!(
+            plan(TaskRequest::PartitionShrink { disk: disk("sdb"), number: 2, size_sectors: 1 << 21 }),
+            Dispatch::PartitionShrink { disk: d, number: 2, size_sectors } if d.as_str() == "sdb" && size_sectors == 1 << 21
         ));
         // SMART health is a batch read routed to its own arm (one TaskSpec can't
         // express "run smartctl per device and merge").

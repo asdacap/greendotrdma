@@ -114,9 +114,6 @@ validated_string!(
     /// LVM logical-volume name, e.g. `data`.
     LvName, validate::lvm_name, "logical volume name");
 validated_string!(
-    /// The helper's private btrfs temp-mount path (fixed shape, no traversal).
-    MountPath, validate::mount_path, "mount path");
-validated_string!(
     /// Absolute directory path to export over NFS, e.g. `/tank/share`.
     NfsExportPath, validate::nfs_export_path, "NFS export path");
 validated_string!(
@@ -599,18 +596,6 @@ mod tests {
     #[case::too_long(&"a".repeat(256), false)]
     fn pool_name(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(PoolName::new(input).is_ok(), ok, "{input:?}");
-    }
-
-    #[rstest]
-    #[case::sda("/run/greendotrdma/btrfs-resize-sda3", true)]
-    #[case::nvme("/run/greendotrdma/btrfs-resize-nvme0n1p2", true)]
-    #[case::empty("", false)]
-    #[case::wrong_prefix("/run/greendotrdma/sda3", false)]
-    #[case::traversal("/run/greendotrdma/btrfs-resize-../etc", false)]
-    #[case::trailing_slash("/run/greendotrdma/btrfs-resize-sda3/", false)]
-    #[case::path_in_name("/run/greendotrdma/btrfs-resize-/dev/sda", false)]
-    fn mount_path(#[case] input: &str, #[case] ok: bool) {
-        assert_eq!(MountPath::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

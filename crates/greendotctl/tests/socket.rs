@@ -7,7 +7,7 @@
 use greendot_proto::pb;
 use greendot_proto::pb::helper_client::HelperClient;
 use greendot_proto::{
-    CallRequest, DatasetName, KernelModule, Response, SubStatus, TaskEvent, TaskRequest,
+    CallRequest, DatasetName, PackageName, Response, SubStatus, TaskEvent, TaskRequest,
 };
 use std::path::PathBuf;
 use std::time::Duration;
@@ -107,12 +107,12 @@ async fn ping_streamed_task_oneshot_and_validation() {
         other => panic!("expected Finished with install hint, got {other:?}"),
     }
 
-    // EnsureModules with an empty set is a one-shot Ok: over RunTask it becomes a
-    // one-subtask task ending in a successful Finished (no command to run).
+    // InstallPackages with an empty set is a one-shot Ok: over RunTask it becomes
+    // a one-subtask task ending in a successful Finished (no command to run).
     let events = run_task(
         &mut client,
-        pb::TaskRequest::from(TaskRequest::EnsureModules {
-            modules: Vec::<KernelModule>::new(),
+        pb::TaskRequest::from(TaskRequest::InstallPackages {
+            packages: Vec::<PackageName>::new(),
         }),
     )
     .await;

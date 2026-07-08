@@ -9,7 +9,7 @@ use axum::extract::{Form, Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{KernelModule, NetdevName, TaskRequest};
+use greendot_proto::{NetdevName, TaskRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -404,12 +404,11 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
             .await,
         });
     };
-    // Soft-RoCE needs the rxe module loaded before the link is added, so the two
-    // steps (then a reconcile) must run in order — drive the whole sequence on a
-    // background task and return at once. The notice links to the module-load
-    // task; the link-add step is recorded as its own task on /tasks.
+    // One RxeAdd task: the helper loads the rxe module and adds the link in
+    // order. The follow-up reconcile (a separate, idempotent intent) is chained
+    // on the task's success from a background wait.
     let title = format!("enable Soft-RoCE on {netdev}");
-    let id = match crate::task_runner::begin(&state, "rxe", "load rxe module") {
+    let id = match crate::task_runner::begin(&state, "rxe-add", &title) {
         Ok(id) => id,
         Err(e) => {
             return page(NicDetailPartial {
@@ -427,26 +426,12 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm
     let st = state.clone();
     let nd = netdev.clone();
     tokio::spawn(async move {
-        let rx = st.helper.run_task(TaskRequest::EnsureModules {
-            modules: vec![KernelModule::Rxe],
-        });
-        let loaded = crate::task_runner::drive(&st, id, rx)
+        let rx = st.helper.run_task(TaskRequest::RxeAdd { netdev: nd });
+        let added = crate::task_runner::drive(&st, id, rx)
             .await
             .map(|o| o.ok)
             .unwrap_or(false);
         st.tasks.unregister(id);
-        if !loaded {
-            return;
-        }
-        let added = crate::task_runner::run(
-            &st,
-            TaskRequest::RxeLinkAdd { netdev: nd.clone() },
-            "rxe-link",
-            &format!("add Soft-RoCE on {nd}"),
-        )
-        .await
-        .map(|o| o.ok)
-        .unwrap_or(false);
         if added {
             let _ = reconcile_state(&st).await;
         }

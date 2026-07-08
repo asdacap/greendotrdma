@@ -226,7 +226,8 @@ pub(crate) mod testutil {
                     error: None,
                 },
             ],
-            // Everything else (incl. EnableRoce, EnsureModules) is a plain task.
+            // Everything else (incl. EnableRoce, RxeAdd, PartitionShrink) is a
+            // plain successful task.
             _ => vec![started, sub_ok, ok_finished],
         }
     }

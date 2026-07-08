@@ -2,8 +2,9 @@
 //! Hardware-RoCE enablement (`devlink`) lives in [`crate::hardware`], behind the
 //! `NetworkHardware` trait.
 
-use crate::cmd::TaskSpec;
-use greendot_proto::{KernelModule, NetdevName};
+use crate::cmd::{self, TaskSpec};
+use greendot_proto::{KernelModule, NetdevName, SubStatus, Task};
+use std::io;
 
 fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
     match module {
@@ -31,8 +32,21 @@ pub fn ensure(modules: &[KernelModule]) -> Option<TaskSpec> {
     (names.len() > 1).then(|| TaskSpec::new("modprobe", names))
 }
 
+/// Enables Soft-RoCE on `netdev` as one task: load the rxe module, then add
+/// the rdma link (only if the load succeeded). `Err` only on a sink failure.
+pub fn rxe_add(task: &mut Task, netdev: &NetdevName) -> io::Result<()> {
+    if let Some(spec) = ensure(&[KernelModule::Rxe])
+        && cmd::run(task, "Load rxe module", &spec)? != SubStatus::Success
+    {
+        return Ok(());
+    }
+    let spec = rxe_link_add(netdev);
+    cmd::run(task, format!("Add Soft-RoCE link on {netdev}"), &spec)?;
+    Ok(())
+}
+
 /// `rdma link add rxe-<netdev> type rxe netdev <netdev>` (Soft-RoCE).
-pub fn rxe_link_add(netdev: &NetdevName) -> TaskSpec {
+fn rxe_link_add(netdev: &NetdevName) -> TaskSpec {
     TaskSpec::new(
         "rdma",
         [

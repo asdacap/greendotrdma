@@ -12,12 +12,12 @@
 
 use crate::pb;
 use crate::{
-    BackstoreName, BlockDev, CallRequest, DatasetName, DevicePath, ErrKind, Iqn, KernelModule,
-    LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvName, LvmReport,
-    MountPath, MountPoint, NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath,
-    NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName,
-    PartLabel, PoolName, Response, Secret, SnapName, SubStatus, TaskEvent, TaskRequest, Transport,
-    Username, ValidationError, VdevLayout, VgName,
+    BackstoreName, BlockDev, CallRequest, DatasetName, DevicePath, ErrKind, Iqn, LioBackstoreSpec,
+    LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvName, LvmReport, MountPoint,
+    NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn,
+    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName, PartLabel, PoolName,
+    Response, Secret, SnapName, SubStatus, TaskEvent, TaskRequest, Transport, Username,
+    ValidationError, VdevLayout, VgName,
 };
 use std::net::IpAddr;
 
@@ -164,37 +164,6 @@ impl TryFrom<pb::LvmReportKind> for LvmReport {
     }
 }
 
-impl From<KernelModule> for pb::KernelModule {
-    fn from(m: KernelModule) -> Self {
-        match m {
-            KernelModule::NvmetLoop => pb::KernelModule::NvmetLoop,
-            KernelModule::NvmetTcp => pb::KernelModule::NvmetTcp,
-            KernelModule::NvmetRdma => pb::KernelModule::NvmetRdma,
-            KernelModule::Iscsi => pb::KernelModule::Iscsi,
-            KernelModule::Iser => pb::KernelModule::Iser,
-            KernelModule::Rxe => pb::KernelModule::Rxe,
-            KernelModule::Rpcrdma => pb::KernelModule::Rpcrdma,
-        }
-    }
-}
-impl TryFrom<pb::KernelModule> for KernelModule {
-    type Error = ConvertError;
-    fn try_from(m: pb::KernelModule) -> Result<Self, ConvertError> {
-        Ok(match m {
-            pb::KernelModule::NvmetLoop => KernelModule::NvmetLoop,
-            pb::KernelModule::NvmetTcp => KernelModule::NvmetTcp,
-            pb::KernelModule::NvmetRdma => KernelModule::NvmetRdma,
-            pb::KernelModule::Iscsi => KernelModule::Iscsi,
-            pb::KernelModule::Iser => KernelModule::Iser,
-            pb::KernelModule::Rxe => KernelModule::Rxe,
-            pb::KernelModule::Rpcrdma => KernelModule::Rpcrdma,
-            pb::KernelModule::Unspecified => {
-                return Err(ConvertError("unspecified kernel module".into()));
-            }
-        })
-    }
-}
-
 impl From<ErrKind> for pb::ErrKind {
     fn from(k: ErrKind) -> Self {
         match k {
@@ -228,16 +197,6 @@ impl TryFrom<pb::ErrKind> for ErrKind {
 
 /// Decode a prost `i32` enumeration field into its proto enum, rejecting values
 /// outside the schema.
-fn dec_kernel_modules(v: Vec<i32>) -> Result<Vec<KernelModule>, ConvertError> {
-    v.into_iter()
-        .map(|i| {
-            let p = pb::KernelModule::try_from(i)
-                .map_err(|_| ConvertError(format!("unknown kernel module {i}")))?;
-            KernelModule::try_from(p)
-        })
-        .collect()
-}
-
 fn dec_transport(i: i32) -> Result<Transport, ConvertError> {
     let p =
         pb::Transport::try_from(i).map_err(|_| ConvertError(format!("unknown transport {i}")))?;
@@ -612,38 +571,14 @@ impl From<TaskRequest> for pb::TaskRequest {
                     number,
                 })
             }
-            TaskRequest::PartitionResize {
+            TaskRequest::PartitionShrink {
                 disk,
                 number,
                 size_sectors,
-            } => Op::PartitionResize(pb::PartitionResize {
+            } => Op::PartitionShrink(pb::PartitionShrink {
                 disk: disk.as_str().to_owned(),
                 number,
                 size_sectors,
-            }),
-            TaskRequest::Fsck { device } => Op::Fsck(pb::Fsck {
-                device: device.as_str().to_owned(),
-            }),
-            TaskRequest::ResizeExt {
-                device,
-                new_size_sectors,
-            } => Op::ResizeExt(pb::ResizeExt {
-                device: device.as_str().to_owned(),
-                new_size_sectors,
-            }),
-            TaskRequest::BtrfsMount { device, mount_path } => Op::BtrfsMount(pb::BtrfsMount {
-                device: device.as_str().to_owned(),
-                mount_path: mount_path.as_str().to_owned(),
-            }),
-            TaskRequest::BtrfsResize {
-                mount_path,
-                new_size,
-            } => Op::BtrfsResize(pb::BtrfsResize {
-                mount_path: mount_path.as_str().to_owned(),
-                new_size,
-            }),
-            TaskRequest::Umount { mount_path } => Op::Umount(pb::Umount {
-                mount_path: mount_path.as_str().to_owned(),
             }),
             TaskRequest::PoolCreate {
                 name,
@@ -737,13 +672,7 @@ impl From<TaskRequest> for pb::TaskRequest {
             }),
             TaskRequest::NfsReport => Op::NfsReport(pb::Empty {}),
             TaskRequest::Reconcile => Op::Reconcile(pb::Reconcile {}),
-            TaskRequest::EnsureModules { modules } => Op::EnsureModules(pb::EnsureModules {
-                modules: modules
-                    .into_iter()
-                    .map(|m| pb::KernelModule::from(m) as i32)
-                    .collect(),
-            }),
-            TaskRequest::RxeLinkAdd { netdev } => Op::RxeLinkAdd(pb::RxeLinkAdd {
+            TaskRequest::RxeAdd { netdev } => Op::RxeAdd(pb::RxeAdd {
                 netdev: netdev.as_str().to_owned(),
             }),
             TaskRequest::RoceCapableNics => Op::RoceCapableNics(pb::Empty {}),
@@ -826,28 +755,10 @@ impl TryFrom<pb::TaskRequest> for TaskRequest {
                 disk: BlockDev::new(p.disk)?,
                 number: p.number,
             },
-            Op::PartitionResize(p) => TaskRequest::PartitionResize {
+            Op::PartitionShrink(p) => TaskRequest::PartitionShrink {
                 disk: BlockDev::new(p.disk)?,
                 number: p.number,
                 size_sectors: p.size_sectors,
-            },
-            Op::Fsck(f) => TaskRequest::Fsck {
-                device: DevicePath::new(f.device)?,
-            },
-            Op::ResizeExt(r) => TaskRequest::ResizeExt {
-                device: DevicePath::new(r.device)?,
-                new_size_sectors: r.new_size_sectors,
-            },
-            Op::BtrfsMount(b) => TaskRequest::BtrfsMount {
-                device: DevicePath::new(b.device)?,
-                mount_path: MountPath::new(b.mount_path)?,
-            },
-            Op::BtrfsResize(b) => TaskRequest::BtrfsResize {
-                mount_path: MountPath::new(b.mount_path)?,
-                new_size: b.new_size,
-            },
-            Op::Umount(u) => TaskRequest::Umount {
-                mount_path: MountPath::new(u.mount_path)?,
             },
             Op::PoolCreate(p) => TaskRequest::PoolCreate {
                 name: PoolName::new(p.name)?,
@@ -938,10 +849,7 @@ impl TryFrom<pb::TaskRequest> for TaskRequest {
             },
             Op::NfsReport(_) => TaskRequest::NfsReport,
             Op::Reconcile(_) => TaskRequest::Reconcile,
-            Op::EnsureModules(e) => TaskRequest::EnsureModules {
-                modules: dec_kernel_modules(e.modules)?,
-            },
-            Op::RxeLinkAdd(r) => TaskRequest::RxeLinkAdd {
+            Op::RxeAdd(r) => TaskRequest::RxeAdd {
                 netdev: NetdevName::new(r.netdev)?,
             },
             Op::RoceCapableNics(_) => TaskRequest::RoceCapableNics,
@@ -1148,9 +1056,12 @@ mod tests {
         name: LvName::new("vm1").unwrap(),
         virtual_size: 20 << 30,
     })]
-    #[case::modules(TaskRequest::EnsureModules {
-        modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
+    #[case::partition_shrink(TaskRequest::PartitionShrink {
+        disk: BlockDev::new("sdb").unwrap(),
+        number: 2,
+        size_sectors: 2097152,
     })]
+    #[case::rxe_add(TaskRequest::RxeAdd { netdev: NetdevName::new("eth0").unwrap() })]
     #[case::smart_health(TaskRequest::SmartHealth {
         devices: vec![BlockDev::new("sda").unwrap(), BlockDev::new("nvme0n1").unwrap()],
     })]
@@ -1336,7 +1247,7 @@ mod tests {
         bad(Op::ZvolDelete(pb::ZvolDelete {
             dataset: "../../etc".into(),
         }));
-        bad(Op::RxeLinkAdd(pb::RxeLinkAdd {
+        bad(Op::RxeAdd(pb::RxeAdd {
             netdev: "eth0/../x".into(),
         }));
         bad(Op::InstallPackages(pb::InstallPackages {
@@ -1356,9 +1267,10 @@ mod tests {
             name: "-bad".into(),
             devices: vec!["/dev/sdb".into()],
         }));
-        bad(Op::BtrfsResize(pb::BtrfsResize {
-            mount_path: "/run/greendotrdma/btrfs-resize-../etc".into(),
-            new_size: 1024,
+        bad(Op::PartitionShrink(pb::PartitionShrink {
+            disk: "../sda".into(),
+            number: 1,
+            size_sectors: 1024,
         }));
         bad(Op::EnableRoce(pb::EnableRoce {
             netdev: "eth0 ; reboot".into(),

@@ -106,14 +106,6 @@ pub(crate) fn pool_name(s: &str) -> bool {
             .any(|k| k.eq_ignore_ascii_case(s))
 }
 
-/// The helper's private btrfs temp-mount path: exactly
-/// `/run/greendotrdma/btrfs-resize-<block_dev>`, so no caller can point a root
-/// mount/umount at an arbitrary location.
-pub(crate) fn mount_path(s: &str) -> bool {
-    s.strip_prefix("/run/greendotrdma/btrfs-resize-")
-        .is_some_and(block_dev)
-}
-
 /// Absolute directory path to export over NFS (a ZFS mountpoint or any other
 /// mounted directory). It lands in a root-written exports file and as an
 /// `exportfs` argument, so it is validated conservatively: absolute, no `..`/`.`
