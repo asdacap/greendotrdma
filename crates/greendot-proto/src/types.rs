@@ -83,6 +83,10 @@ validated_string!(
     /// Absolute device path: `/dev/zvol/<dataset>` or `/dev/<dev>`.
     DevicePath, validate::device_path, "device path");
 validated_string!(
+    /// A `zpool remove`/`detach` target: a leaf device path or a named
+    /// top-level vdev, e.g. `mirror-0`, `raidz1-0`.
+    VdevTarget, validate::vdev_target, "vdev target");
+validated_string!(
     /// Network interface name (IFNAMSIZ-limited).
     NetdevName, validate::netdev, "netdev name");
 validated_string!(
@@ -596,6 +600,26 @@ mod tests {
     #[case::too_long(&"a".repeat(256), false)]
     fn pool_name(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(PoolName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::leaf("/dev/sdd", true)]
+    #[case::partition("/dev/nvme0n1p2", true)]
+    #[case::mirror("mirror-0", true)]
+    #[case::raidz("raidz1-0", true)]
+    #[case::raidz3("raidz3-12", true)]
+    #[case::spare("spare-0", true)]
+    #[case::special("special-3", true)]
+    #[case::empty("", false)]
+    #[case::bare_keyword("mirror", false)]
+    #[case::no_ordinal("mirror-", false)]
+    #[case::hex_ordinal("mirror-0x", false)]
+    #[case::unknown_keyword("foo-1", false)]
+    #[case::bare_device("sdd", false)]
+    #[case::injection("sdd; reboot", false)]
+    #[case::guid("1234567890123456", false)]
+    fn vdev_target(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(VdevTarget::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

@@ -8,7 +8,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, VdevLayout, ops};
+use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, VdevLayout, VdevTarget, ops};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -20,6 +20,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/pool", post(pool_create))
         .route("/zfs/pool/{name}", axum::routing::get(pool_detail_page))
         .route("/zfs/pool/{name}/add-device", post(pool_add_device))
+        .route("/zfs/pool/{name}/remove-device", post(pool_remove_device))
+        .route("/zfs/pool/{name}/detach-device", post(pool_detach_device))
         .route(
             "/zfs/pool/{pool}/zvol/{*rest}",
             axum::routing::get(zvol_detail_page),
@@ -115,11 +117,81 @@ async fn zfs_page(
 
 // ---- Per-pool page (zvol listing + creation) ----
 
+/// One row of the pool's device table: a top-level vdev or an indented leaf,
+/// with the actions the view builder decided apply to it (the template stays
+/// dumb; the helper re-validates regardless).
+pub struct MemberRow {
+    pub name: String,
+    /// Allocation-class tag next to the name (`log`, `cache`, …; empty for data).
+    pub class: String,
+    /// A leaf inside a mirror/raidz container — indented in the table.
+    pub is_child: bool,
+    pub size: String,
+    pub health: String,
+    pub can_remove: bool,
+    pub can_detach: bool,
+}
+
+/// Decides per-member actions. Detach applies to leaves inside a mirror.
+/// Remove is offered where `zpool remove` can succeed: any log/cache/spare
+/// member, and top-level data/special/dedup vdevs when the pool has no
+/// raidz (which blocks device evacuation) and more than one data vdev
+/// remains. These gates only hide doomed buttons — zpool re-checks anyway
+/// and the recorded task shows its stderr verbatim.
+fn member_rows(members: Vec<zfs::PoolMember>) -> Vec<MemberRow> {
+    use zfs::MemberClass as C;
+    let toplevel_data = |m: &&zfs::PoolMember| m.class == C::Data && m.parent.is_none();
+    let pool_has_raidz = members
+        .iter()
+        .filter(toplevel_data)
+        .any(|m| !m.is_leaf && (m.name.starts_with("raidz") || m.name.starts_with("draid")));
+    let data_toplevels = members.iter().filter(toplevel_data).count();
+    members
+        .into_iter()
+        .map(|m| {
+            let in_mirror = m
+                .parent
+                .as_deref()
+                .is_some_and(|p| p.starts_with("mirror-"));
+            let can_remove = m.parent.is_none()
+                && VdevTarget::new(&m.name).is_ok()
+                && match m.class {
+                    C::Data => {
+                        !pool_has_raidz
+                            && data_toplevels > 1
+                            && (m.is_leaf || m.name.starts_with("mirror-"))
+                    }
+                    C::Log | C::Cache | C::Spare => true,
+                    C::Special | C::Dedup => !pool_has_raidz,
+                };
+            MemberRow {
+                can_detach: m.is_leaf && in_mirror && DevicePath::new(&m.name).is_ok(),
+                can_remove,
+                is_child: m.parent.is_some(),
+                class: match m.class {
+                    C::Data => "",
+                    C::Log => "log",
+                    C::Cache => "cache",
+                    C::Spare => "spare",
+                    C::Special => "special",
+                    C::Dedup => "dedup",
+                }
+                .into(),
+                size: m.size.map_or("–".into(), human_bytes),
+                health: m.health.unwrap_or_else(|| "–".into()),
+                name: m.name,
+            }
+        })
+        .collect()
+}
+
 #[derive(Default)]
 pub struct PoolDetailView {
     pub name: String,
     /// `None` when the named pool doesn't exist on this host.
     pub pool: Option<PoolRow>,
+    /// The pool's vdev tree with per-row remove/detach actions.
+    pub members: Vec<MemberRow>,
     pub zvols: Vec<ZvolRow>,
     /// Child filesystem datasets in this pool (mount/unmount/destroy targets).
     pub fs_rows: Vec<FsRow>,
@@ -162,9 +234,10 @@ async fn gather_pool_detail(
         task_id,
         ..Default::default()
     };
-    match tokio::try_join!(zfs::pools(), zfs::datasets()) {
-        Ok((Some(pools), Some(datasets))) => {
+    match tokio::try_join!(zfs::pools(), zfs::datasets(), zfs::pool_vdevs()) {
+        Ok((Some(pools), Some(datasets), Some(vdevs))) => {
             view.pool = pools.into_iter().find(|p| p.name == name).map(PoolRow::new);
+            view.members = member_rows(vdevs.into_iter().filter(|m| m.pool == name).collect());
             // A vdev added to the pool must be an empty raw device, so offer the
             // same candidates as pool creation (no zvols, LVs, or formatted parts).
             if view.pool.is_some() {
@@ -664,6 +737,74 @@ async fn pool_add_device(
     .await
 }
 
+#[derive(Deserialize)]
+struct RemoveDeviceForm {
+    target: String,
+}
+
+/// Removes a leaf device or a whole top-level vdev from a pool (`zpool remove`
+/// plus `zpool wait -t remove`, so the task ends when evacuation completes).
+async fn pool_remove_device(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(form): Form<RemoveDeviceForm>,
+) -> Response {
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
+    };
+    let Ok(target) = VdevTarget::new(form.target.trim()) else {
+        return pool_op_failed(
+            &state,
+            &name,
+            format!("invalid remove target {:?}", form.target),
+        )
+        .await;
+    };
+    let req = ops::PoolDeviceRemove {
+        pool: pool.clone(),
+        target: target.clone(),
+    };
+    run_pool_op(
+        &state,
+        state.helper.pool_device_remove(req),
+        "pool-remove",
+        &format!("remove {target} from {pool}"),
+        &name,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+struct DetachDeviceForm {
+    device: String,
+}
+
+/// Detaches a leaf device from its mirror (`zpool detach`).
+async fn pool_detach_device(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(form): Form<DetachDeviceForm>,
+) -> Response {
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
+    };
+    let Ok(device) = DevicePath::new(form.device.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
+    };
+    let req = ops::PoolDeviceDetach {
+        pool: pool.clone(),
+        device: device.clone(),
+    };
+    run_pool_op(
+        &state,
+        state.helper.pool_device_detach(req),
+        "pool-detach",
+        &format!("detach {device} from {pool}"),
+        &name,
+    )
+    .await
+}
+
 // ---- Dedicated ZFS pool creation form ----
 
 pub struct PoolDeviceOption {
@@ -1067,6 +1208,45 @@ mod tests {
             ));
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("invalid pool name"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn pool_device_remove_and_detach_flow() {
+            let app = test_app();
+            let (cookie, csrf) = login(&app).await;
+            let auth = |mut req: HttpRequest<Body>| {
+                req.headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+                req.headers_mut()
+                    .insert("x-greendot-csrf", csrf.parse().unwrap());
+                req
+            };
+
+            // Remove takes vdev names and /dev paths; a bare vdev keyword is
+            // rejected before the helper.
+            let req = auth(form_post("/zfs/pool/tank/remove-device", "target=mirror-0"));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("started remove mirror-0 from tank"), "{body}");
+            let req = auth(form_post(
+                "/zfs/pool/tank/remove-device",
+                "target=%2Fdev%2Fsdd",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("started remove /dev/sdd from tank"), "{body}");
+            let req = auth(form_post("/zfs/pool/tank/remove-device", "target=mirror"));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid remove target"), "{body}");
+
+            // Detach only takes leaf device paths — a container is rejected.
+            let req = auth(form_post(
+                "/zfs/pool/tank/detach-device",
+                "device=%2Fdev%2Fsdc",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("started detach /dev/sdc from tank"), "{body}");
+            let req = auth(form_post("/zfs/pool/tank/detach-device", "device=mirror-0"));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid device"), "{body}");
         }
     }
 }

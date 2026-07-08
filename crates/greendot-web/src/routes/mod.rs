@@ -339,6 +339,8 @@ pub(crate) mod testutil {
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy;
             pool_create, PoolCreateStream, pb::PoolCreate;
             pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd;
+            pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove;
+            pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate;
             partition_create, PartitionCreateStream, pb::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete;
@@ -354,9 +356,6 @@ pub(crate) mod testutil {
             lv_shrink, LvShrinkStream, pb::LvShrink;
             lv_rename, LvRenameStream, pb::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete;
-            nvmet_apply, NvmetApplyStream, pb::NvmetApply;
-            lio_apply, LioApplyStream, pb::LioApply;
-            nfs_apply, NfsApplyStream, pb::NfsApply;
             reconcile, ReconcileStream, pb::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce;

@@ -130,35 +130,132 @@ pub fn parse_snapshot_list(out: &str) -> Result<Vec<Snapshot>> {
         .collect()
 }
 
-/// Device path → pool name, from `zpool list -vHP`. Pool header rows are not
-/// indented (their first column is the pool name); vdev/device rows are indented.
-/// Any indented row whose first token is a `/dev/...` path is a leaf device of
-/// the current pool. Container rows (`mirror-0`, `raidz1-0`, `logs`, `cache`, …)
-/// have a keyword first token and are skipped.
+/// Which allocation class a pool member belongs to, from the flush-left
+/// section labels of `zpool list -v` (`logs`, `cache`, `spare`, `special`,
+/// `dedup`; rows before any label are ordinary data vdevs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberClass {
+    Data,
+    Log,
+    Cache,
+    Spare,
+    Special,
+    Dedup,
+}
+
+impl MemberClass {
+    fn from_label(s: &str) -> Option<Self> {
+        Some(match s {
+            "logs" => MemberClass::Log,
+            "cache" => MemberClass::Cache,
+            "spare" => MemberClass::Spare,
+            "special" => MemberClass::Special,
+            "dedup" => MemberClass::Dedup,
+            _ => return None,
+        })
+    }
+}
+
+/// One row of a pool's vdev tree: a top-level vdev (`parent == None`) or a
+/// leaf inside a container (`parent == Some("mirror-0")`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolMember {
+    pub pool: String,
+    pub class: MemberClass,
+    /// `/dev/...` path (leaf), vdev name like `mirror-0`, or a bare GUID for
+    /// a missing device.
+    pub name: String,
+    /// A device (or missing-device GUID) rather than a vdev container.
+    pub is_leaf: bool,
+    /// The containing vdev's name for leaves inside a mirror/raidz.
+    pub parent: Option<String>,
+    pub size: Option<u64>,
+    pub alloc: Option<u64>,
+    pub health: Option<String>,
+}
+
+/// A named vdev container (`mirror-0`, `raidz1-0`, …) as opposed to a leaf.
+/// Reuses the `VdevTarget` grammar: valid non-path targets are containers.
+fn is_container(name: &str) -> bool {
+    !name.starts_with('/') && greendot_proto::VdevTarget::new(name).is_ok()
+}
+
+/// The pool vdev tree from `zpool list -vHPp`. Scripted output carries no
+/// indentation (every member row is one `\t` + 6 tab-separated fields), so
+/// structure is recovered from what zpool prints per row kind:
+/// - pool rows are flush-left; so are the class labels (`logs`, `cache`, …,
+///   space-padded columns) — those words are reserved pool names, so the
+///   first token distinguishes them;
+/// - `alloc`/`free` print `-` for anything that is not a top-level vdev, so
+///   a leaf with `alloc == -` after a container row is that container's
+///   child, while a top-level (stripe) leaf carries real numbers.
+pub fn parse_pool_vdevs(out: &str) -> Result<Vec<PoolMember>> {
+    let mut members = Vec::new();
+    let mut pool: Option<String> = None;
+    let mut class = MemberClass::Data;
+    let mut container: Option<String> = None;
+    for line in out.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if !line.starts_with([' ', '\t']) {
+            let first = line.split_whitespace().next().unwrap_or_default();
+            if let Some(c) = MemberClass::from_label(first) {
+                class = c;
+            } else {
+                pool = Some(first.to_string());
+                class = MemberClass::Data;
+            }
+            container = None;
+            continue;
+        }
+        let f = fields(line.trim_start_matches([' ', '\t']), 6)?;
+        let pool = pool
+            .clone()
+            .with_context(|| format!("member row before any pool: {line:?}"))?;
+        let (name, alloc) = (f[0], opt_num::<u64>(f[2])?);
+        // `-` in alloc marks a non-top-level row (a child of the last
+        // container); real numbers mark a top-level vdev or leaf.
+        let parent = if alloc.is_some() {
+            None
+        } else {
+            container.clone()
+        };
+        if is_container(name) {
+            container = Some(name.to_string());
+        } else if alloc.is_some() {
+            container = None;
+        }
+        members.push(PoolMember {
+            pool,
+            class,
+            name: name.to_string(),
+            is_leaf: !is_container(name),
+            parent,
+            size: opt_num(f[1])?,
+            alloc,
+            health: match f[5] {
+                "-" => None,
+                h => Some(h.to_string()),
+            },
+        });
+    }
+    Ok(members)
+}
+
+/// Device path → pool name: the leaves of [`parse_pool_vdevs`] (a parse
+/// error degrades to the empty map, matching the old lenient behaviour).
 ///
 /// v1 limitation: members are matched verbatim against the lsblk `/dev/<name>`
 /// paths, so a pool created against a `/dev/disk/by-id/...` path is recorded here
 /// but won't match a bare device row — lsblk's `zfs_member` remains the fallback.
 pub fn parse_pool_members(out: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    let mut current_pool: Option<String> = None;
-    for line in out.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-        let indented = line.starts_with([' ', '\t']);
-        let Some(first) = line.split_whitespace().next() else {
-            continue;
-        };
-        if !indented {
-            current_pool = Some(first.to_string());
-        } else if first.starts_with('/')
-            && let Some(pool) = &current_pool
-        {
-            map.insert(first.to_string(), pool.clone());
-        }
-    }
-    map
+    parse_pool_vdevs(out)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| m.is_leaf && m.name.starts_with('/'))
+        .map(|m| (m.name, m.pool))
+        .collect()
 }
 
 /// Runs `argv`, returning `None` when the binary isn't installed — a missing
@@ -196,18 +293,30 @@ pub async fn pools() -> Result<Option<Vec<Pool>>> {
     .transpose()
 }
 
-/// `zpool list -vHP` → device path → pool name. `None` when zpool isn't
-/// installed (ZFS absent), like [`pools`].
+/// `zpool list -vHPp`: `-v` per-vdev rows, `-P` full leaf paths, `-p` exact
+/// numbers. Feeds both [`pool_members`] and [`pool_vdevs`].
+const ZPOOL_LIST_VDEVS: &[&str] = &[
+    "zpool",
+    "list",
+    "-vHPp",
+    "-o",
+    "name,size,alloc,free,frag,health",
+];
+
+/// Device path → pool name. `None` when zpool isn't installed (ZFS absent),
+/// like [`pools`].
 pub async fn pool_members() -> Result<Option<HashMap<String, String>>> {
-    Ok(run(&[
-        "zpool",
-        "list",
-        "-vHP",
-        "-o",
-        "name,size,alloc,free,frag,health",
-    ])
-    .await?
-    .map(|out| parse_pool_members(&out)))
+    Ok(run(ZPOOL_LIST_VDEVS)
+        .await?
+        .map(|out| parse_pool_members(&out)))
+}
+
+/// The full vdev tree of every pool. `None` when zpool isn't installed.
+pub async fn pool_vdevs() -> Result<Option<Vec<PoolMember>>> {
+    run(ZPOOL_LIST_VDEVS)
+        .await?
+        .map(|out| parse_pool_vdevs(&out))
+        .transpose()
 }
 
 pub async fn datasets() -> Result<Option<Vec<Dataset>>> {
@@ -276,6 +385,87 @@ mod tests {
             "non-numeric size must error"
         );
         assert_eq!(parse_zpool_list("").unwrap(), vec![]);
+    }
+
+    /// `zpool list -vHPp` fixture matching the scripted-mode emitter: member
+    /// rows are `\t` + 6 tab-separated fields with NO depth indentation;
+    /// `alloc`/`free` are `-` for non-top-level rows; class labels are
+    /// flush-left space-padded lines. Covers a mirror + top-level stripe leaf
+    /// + log mirror + cache + spare, and a second raidz1 pool.
+    const VDEV_FIXTURE: &str = "\
+tank\t3985729650688\t1099511627776\t2886218022912\t4\tONLINE
+\tmirror-0\t1992864825344\t549755813888\t1443109011456\t4\tONLINE
+\t/dev/sdb1\t2000398934016\t-\t-\t-\tONLINE
+\t/dev/sdc1\t2000398934016\t-\t-\t-\tONLINE
+\t/dev/sdd1\t1992864825344\t549755813888\t1443109011456\t4\tONLINE
+logs         -      -      -      -      -
+\tmirror-1\t17179869184\t0\t17179869184\t0\tONLINE
+\t/dev/sde1\t-\t-\t-\t-\tONLINE
+\t/dev/sdf1\t-\t-\t-\t-\tONLINE
+cache        -      -      -      -      -
+\t/dev/sdg\t480103981056\t120000000000\t360103981056\t0\tONLINE
+spare        -      -      -      -      -
+\t/dev/sdh\t-\t-\t-\t-\tAVAIL
+rz\t11990251733248\t2199023255552\t9791228477696\t1\tONLINE
+\traidz1-0\t11990251733248\t2199023255552\t9791228477696\t1\tONLINE
+\t/dev/sdi\t-\t-\t-\t-\tONLINE
+\t/dev/sdj\t-\t-\t-\t-\tONLINE
+";
+
+    #[test]
+    fn parses_vdev_tree_with_classes_containers_and_toplevel_leaves() {
+        let m = parse_pool_vdevs(VDEV_FIXTURE).unwrap();
+        let row = |name: &str| m.iter().find(|r| r.name == name).unwrap();
+
+        assert_eq!(m.len(), 12, "one row per member, pools/labels excluded");
+        // Containers vs leaves, and child attribution by `alloc == -`.
+        let mirror = row("mirror-0");
+        assert_eq!(
+            (mirror.is_leaf, mirror.parent.as_deref(), mirror.class),
+            (false, None, MemberClass::Data)
+        );
+        assert_eq!(mirror.alloc, Some(549_755_813_888));
+        assert_eq!(row("/dev/sdb1").parent.as_deref(), Some("mirror-0"));
+        assert_eq!(row("/dev/sdb1").size, Some(2_000_398_934_016));
+        // Top-level stripe leaf after the mirror's children: real alloc ⇒ no parent.
+        let stripe = row("/dev/sdd1");
+        assert_eq!((stripe.is_leaf, stripe.parent.as_deref()), (true, None));
+        // Log mirror and its legs.
+        assert_eq!(row("mirror-1").class, MemberClass::Log);
+        assert_eq!(
+            (row("/dev/sde1").class, row("/dev/sde1").parent.as_deref()),
+            (MemberClass::Log, Some("mirror-1"))
+        );
+        // Cache and spare sections.
+        assert_eq!(
+            (row("/dev/sdg").class, row("/dev/sdg").parent.as_deref()),
+            (MemberClass::Cache, None)
+        );
+        assert_eq!(
+            (row("/dev/sdh").class, row("/dev/sdh").health.as_deref()),
+            (MemberClass::Spare, Some("AVAIL"))
+        );
+        // Second pool resets pool/class/container state.
+        assert_eq!(row("raidz1-0").pool, "rz");
+        assert_eq!(
+            (
+                row("/dev/sdi").pool.as_str(),
+                row("/dev/sdi").parent.as_deref()
+            ),
+            ("rz", Some("raidz1-0"))
+        );
+
+        // The device→pool map is a derivation of the same parse.
+        let map = parse_pool_members(VDEV_FIXTURE);
+        assert_eq!(map.get("/dev/sdb1"), Some(&"tank".to_string()));
+        assert_eq!(map.get("/dev/sdi"), Some(&"rz".to_string()));
+        assert!(!map.contains_key("mirror-0"));
+
+        assert_eq!(parse_pool_vdevs("").unwrap(), vec![]);
+        assert!(
+            parse_pool_vdevs("tank\t1\t1\t1\t-\tONLINE\n\t/dev/sdb\toops\t-\t-\t-\t-\n").is_err(),
+            "non-numeric size must error"
+        );
     }
 
     #[test]

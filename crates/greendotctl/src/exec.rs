@@ -9,7 +9,7 @@
 
 use crate::cmd::TaskSpec;
 use crate::{
-    cmd, fs, hardware, install, lio, lvm, modules, nfs, nvmet, partition, reconcile, smart, zfs,
+    cmd, fs, hardware, install, lvm, modules, nfs, nvmet, partition, reconcile, smart, zfs,
 };
 use greendot_proto::actual::nic::NicAdvice;
 use greendot_proto::{ConvertError, SubStatus, Task, ops, pb};
@@ -92,6 +92,8 @@ spec_op! {
     ops::PoolCreate = pb::PoolCreate,
         |o| zfs::pool_create(&o.name, o.vdev, &o.devices, o.ashift);
     ops::PoolDeviceAdd = pb::PoolDeviceAdd, |o| zfs::pool_device_add(&o.pool, &o.device);
+    ops::PoolDeviceDetach = pb::PoolDeviceDetach,
+        |o| zfs::pool_device_detach(&o.pool, &o.device);
     ops::PartitionTableCreate = pb::PartitionTableCreate, |o| partition::table_create(&o.disk);
     ops::PartitionCreate = pb::PartitionCreate,
         |o| partition::partition_create(&o.disk, o.start_sector, o.size_sectors, &o.label);
@@ -110,35 +112,16 @@ spec_op! {
     ops::LvShrink = pb::LvShrink, |o| lvm::lv_shrink(&o.vg, &o.name, o.new_size);
     ops::LvRename = pb::LvRename, |o| lvm::lv_rename(&o.vg, &o.name, &o.new_name);
     ops::LvDelete = pb::LvDelete, |o| lvm::lv_delete(&o.vg, &o.name);
-    ops::LioApply = pb::LioApply, |o| lio::apply_spec(&o.desired);
     ops::SmartReport = pb::SmartReport, |o| smart::report(&o.device);
     ops::RdmaResources = pb::Empty, |_o| modules::rdma_resources();
 }
 
 // ---- Compound / special task ops ----
 
-impl TaskOp for ops::NvmetApply {
-    type Wire = pb::NvmetApply;
+impl TaskOp for ops::PoolDeviceRemove {
+    type Wire = pb::PoolDeviceRemove;
     fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
-        let mut sub = task.begin_subtask("Apply NVMe-oF configuration");
-        let status = nvmet::apply(&self.desired, Path::new(nvmet::NVMET_ROOT), &mut sub)?;
-        sub.complete(status);
-        Ok(())
-    }
-}
-
-impl TaskOp for ops::NfsApply {
-    type Wire = pb::NfsApply;
-    fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
-        let mut sub = task.begin_subtask("Apply NFS configuration");
-        let status = nfs::apply(
-            &self.desired,
-            Path::new(nfs::NFS_EXPORTS_FILE),
-            Path::new(nfs::NFSD_PORTLIST),
-            &mut sub,
-        )?;
-        sub.complete(status);
-        Ok(())
+        zfs::pool_device_remove_and_wait(task, &self.pool, &self.target)
     }
 }
 

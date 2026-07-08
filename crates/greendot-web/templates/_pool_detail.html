@@ -30,6 +30,69 @@
   </table>
   {% endif %}
 
+  <h2>Devices</h2>
+  {% if view.members.is_empty() %}
+  <p class="empty">No device information available for this pool.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Device</th><th>Size</th><th>Health</th><th></th></tr></thead>
+    <tbody>
+      {% for m in view.members %}
+      <tr>
+        <td>
+          {% if m.is_child %}<span class="muted">└</span> {% endif %}{{ m.name }}
+          {% if !m.class.is_empty() %}<span class="muted small">{{ m.class }}</span>{% endif %}
+        </td>
+        <td>{{ m.size }}</td>
+        <td>{{ m.health }}</td>
+        <td>
+          <div class="rowactions">
+            {% if m.can_detach %}
+            <button type="button" class="dialog-trigger" data-dialog-open>Detach</button>
+            <dialog>
+              <article>
+                <header>Detach {{ m.name }} — {{ view.name }}</header>
+                <form class="card" hx-post="/zfs/pool/{{ view.name }}/detach-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="device" value="{{ m.name }}">
+                  <p class="muted small">The device is detached from its mirror; data stays on the remaining copies.</p>
+                  <label>Type <code>{{ m.name }}</code> to confirm
+                    <input data-confirm-match="{{ m.name }}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                  </label>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit" class="danger" disabled>Detach</button>
+                  </footer>
+                </form>
+              </article>
+            </dialog>
+            {% endif %}
+            {% if m.can_remove %}
+            <button type="button" class="dialog-trigger" data-dialog-open>Remove</button>
+            <dialog>
+              <article>
+                <header>Remove {{ m.name }} — {{ view.name }}</header>
+                <form class="card" hx-post="/zfs/pool/{{ view.name }}/remove-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="target" value="{{ m.name }}">
+                  <p class="muted small">Data on it is evacuated to the remaining vdevs first; the task finishes when evacuation completes.</p>
+                  <label>Type <code>{{ m.name }}</code> to confirm
+                    <input data-confirm-match="{{ m.name }}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+                  </label>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit" class="danger" disabled>Remove</button>
+                  </footer>
+                </form>
+              </article>
+            </dialog>
+            {% endif %}
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
   <button type="button" class="dialog-trigger" data-dialog-open>Add device</button>
   <dialog>
     <article>

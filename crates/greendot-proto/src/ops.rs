@@ -13,9 +13,9 @@
 use crate::convert::{dec_lvm_report, dec_vdev, map_new, strs, to_u8};
 use crate::pb;
 use crate::{
-    BlockDev, ConvertError, DatasetName, DevicePath, LioDesired, LvName,
-    LvmReport as LvmReportKind, MountPoint, NetdevName, NfsDesired, NvmetDesired, PackageName,
-    PartLabel, PoolName, Secret, SnapName, Username, VdevLayout, VgName,
+    BlockDev, ConvertError, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
+    MountPoint, NetdevName, PackageName, PartLabel, PoolName, Secret, SnapName, Username,
+    VdevLayout, VdevTarget, VgName,
 };
 
 /// Fieldless ops: a unit marker struct with the trivial (but still mandatory)
@@ -360,6 +360,57 @@ impl TryFrom<pb::PoolDeviceAdd> for PoolDeviceAdd {
 impl From<PoolDeviceAdd> for pb::PoolDeviceAdd {
     fn from(p: PoolDeviceAdd) -> Self {
         pb::PoolDeviceAdd {
+            pool: p.pool.as_str().to_owned(),
+            device: p.device.as_str().to_owned(),
+        }
+    }
+}
+
+/// `zpool remove` (plus a `zpool wait -t remove` subtask, so the task only
+/// finishes when evacuation completes). The whole task holds the mutate lock,
+/// so a long evacuation blocks other mutations until it returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolDeviceRemove {
+    pub pool: PoolName,
+    pub target: VdevTarget,
+}
+
+impl TryFrom<pb::PoolDeviceRemove> for PoolDeviceRemove {
+    type Error = ConvertError;
+    fn try_from(p: pb::PoolDeviceRemove) -> Result<Self, ConvertError> {
+        Ok(PoolDeviceRemove {
+            pool: PoolName::new(p.pool)?,
+            target: VdevTarget::new(p.target)?,
+        })
+    }
+}
+impl From<PoolDeviceRemove> for pb::PoolDeviceRemove {
+    fn from(p: PoolDeviceRemove) -> Self {
+        pb::PoolDeviceRemove {
+            pool: p.pool.as_str().to_owned(),
+            target: p.target.as_str().to_owned(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolDeviceDetach {
+    pub pool: PoolName,
+    pub device: DevicePath,
+}
+
+impl TryFrom<pb::PoolDeviceDetach> for PoolDeviceDetach {
+    type Error = ConvertError;
+    fn try_from(p: pb::PoolDeviceDetach) -> Result<Self, ConvertError> {
+        Ok(PoolDeviceDetach {
+            pool: PoolName::new(p.pool)?,
+            device: DevicePath::new(p.device)?,
+        })
+    }
+}
+impl From<PoolDeviceDetach> for pb::PoolDeviceDetach {
+    fn from(p: PoolDeviceDetach) -> Self {
+        pb::PoolDeviceDetach {
             pool: p.pool.as_str().to_owned(),
             device: p.device.as_str().to_owned(),
         }
@@ -829,80 +880,6 @@ impl From<LvDelete> for pb::LvDelete {
     }
 }
 
-// ---- Desired-state applies ----
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NvmetApply {
-    pub desired: NvmetDesired,
-}
-
-impl TryFrom<pb::NvmetApply> for NvmetApply {
-    type Error = ConvertError;
-    fn try_from(n: pb::NvmetApply) -> Result<Self, ConvertError> {
-        Ok(NvmetApply {
-            desired: n
-                .desired
-                .ok_or_else(|| ConvertError("nvmet_apply missing desired".into()))?
-                .try_into()?,
-        })
-    }
-}
-impl From<NvmetApply> for pb::NvmetApply {
-    fn from(n: NvmetApply) -> Self {
-        pb::NvmetApply {
-            desired: Some(n.desired.into()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LioApply {
-    pub desired: LioDesired,
-}
-
-impl TryFrom<pb::LioApply> for LioApply {
-    type Error = ConvertError;
-    fn try_from(l: pb::LioApply) -> Result<Self, ConvertError> {
-        Ok(LioApply {
-            desired: l
-                .desired
-                .ok_or_else(|| ConvertError("lio_apply missing desired".into()))?
-                .try_into()?,
-        })
-    }
-}
-impl From<LioApply> for pb::LioApply {
-    fn from(l: LioApply) -> Self {
-        pb::LioApply {
-            desired: Some(l.desired.into()),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct NfsApply {
-    pub desired: NfsDesired,
-}
-
-impl TryFrom<pb::NfsApply> for NfsApply {
-    type Error = ConvertError;
-    fn try_from(n: pb::NfsApply) -> Result<Self, ConvertError> {
-        Ok(NfsApply {
-            desired: n
-                .desired
-                .ok_or_else(|| ConvertError("nfs_apply missing desired".into()))?
-                .try_into()?,
-        })
-    }
-}
-impl From<NfsApply> for pb::NfsApply {
-    fn from(n: NfsApply) -> Self {
-        pb::NfsApply {
-            desired: Some(n.desired.into()),
-        }
-    }
-}
-
 // ---- System ----
 
 /// Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
@@ -1019,11 +996,6 @@ unit_op!(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Iqn, LioBackstoreSpec, LioLunSpec, LioPortalSpec, LioTargetSpec, NFS_RDMA_PORT, NfsClient,
-        NfsClientSpec, NfsExportPath, NfsExportSpec, Nqn, NvmetNsSpec, NvmetPortSpec,
-        NvmetSubsysSpec, Transport,
-    };
     use prost::Message;
 
     /// domain -> pb -> wire bytes -> pb -> domain must be the identity, through
@@ -1086,6 +1058,18 @@ mod tests {
             pool: PoolName::new("tank").unwrap(),
             device: DevicePath::new("/dev/sdd").unwrap(),
         } => pb::PoolDeviceAdd);
+        roundtrip!(PoolDeviceRemove {
+            pool: PoolName::new("tank").unwrap(),
+            target: VdevTarget::new("mirror-0").unwrap(),
+        } => pb::PoolDeviceRemove);
+        roundtrip!(PoolDeviceRemove {
+            pool: PoolName::new("tank").unwrap(),
+            target: VdevTarget::new("/dev/sdd").unwrap(),
+        } => pb::PoolDeviceRemove);
+        roundtrip!(PoolDeviceDetach {
+            pool: PoolName::new("tank").unwrap(),
+            device: DevicePath::new("/dev/sdc").unwrap(),
+        } => pb::PoolDeviceDetach);
         roundtrip!(PartitionTableCreate { disk: BlockDev::new("sdb").unwrap() } => pb::PartitionTableCreate);
         roundtrip!(PartitionCreate {
             disk: BlockDev::new("sdb").unwrap(),
@@ -1162,68 +1146,6 @@ mod tests {
             username: Username::new("alice").unwrap(),
             password: Secret("hunter2".into()),
         } => pb::Authenticate);
-    }
-
-    /// The nested desired-state documents survive the wire, exercising the
-    /// spec conversions in `convert` end to end.
-    #[test]
-    fn desired_state_applies_roundtrip() {
-        roundtrip!(NvmetApply {
-            desired: NvmetDesired {
-                subsystems: vec![NvmetSubsysSpec {
-                    nqn: Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap(),
-                    allow_any_host: false,
-                    allowed_hosts: vec![Nqn::new("nqn.2014-08.org.nvmexpress:host1").unwrap()],
-                    namespaces: vec![NvmetNsSpec {
-                        nsid: 1,
-                        device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
-                    }],
-                }],
-                ports: vec![NvmetPortSpec {
-                    id: 1,
-                    trtype: Transport::Rdma,
-                    traddr: "192.168.1.10".parse().unwrap(),
-                    trsvcid: 4420,
-                    subsystems: vec![Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap()],
-                }],
-            },
-        } => pb::NvmetApply);
-        roundtrip!(LioApply {
-            desired: LioDesired {
-                backstores: vec![LioBackstoreSpec {
-                    name: crate::BackstoreName::new("vm1").unwrap(),
-                    device_path: DevicePath::new("/dev/zvol/tank/vm1").unwrap(),
-                }],
-                targets: vec![LioTargetSpec {
-                    iqn: Iqn::new("iqn.2026-06.io.greendot:vm1").unwrap(),
-                    enabled: true,
-                    demo_mode: false,
-                    luns: vec![LioLunSpec {
-                        lun: 0,
-                        backstore: crate::BackstoreName::new("vm1").unwrap(),
-                    }],
-                    portals: vec![LioPortalSpec {
-                        addr: "::1".parse().unwrap(),
-                        port: 3260,
-                        iser: true,
-                    }],
-                    acls: vec![Iqn::new("iqn.1993-08.org.debian:01:abc").unwrap()],
-                }],
-            },
-        } => pb::LioApply);
-        roundtrip!(NfsApply {
-            desired: NfsDesired {
-                rdma_port: NFS_RDMA_PORT,
-                exports: vec![NfsExportSpec {
-                    path: NfsExportPath::new("/tank/share").unwrap(),
-                    fsid: 0x6700_0001,
-                    clients: vec![NfsClientSpec {
-                        client: NfsClient::new("192.168.101.0/24").unwrap(),
-                        rw: true,
-                    }],
-                }],
-            },
-        } => pb::NfsApply);
     }
 
     /// Ingress `TryFrom` rejects invalid payloads built directly on the wire
@@ -1315,32 +1237,24 @@ mod tests {
             })
             .is_err()
         );
-        assert!(NvmetApply::try_from(pb::NvmetApply { desired: None }).is_err());
         assert!(
-            NvmetApply::try_from(pb::NvmetApply {
-                desired: Some(pb::NvmetDesired {
-                    subsystems: vec![],
-                    ports: vec![pb::NvmetPortSpec {
-                        id: 70000, // > u16::MAX
-                        trtype: pb::Transport::Rdma as i32,
-                        traddr: "10.0.0.1".into(),
-                        trsvcid: 4420,
-                        subsystems: vec![],
-                    }],
-                }),
+            PoolDeviceRemove::try_from(pb::PoolDeviceRemove {
+                pool: "tank".into(),
+                target: "mirror".into(), // bare keyword, not a vdev name
             })
             .is_err()
         );
         assert!(
-            NfsApply::try_from(pb::NfsApply {
-                desired: Some(pb::NfsDesired {
-                    rdma_port: 20049,
-                    exports: vec![pb::NfsExportSpec {
-                        path: "/tank/../etc".into(),
-                        fsid: 1,
-                        clients: vec![],
-                    }],
-                }),
+            PoolDeviceRemove::try_from(pb::PoolDeviceRemove {
+                pool: "tank".into(),
+                target: "sdd; reboot".into(),
+            })
+            .is_err()
+        );
+        assert!(
+            PoolDeviceDetach::try_from(pb::PoolDeviceDetach {
+                pool: "tank".into(),
+                device: "mirror-0".into(), // containers are not detachable
             })
             .is_err()
         );

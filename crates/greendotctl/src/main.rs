@@ -421,6 +421,8 @@ helper_impl! {
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy, ops::ZfsDestroy;
             pool_create, PoolCreateStream, pb::PoolCreate, ops::PoolCreate;
             pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd, ops::PoolDeviceAdd;
+            pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove, ops::PoolDeviceRemove;
+            pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach, ops::PoolDeviceDetach;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate, ops::PartitionTableCreate;
             partition_create, PartitionCreateStream, pb::PartitionCreate, ops::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete, ops::PartitionDelete;
@@ -437,9 +439,6 @@ helper_impl! {
             lv_shrink, LvShrinkStream, pb::LvShrink, ops::LvShrink;
             lv_rename, LvRenameStream, pb::LvRename, ops::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete, ops::LvDelete;
-            nvmet_apply, NvmetApplyStream, pb::NvmetApply, ops::NvmetApply;
-            lio_apply, LioApplyStream, pb::LioApply, ops::LioApply;
-            nfs_apply, NfsApplyStream, pb::NfsApply, ops::NfsApply;
             reconcile, ReconcileStream, pb::Reconcile, ops::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd, ops::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce, ops::EnableRoce;

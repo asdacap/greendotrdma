@@ -1,8 +1,12 @@
 //! ZFS mutations as `zfs` CLI tasks. Reads happen unprivileged in greendot-web.
 
-use crate::cmd::TaskSpec;
+use crate::cmd::{self, TaskSpec};
 use crate::util::s;
-use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, SnapName, VdevLayout};
+use greendot_proto::{
+    DatasetName, DevicePath, MountPoint, PoolName, SnapName, SubStatus, Task, VdevLayout,
+    VdevTarget,
+};
+use std::io;
 
 fn spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zfs", args)
@@ -73,6 +77,46 @@ pub fn pool_create(
 /// that would reduce the pool's redundancy, which is the desired behaviour.
 pub fn pool_device_add(pool: &PoolName, device: &DevicePath) -> TaskSpec {
     zpool_spec(s(&["add", pool.as_str(), device.as_str()]))
+}
+
+/// `zpool remove <pool> <target>` — a leaf device or a top-level vdev name.
+pub fn pool_device_remove(pool: &PoolName, target: &VdevTarget) -> TaskSpec {
+    zpool_spec(s(&["remove", pool.as_str(), target.as_str()]))
+}
+
+/// `zpool wait -t remove <pool>` — blocks until device evacuation completes.
+pub fn pool_wait_remove(pool: &PoolName) -> TaskSpec {
+    zpool_spec(s(&["wait", "-t", "remove", pool.as_str()]))
+}
+
+/// `zpool detach <pool> <device>` — take a leaf device out of its mirror.
+pub fn pool_device_detach(pool: &PoolName, device: &DevicePath) -> TaskSpec {
+    zpool_spec(s(&["detach", pool.as_str(), device.as_str()]))
+}
+
+/// `zpool remove` then `zpool wait -t remove` as one task, so the task only
+/// finishes when evacuation completes (instant for log/cache/spare devices).
+/// The wait is skipped when the remove itself failed — it would otherwise
+/// succeed vacuously and paint a green subtask after the failure.
+pub fn pool_device_remove_and_wait(
+    task: &mut Task,
+    pool: &PoolName,
+    target: &VdevTarget,
+) -> io::Result<()> {
+    if cmd::run(
+        task,
+        format!("Remove {target} from {pool}"),
+        &pool_device_remove(pool, target),
+    )? != SubStatus::Success
+    {
+        return Ok(());
+    }
+    cmd::run(
+        task,
+        format!("Wait for {pool} device evacuation"),
+        &pool_wait_remove(pool),
+    )?;
+    Ok(())
 }
 
 /// `zfs create [-o mountpoint=<p>] <dataset>` — a filesystem dataset (no `-V`,
@@ -182,6 +226,19 @@ mod tests {
         assert_eq!(spec.command, "zpool");
         assert_eq!(spec.args, s(&["add", "tank", "/dev/sdd"]));
         assert!(!spec.args.iter().any(|a| a == "-f"), "no forced add");
+    }
+
+    #[rstest]
+    #[case::remove_vdev(pool_device_remove(&pool(), &VdevTarget::new("mirror-0").unwrap()),
+        &["remove", "tank", "mirror-0"])]
+    #[case::remove_leaf(pool_device_remove(&pool(), &VdevTarget::new("/dev/sdd").unwrap()),
+        &["remove", "tank", "/dev/sdd"])]
+    #[case::wait(pool_wait_remove(&pool()), &["wait", "-t", "remove", "tank"])]
+    #[case::detach(pool_device_detach(&pool(), &dp("/dev/sdc")), &["detach", "tank", "/dev/sdc"])]
+    fn pool_remove_detach_args(#[case] spec: TaskSpec, #[case] expected: &[&str]) {
+        assert_eq!(spec.command, "zpool");
+        assert_eq!(spec.args, s(expected));
+        assert!(!spec.args.iter().any(|a| a == "-f"), "no forced removal");
     }
 
     #[test]

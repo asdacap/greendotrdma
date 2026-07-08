@@ -176,6 +176,8 @@ impl HelperClient {
         zfs_destroy(ops::ZfsDestroy => pb::ZfsDestroy);
         pool_create(ops::PoolCreate => pb::PoolCreate);
         pool_device_add(ops::PoolDeviceAdd => pb::PoolDeviceAdd);
+        pool_device_remove(ops::PoolDeviceRemove => pb::PoolDeviceRemove);
+        pool_device_detach(ops::PoolDeviceDetach => pb::PoolDeviceDetach);
         partition_table_create(ops::PartitionTableCreate => pb::PartitionTableCreate);
         partition_create(ops::PartitionCreate => pb::PartitionCreate);
         partition_delete(ops::PartitionDelete => pb::PartitionDelete);
@@ -192,9 +194,6 @@ impl HelperClient {
         lv_shrink(ops::LvShrink => pb::LvShrink);
         lv_rename(ops::LvRename => pb::LvRename);
         lv_delete(ops::LvDelete => pb::LvDelete);
-        nvmet_apply(ops::NvmetApply => pb::NvmetApply);
-        lio_apply(ops::LioApply => pb::LioApply);
-        nfs_apply(ops::NfsApply => pb::NfsApply);
         rxe_add(ops::RxeAdd => pb::RxeAdd);
         enable_roce(ops::EnableRoce => pb::EnableRoce);
         install_packages(ops::InstallPackages => pb::InstallPackages);

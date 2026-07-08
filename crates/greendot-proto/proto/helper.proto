@@ -47,6 +47,8 @@ service Helper {
   // ZFS pools.
   rpc PoolCreate(.greendot.helper.v1.PoolCreate) returns (stream TaskEvent);
   rpc PoolDeviceAdd(.greendot.helper.v1.PoolDeviceAdd) returns (stream TaskEvent);
+  rpc PoolDeviceRemove(.greendot.helper.v1.PoolDeviceRemove) returns (stream TaskEvent);
+  rpc PoolDeviceDetach(.greendot.helper.v1.PoolDeviceDetach) returns (stream TaskEvent);
 
   // Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
   rpc PartitionTableCreate(.greendot.helper.v1.PartitionTableCreate) returns (stream TaskEvent);
@@ -68,10 +70,7 @@ service Helper {
   rpc LvRename(.greendot.helper.v1.LvRename) returns (stream TaskEvent);
   rpc LvDelete(.greendot.helper.v1.LvDelete) returns (stream TaskEvent);
 
-  // NVMe-oF / iSCSI / NFS desired-state applies + the full reconcile pass.
-  rpc NvmetApply(.greendot.helper.v1.NvmetApply) returns (stream TaskEvent);
-  rpc LioApply(.greendot.helper.v1.LioApply) returns (stream TaskEvent);
-  rpc NfsApply(.greendot.helper.v1.NfsApply) returns (stream TaskEvent);
+  // Desired-state reconcile pass (the only apply path for NVMe-oF/iSCSI/NFS).
   rpc Reconcile(.greendot.helper.v1.Reconcile) returns (stream TaskEvent);
 
   // System setup.
@@ -271,6 +270,12 @@ message PoolCreate {
   optional uint32 ashift = 4;   // u8
 }
 message PoolDeviceAdd { string pool = 1; string device = 2; }
+// `zpool remove` as two subtasks: the remove itself, then `zpool wait -t
+// remove` so the task only finishes when evacuation completes. `target` is a
+// leaf device path or a top-level vdev name (`mirror-0`, `raidz1-0`, …).
+message PoolDeviceRemove { string pool = 1; string target = 2; }
+// `zpool detach <pool> <device>` — take a leaf device out of its mirror.
+message PoolDeviceDetach { string pool = 1; string device = 2; }
 
 message SmartReport { string device = 1; }
 message SmartHealth { repeated string devices = 1; }
@@ -288,9 +293,6 @@ message LvShrink { string vg = 1; string name = 2; uint64 new_size = 3; }
 message LvRename { string vg = 1; string name = 2; string new_name = 3; }
 message LvDelete { string vg = 1; string name = 2; }
 
-message NvmetApply { NvmetDesired desired = 1; }
-message LioApply { LioDesired desired = 1; }
-message NfsApply { NfsDesired desired = 1; }
 // Deliberately empty: the daemon reconciles against its own --config, so the
 // peer cannot name a file for root to read.
 message Reconcile { reserved 1; reserved "config"; }

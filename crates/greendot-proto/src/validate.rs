@@ -106,6 +106,19 @@ pub(crate) fn pool_name(s: &str) -> bool {
             .any(|k| k.eq_ignore_ascii_case(s))
 }
 
+/// A `zpool remove`/`detach` target: a leaf device path, or a named top-level
+/// vdev as printed by `zpool status`/`zpool list -v` — a reserved vdev keyword
+/// plus a numeric ordinal, e.g. `mirror-0`, `raidz1-0`. Bare GUIDs are
+/// deliberately excluded: the UI only ever submits names from our own parse.
+pub(crate) fn vdev_target(s: &str) -> bool {
+    device_path(s)
+        || s.split_once('-').is_some_and(|(kw, idx)| {
+            RESERVED_VDEV_KEYWORDS.contains(&kw)
+                && !idx.is_empty()
+                && idx.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
 /// Absolute directory path to export over NFS (a ZFS mountpoint or any other
 /// mounted directory). It lands in a root-written exports file and as an
 /// `exportfs` argument, so it is validated conservatively: absolute, no `..`/`.`
