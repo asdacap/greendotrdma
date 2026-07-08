@@ -50,12 +50,14 @@ impl ExportProtocol for Iscsi {
         form_error: Option<String>,
         task_id: Option<i64>,
     ) -> ExportsView {
-        gather_view(state, flash, form_error, task_id, |reconcile_task| {
-            let actual_lio = actual::lio::read(&state.lio_root);
-            let sessions = actual::lio::sessions(&state.lio_root);
-            let rdma = actual::rdma::devices();
+        // Actual state comes from the daemon (configfs/sysfs reads); fetch it up
+        // front so the sync row-builder closure can just render it.
+        let actual_lio = actual::lio::read(&state.helper).await;
+        let sessions = actual::lio::sessions(&state.helper).await;
+        let rdma = actual::rdma::devices(&state.helper).await;
+        let pci_addrs = actual::nic::pci_addrs(&state.helper).await;
+        gather_view(state, flash, form_error, task_id, move |reconcile_task| {
             let listen = listen_addr(state);
-            let pci_addrs = actual::nic::pci_addrs();
             let (mut rows, error): (Vec<ExportRow>, Option<String>) =
                 match state.db.list_iscsi_exports() {
                     Ok(exports) => (
@@ -307,9 +309,9 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
     let Some(export) = export else {
         return diagnose_not_found("iSCSI", "/iscsi");
     };
-    let rdma = actual::rdma::devices();
+    let rdma = actual::rdma::devices(&state.helper).await;
     let capable_disabled = capable_disabled_nics(state).await;
-    let lio = actual::lio::read(&state.lio_root);
+    let lio = actual::lio::read(&state.helper).await;
     let criteria = iscsi_diagnostics(&export, &lio, &rdma, &capable_disabled);
     let dot = iscsi_dot(&export, &lio, &rdma);
     DiagnoseView {

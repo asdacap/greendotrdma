@@ -264,6 +264,16 @@ message Request {
     Empty rdma_resources = 47;
     InstallPackages install_packages = 48;
     Reconcile reconcile = 49;
+    // Privileged/structural reads collected by the web (JSON on the task's
+    // stdout, like nfs_report). All fieldless — the daemon reads the canonical
+    // system paths and serializes a shared actual-state DTO.
+    Empty nvmet_report = 50;
+    Empty lio_report = 51;
+    Empty lio_sessions = 52;
+    Empty rdma_devices = 53;
+    Empty nic_pci_addrs = 54;
+    Empty nic_interfaces = 55;
+    Empty reconcile_dry_run = 56;
   }
 }
 

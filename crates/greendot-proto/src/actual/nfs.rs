@@ -1,13 +1,14 @@
-//! Actual NFS state parsers. The export table (`exportfs -s`) and the nfsd
-//! portlist (`/proc/fs/nfsd/portlist`, root-only) are fetched by a privileged
-//! reader — greendotctl's in-process reconcile driver, or the helper's
-//! `NfsReport` collected by the web — and parsed here. The parsers are pure
-//! and tested; only the fetch needs root.
+//! Actual NFS state DTOs and their pure parsers. The export table
+//! (`exportfs -s`) and the nfsd portlist (`/proc/fs/nfsd/portlist`, root-only)
+//! are fetched by a privileged reader — greendotctl's in-process reconcile
+//! driver, or the helper's `NfsReport` collected by the web — and parsed here.
+//! The parsers are pure and tested; only the fetch needs root.
 
-use greendot_proto::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL};
+use crate::{NFS_MANAGED_SENTINEL, NFS_PORTLIST_SENTINEL};
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ActualNfs {
     /// The live export table (`exportfs -s`) — includes foreign exports.
     pub exports: Vec<NfsExportEntry>,
@@ -20,7 +21,7 @@ pub struct ActualNfs {
     pub managed: BTreeSet<(String, String, bool)>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NfsExportEntry {
     pub path: String,
     pub clients: Vec<String>,

@@ -123,9 +123,9 @@ pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
         }
     }
     {
-        let nvmet = actual::nvmet::read(&state.nvmet_root);
-        let lio = actual::lio::read(&state.lio_root);
-        let rdma = actual::rdma::devices();
+        let nvmet = actual::nvmet::read(&state.helper).await;
+        let lio = actual::lio::read(&state.helper).await;
+        let rdma = actual::rdma::devices(&state.helper).await;
         let status_value = |d: dot::Dot| match d.state {
             DotState::Green => 2.0,
             DotState::Yellow => 1.0,

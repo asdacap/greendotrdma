@@ -4,7 +4,7 @@
 
 use crate::cmd::TaskSpec;
 use greendot_proto::PackageName;
-use greendot_reconcile::os::{OsInfo, PkgFamily};
+use greendot_proto::os::{OsInfo, PkgFamily};
 
 /// Build the install task for `packages` on the detected OS:
 /// - empty list → `Ok(None)` (nothing to install);

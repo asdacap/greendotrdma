@@ -50,11 +50,13 @@ impl ExportProtocol for Nvme {
         form_error: Option<String>,
         task_id: Option<i64>,
     ) -> ExportsView {
-        gather_view(state, flash, form_error, task_id, |reconcile_task| {
-            let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
-            let rdma = actual::rdma::devices();
+        // Actual state comes from the daemon (configfs/sysfs reads); fetch it up
+        // front so the sync row-builder closure can just render it.
+        let actual_nvmet = actual::nvmet::read(&state.helper).await;
+        let rdma = actual::rdma::devices(&state.helper).await;
+        let pci_addrs = actual::nic::pci_addrs(&state.helper).await;
+        gather_view(state, flash, form_error, task_id, move |reconcile_task| {
             let listen = listen_addr(state);
-            let pci_addrs = actual::nic::pci_addrs();
             let (mut rows, error): (Vec<ExportRow>, Option<String>) =
                 match state.db.list_nvme_exports() {
                     Ok(exports) => (
@@ -298,9 +300,9 @@ async fn gather_diagnose(state: &AppState, id: i64) -> DiagnoseView {
     let Some(export) = export else {
         return diagnose_not_found("NVMe-oF", "/nvme");
     };
-    let rdma = actual::rdma::devices();
+    let rdma = actual::rdma::devices(&state.helper).await;
     let capable_disabled = capable_disabled_nics(state).await;
-    let nvmet = actual::nvmet::read(&state.nvmet_root);
+    let nvmet = actual::nvmet::read(&state.helper).await;
     let criteria = nvme_diagnostics(&export, &nvmet, &rdma, &capable_disabled);
     let dot = nvme_dot(&export, &nvmet, &rdma);
     DiagnoseView {

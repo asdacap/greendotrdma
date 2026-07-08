@@ -720,6 +720,13 @@ impl From<Request> for pb::Request {
             Request::InstallPackages { packages } => Op::InstallPackages(pb::InstallPackages {
                 packages: strs(&packages),
             }),
+            Request::NvmetReport => Op::NvmetReport(pb::Empty {}),
+            Request::LioReport => Op::LioReport(pb::Empty {}),
+            Request::LioSessions => Op::LioSessions(pb::Empty {}),
+            Request::RdmaDevices => Op::RdmaDevices(pb::Empty {}),
+            Request::NicPciAddrs => Op::NicPciAddrs(pb::Empty {}),
+            Request::NicInterfaces => Op::NicInterfaces(pb::Empty {}),
+            Request::ReconcileDryRun => Op::ReconcileDryRun(pb::Empty {}),
         };
         pb::Request { op: Some(op) }
     }
@@ -916,6 +923,13 @@ impl TryFrom<pb::Request> for Request {
             Op::InstallPackages(i) => Request::InstallPackages {
                 packages: map_new(i.packages, PackageName::new)?,
             },
+            Op::NvmetReport(_) => Request::NvmetReport,
+            Op::LioReport(_) => Request::LioReport,
+            Op::LioSessions(_) => Request::LioSessions,
+            Op::RdmaDevices(_) => Request::RdmaDevices,
+            Op::NicPciAddrs(_) => Request::NicPciAddrs,
+            Op::NicInterfaces(_) => Request::NicInterfaces,
+            Op::ReconcileDryRun(_) => Request::ReconcileDryRun,
         })
     }
 }
@@ -1173,6 +1187,13 @@ mod tests {
     #[case::install(Request::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap()],
     })]
+    #[case::nvmet_report(Request::NvmetReport)]
+    #[case::lio_report(Request::LioReport)]
+    #[case::lio_sessions(Request::LioSessions)]
+    #[case::rdma_devices(Request::RdmaDevices)]
+    #[case::nic_pci_addrs(Request::NicPciAddrs)]
+    #[case::nic_interfaces(Request::NicInterfaces)]
+    #[case::reconcile_dry_run(Request::ReconcileDryRun)]
     fn request_wire_roundtrips(#[case] req: Request) {
         assert_eq!(wire_roundtrip(&req), req);
     }

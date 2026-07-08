@@ -1,33 +1,27 @@
-//! Per-NIC RDMA capability. The structural classification (pure over sysfs) moved
-//! to the shared `greendot-reconcile` crate; the one vendor-aware step — overlaying
-//! the helper's RoCE-capable / advisory verdicts — stays here on the web's async
-//! `HelperClient`. Re-exports the shared pure parts so `crate::actual::nic::*`
-//! paths keep working; the web carries no vendor knowledge itself.
+//! Per-NIC RDMA capability. Both the structural sysfs classification and the
+//! vendor-aware RoCE overlay run in the privileged daemon (`Request::NicInterfaces`
+//! combines them); the web collects the opaque `Vec<NicStatus>` JSON and renders
+//! it, carrying no vendor knowledge itself. Types come from the shared protocol
+//! crate.
 
 use crate::helper_client::HelperClient;
 use greendot_proto::Request;
 use std::collections::HashMap;
-use std::path::Path;
+use std::net::IpAddr;
 
-pub use greendot_reconcile::actual::nic::*;
+pub use greendot_proto::actual::nic::*;
 
-/// Live NIC classification from `/sys`, with the RoCE-capable-hardware verdict
-/// supplied by the helper (the only vendor-aware step).
+/// Live NIC RDMA status: the daemon runs the sysfs classification overlaid with
+/// its vendor RoCE-capable verdict and returns the combined list. A transport
+/// failure yields no NICs.
 pub async fn interfaces(helper: &HelperClient) -> Vec<NicStatus> {
-    let roce_hw = roce_capable(helper).await;
-    classify(
-        Path::new("/sys/class/net"),
-        Path::new("/sys/class/infiniband"),
-        &super::rdma::netdev_addrs(),
-        &roce_hw,
-    )
+    serde_json::from_str(&helper.collect(Request::NicInterfaces).await.stdout).unwrap_or_default()
 }
 
-/// The helper's RoCE-capable NIC inventory as `netdev → vendor`. A transport
-/// failure or empty inventory yields no capable NICs (every plain NIC then reads
-/// as a Soft-RoCE candidate), the same graceful degradation as elsewhere.
-async fn roce_capable(helper: &HelperClient) -> HashMap<String, String> {
-    parse_roce_capable(&helper.collect(Request::RoceCapableNics).await.stdout)
+/// The live PCI-address → IPs map, read by the daemon from `/sys/class/net`. A
+/// transport failure yields an empty map.
+pub async fn pci_addrs(helper: &HelperClient) -> HashMap<String, Vec<IpAddr>> {
+    serde_json::from_str(&helper.collect(Request::NicPciAddrs).await.stdout).unwrap_or_default()
 }
 
 /// The helper's per-NIC advisories as `netdev → advice`. A transport failure or

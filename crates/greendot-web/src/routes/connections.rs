@@ -54,7 +54,8 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
 
     // iSCSI sessions: configfs, unprivileged. Map each target IQN back to its
     // friendly export name when it's one of ours.
-    let iscsi = actual::lio::sessions(&state.lio_root)
+    let iscsi = actual::lio::sessions(&state.helper)
+        .await
         .into_iter()
         .map(|s| {
             let export = iscsi_exports
@@ -96,7 +97,8 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
             state: p.state.clone(),
         };
         if has_nvme {
-            let rdma_ports: HashSet<u16> = actual::nvmet::read(&state.nvmet_root)
+            let rdma_ports: HashSet<u16> = actual::nvmet::read(&state.helper)
+                .await
                 .ports
                 .iter()
                 .filter(|p| p.trtype == "rdma")

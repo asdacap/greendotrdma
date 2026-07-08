@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "crates/greendot-proto",
-    "crates/greendot-reconcile",
     "crates/greendotctl",
     "crates/greendot-web",
 ]
@@ -15,7 +14,6 @@ repository = "https://github.com/asdacap/greendotrdma"
 
 [workspace.dependencies]
 greendot-proto = { path = "crates/greendot-proto" }
-greendot-reconcile = { path = "crates/greendot-reconcile" }
 anyhow = "1"
 toml = "0.9"
 serde = { version = "1", features = ["derive"] }

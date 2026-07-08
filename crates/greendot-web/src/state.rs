@@ -12,13 +12,13 @@ use std::sync::Mutex;
 
 /// The desired-state domain types (`NvmeExport`/`IscsiExport`/`NfsExport`/…),
 /// the listen-selector parser, and the read-only `read_desired` loader live in
-/// the shared `greendot-reconcile` crate so a standalone `greendotctl reconcile`
-/// shares them. Re-exported so existing `crate::state::*` paths keep working; the
-/// SQLite-backed `Db` (task history + the sole config writer) stays here.
-pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX, SubStatus};
-pub use greendot_reconcile::state::{
+/// the shared `greendot-proto` contract so the daemon's reconciler and the web
+/// name one model. Re-exported so existing `crate::state::*` paths keep working;
+/// the SQLite-backed `Db` (task history + the sole config writer) stays here.
+pub use greendot_proto::desired::{
     Desired, IscsiExport, NfsClientEntry, NfsExport, NvmeExport, parse_listen_iface, read_desired,
 };
+pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX, SubStatus};
 
 pub struct NewNvmeExport {
     pub name: String,
@@ -999,10 +999,10 @@ mod tests {
     }
 
     /// The daemon reads the desired state from the TOML via
-    /// `greendot_reconcile::state::read_desired`, while the web's drift
-    /// pre-check reads it through `Db::list_*` — the two must agree exactly
-    /// (including ordering), or the pre-check and the apply would render
-    /// different desired states from the same input. This pins the contract.
+    /// `greendot_proto::desired::read_desired`, while the web writes it through
+    /// `Db::list_*` — the two must agree exactly (including ordering), or the
+    /// daemon's drift pre-check and apply would render a different desired state
+    /// than the web wrote from the same input. This pins the contract.
     #[test]
     fn read_desired_matches_db_lists() {
         let dir = std::env::temp_dir();
@@ -1037,7 +1037,7 @@ mod tests {
         .unwrap();
         db.set_setting("listen_addr", "10.0.0.5").unwrap();
 
-        let desired = greendot_reconcile::state::read_desired(&state).unwrap();
+        let desired = greendot_proto::desired::read_desired(&state).unwrap();
         assert_eq!(desired.nvme_exports, db.list_nvme_exports().unwrap());
         assert_eq!(desired.iscsi_exports, db.list_iscsi_exports().unwrap());
         assert_eq!(desired.nfs_exports, db.list_nfs_exports().unwrap());

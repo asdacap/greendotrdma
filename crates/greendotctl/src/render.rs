@@ -2,16 +2,18 @@
 //! state from the export list, plus the `*_satisfied` drift predicates and the
 //! per-area kernel-module lists.
 //!
-//! Everything here is a pure render/compare — the applies run inline in
-//! greendotctl (the privileged caller: the daemon on `Request::Reconcile`, or
-//! the root-only standalone `greendotctl reconcile`). Shared with greendot-web's
-//! drift pre-check (`routes::block_export::reconcile_state`), so the web and
-//! greendotctl render the same live input identically.
+//! Everything here is a pure render/compare — the applies run inline in the
+//! reconcile driver (`crate::reconcile`), the privileged caller: the daemon on
+//! `Request::Reconcile`/`ReconcileDryRun`, or the root-only standalone
+//! `greendotctl reconcile`.
 
 use crate::actual::lio::ActualLio;
-use crate::actual::nfs::ActualNfs;
 use crate::actual::nvmet::ActualNvmet;
-use crate::state::{IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+use greendot_proto::actual::nfs::ActualNfs;
+use greendot_proto::desired::{
+    IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX, iscsi_render_error,
+    listen_addrs, nfs_render_error, nvme_render_error,
+};
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
     NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired,
@@ -25,31 +27,6 @@ use std::net::IpAddr;
 const NFS_FSID_BASE: u32 = 0x6700_0000;
 
 const TRSVCID: u16 = 4420;
-
-/// The IPs an export should listen on: its pinned interfaces resolved to their
-/// current IPs, or `default` when it pins none (the unchanged behavior). A
-/// selector that resolves to no current IP — link down, no DHCP lease yet, or an
-/// unknown scheme — contributes nothing, so the export simply isn't served there
-/// until an IP appears.
-pub fn listen_addrs(
-    interfaces: &[String],
-    default: IpAddr,
-    pci_addrs: &HashMap<String, Vec<IpAddr>>,
-) -> Vec<IpAddr> {
-    if interfaces.is_empty() {
-        return vec![default];
-    }
-    let mut addrs: Vec<IpAddr> = interfaces
-        .iter()
-        .filter_map(|s| crate::state::parse_listen_iface(s))
-        .filter_map(|pci| pci_addrs.get(&pci.to_string()))
-        .flatten()
-        .copied()
-        .collect();
-    addrs.sort();
-    addrs.dedup();
-    addrs
-}
 
 /// Renders the desired nvmet state from the enabled NVMe-oF exports. Each export
 /// listens on its pinned interfaces' current IPs (resolved via `pci_addrs`), or
@@ -149,58 +126,6 @@ pub fn foreign_port_ids(a: &ActualNvmet) -> BTreeSet<u16> {
         })
         .map(|p| p.id)
         .collect()
-}
-
-/// Why an enabled NVMe-oF export cannot be rendered at all, mirroring exactly
-/// what [`render_nvmet`] skips. The renderers deliberately serve every valid
-/// entry rather than failing the whole area on one bad one; the dots and the
-/// reconcile task surface these reasons so a skipped export is loud, not
-/// silently absent.
-pub fn nvme_render_error(e: &NvmeExport) -> Option<String> {
-    greendot_proto::DevicePath::new(&e.device_path)
-        .is_err()
-        .then(|| {
-            format!(
-                "invalid device path {:?} — export cannot be served",
-                e.device_path
-            )
-        })
-}
-
-/// Why an enabled iSCSI export cannot be rendered at all (see
-/// [`nvme_render_error`]).
-pub fn iscsi_render_error(e: &IscsiExport) -> Option<String> {
-    if greendot_proto::BackstoreName::new(&e.name).is_err() {
-        return Some(format!(
-            "invalid export name {:?} — export cannot be served",
-            e.name
-        ));
-    }
-    greendot_proto::DevicePath::new(&e.device_path)
-        .is_err()
-        .then(|| {
-            format!(
-                "invalid device path {:?} — export cannot be served",
-                e.device_path
-            )
-        })
-}
-
-/// Why an enabled NFS export cannot be rendered at all (see
-/// [`nvme_render_error`]).
-pub fn nfs_render_error(e: &NfsExport) -> Option<String> {
-    if NfsExportPath::new(&e.path).is_err() {
-        return Some(format!(
-            "invalid export path {:?} — export cannot be served",
-            e.path
-        ));
-    }
-    let valid = e
-        .clients
-        .iter()
-        .filter(|c| NfsClient::new(&c.client).is_ok())
-        .count();
-    (valid == 0).then(|| "no valid client spec — export cannot be served".to_owned())
 }
 
 /// Every reason the renderers will skip (or partially skip) enabled desired
@@ -908,18 +833,18 @@ mod tests {
             name: "-bad".into(),
             ..iscsi_export()
         };
-        let bad_nfs = crate::state::NfsExport {
+        let bad_nfs = greendot_proto::desired::NfsExport {
             id: 3,
             path: "/tank/../etc".into(),
             enabled: true,
             clients: vec![],
             last_error: None,
         };
-        let clientless_nfs = crate::state::NfsExport {
+        let clientless_nfs = greendot_proto::desired::NfsExport {
             id: 4,
             path: "/tank/ok".into(),
             enabled: true,
-            clients: vec![crate::state::NfsClientEntry {
+            clients: vec![greendot_proto::desired::NfsClientEntry {
                 client: "h(rw".into(),
                 rw: true,
             }],
@@ -956,8 +881,8 @@ mod tests {
 
     #[test]
     fn renders_and_satisfies_nfs() {
-        use crate::actual::nfs::{ActualNfs, NfsExportEntry};
-        use crate::state::{NfsClientEntry, NfsExport};
+        use greendot_proto::actual::nfs::{ActualNfs, NfsExportEntry};
+        use greendot_proto::desired::{NfsClientEntry, NfsExport};
 
         let exp = NfsExport {
             id: 1,

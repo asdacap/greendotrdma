@@ -14,9 +14,17 @@
 //! handles the validated domain `Request` — the security choke point cannot
 //! be skipped.
 
+/// Actual-state DTOs and their pure parsers (the read half of the contract).
+pub mod actual;
 #[cfg(feature = "client")]
 pub mod client;
+/// The shared `config.toml` subset both the daemon and the web read.
+pub mod config;
 mod convert;
+/// Desired-state config model and the read-only TOML loader (the write half).
+pub mod desired;
+/// OS / package-manager knowledge shared by the daemon and the web dep panel.
+pub mod os;
 #[cfg(feature = "server")]
 pub mod server;
 mod types;
@@ -268,6 +276,29 @@ pub enum Request {
     InstallPackages {
         packages: Vec<PackageName>,
     },
+
+    // Structural/privileged reads collected by the web (JSON on the task's
+    // stdout). The daemon reads the canonical system paths and serializes a
+    // shared `actual::*` DTO; the web deserializes and renders it, so no
+    // hardware/configfs/sysfs read happens in the unprivileged process.
+    /// The nvmet configfs tree as [`actual::nvmet::ActualNvmet`] JSON.
+    NvmetReport,
+    /// The LIO configfs tree as [`actual::lio::ActualLio`] JSON.
+    LioReport,
+    /// Live iSCSI sessions as `Vec<`[`actual::lio::IscsiSession`]`>` JSON.
+    LioSessions,
+    /// RDMA devices as `Vec<`[`actual::rdma::RdmaDev`]`>` JSON.
+    RdmaDevices,
+    /// Live PCI-address → IPs map (`/sys/class/net` + getifaddrs) as JSON.
+    NicPciAddrs,
+    /// Every NIC's RDMA status as `Vec<`[`actual::nic::NicStatus`]`>` JSON —
+    /// the structural sysfs classification overlaid with the vendor RoCE map,
+    /// combined daemon-side so the web stays vendor-free.
+    NicInterfaces,
+    /// The desired-vs-actual drift pre-check: renders the daemon's own desired
+    /// state, reads actual, and returns `{nvmet_ok, lio_ok, nfs_ok}` JSON
+    /// *without applying* — the web's cheap "is a reconcile needed?" probe.
+    ReconcileDryRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

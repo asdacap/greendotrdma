@@ -1,21 +1,21 @@
 //! The desired-state reconcile driver and the `greendotctl reconcile
 //! [config.toml]` subcommand. Reconcile runs everything inline, in-process —
-//! the render/diff comes from `greendot-reconcile`, the applies are this
-//! crate's own — so the *caller* supplies the privilege: the daemon runs
+//! the render/diff comes from `crate::render`, the applies are this crate's
+//! own — so the *caller* supplies the privilege: the daemon runs
 //! [`run`] on `Request::Reconcile` (the path greendot-web takes), and the
 //! standalone subcommand proxies to a running daemon or, given an explicit
 //! config (or no daemon), applies locally as root.
 
 use crate::cmd::EventSink;
-use crate::{cmd, lio, modules, nfs, nvmet};
-use anyhow::Result;
-use greendot_proto::{NFS_RDMA_PORT, Request, SubStatus, SubTask, Task, TaskEvent, pb};
-use greendot_reconcile::actual::nfs::from_report;
-use greendot_reconcile::config::Config;
-use greendot_reconcile::reconcile::{
+use crate::render::{
     foreign_port_ids, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied, nvme_modules,
     nvmet_satisfied, render_issues, render_lio, render_nfs, render_nvmet,
 };
+use crate::{cmd, lio, modules, nfs, nvmet};
+use anyhow::Result;
+use greendot_proto::actual::nfs::from_report;
+use greendot_proto::config::Config;
+use greendot_proto::{NFS_RDMA_PORT, Request, SubStatus, SubTask, Task, TaskEvent, pb};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
@@ -84,6 +84,53 @@ fn proxy(socket: std::path::PathBuf) -> Result<()> {
     })
 }
 
+/// The web's cheap drift pre-check: render the daemon's own desired state, read
+/// actual, and emit `{nvmet_ok, lio_ok, nfs_ok}` JSON *without applying* and
+/// without the mutate lock. A config/desired read error reports drift on all
+/// three areas, so the web then dispatches a real `Reconcile` that surfaces it.
+pub fn dry_run_into(cfg_path: Option<String>, sub: &mut SubTask) -> io::Result<SubStatus> {
+    let (nvmet_ok, lio_ok, nfs_ok) = drift(cfg_path);
+    write!(
+        sub.stdout(),
+        "{}",
+        serde_json::json!({ "nvmet_ok": nvmet_ok, "lio_ok": lio_ok, "nfs_ok": nfs_ok })
+    )?;
+    Ok(SubStatus::Success)
+}
+
+/// Computes the three per-area drift-satisfied flags (config/desired read errors
+/// read as "all drifted").
+fn drift(cfg_path: Option<String>) -> (bool, bool, bool) {
+    let Ok(cfg) = Config::load(cfg_path) else {
+        return (false, false, false);
+    };
+    let Ok(desired) = greendot_proto::desired::read_desired(&cfg.state_path) else {
+        return (false, false, false);
+    };
+    let pci_addrs = crate::actual::nic::pci_addrs();
+    let actual_nvmet = crate::actual::nvmet::read(&cfg.nvmet_root);
+    let nvmet_desired = render_nvmet(
+        &desired.nvme_exports,
+        desired.listen,
+        &pci_addrs,
+        &foreign_port_ids(&actual_nvmet),
+    );
+    let nvmet_ok = nvmet_satisfied(&nvmet_desired, &actual_nvmet);
+    let lio_ok = lio_satisfied(
+        &render_lio(&desired.iscsi_exports, desired.listen, &pci_addrs),
+        &crate::actual::lio::read(&cfg.lio_root),
+    );
+    let nfs_actual = from_report(&nfs::report(
+        Path::new(nfs::NFSD_PORTLIST),
+        Path::new(nfs::NFS_EXPORTS_FILE),
+    ));
+    let nfs_ok = nfs_satisfied(
+        &render_nfs(&desired.nfs_exports, NFS_RDMA_PORT),
+        &nfs_actual,
+    );
+    (nvmet_ok, lio_ok, nfs_ok)
+}
+
 /// Reconciles desired → actual wholly in this (root) process, streaming each
 /// area as its own subtask on `task` — applied when drifted, a grey `Skipped`
 /// subtask when already satisfied, so a run that only touched one area shows
@@ -101,7 +148,7 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
         }
     };
     let _guard = mutate_lock.lock().unwrap();
-    let desired = match greendot_reconcile::state::read_desired(&cfg.state_path) {
+    let desired = match greendot_proto::desired::read_desired(&cfg.state_path) {
         Ok(d) => d,
         Err(e) => {
             task.begin_subtask("Read desired state")
@@ -127,8 +174,8 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
             if issues.len() == 1 { "y" } else { "ies" }
         ));
     }
-    let pci_addrs = greendot_reconcile::actual::nic::pci_addrs();
-    let actual_nvmet = greendot_reconcile::actual::nvmet::read(&cfg.nvmet_root);
+    let pci_addrs = crate::actual::nic::pci_addrs();
+    let actual_nvmet = crate::actual::nvmet::read(&cfg.nvmet_root);
     let nvmet_desired = render_nvmet(
         &desired.nvme_exports,
         desired.listen,
@@ -138,10 +185,7 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
     let lio_desired = render_lio(&desired.iscsi_exports, desired.listen, &pci_addrs);
     let nfs_desired = render_nfs(&desired.nfs_exports, NFS_RDMA_PORT);
     let nvmet_ok = nvmet_satisfied(&nvmet_desired, &actual_nvmet);
-    let lio_ok = lio_satisfied(
-        &lio_desired,
-        &greendot_reconcile::actual::lio::read(&cfg.lio_root),
-    );
+    let lio_ok = lio_satisfied(&lio_desired, &crate::actual::lio::read(&cfg.lio_root));
     // We are root, so the NFS actual state reads in-process; a failed read
     // parses as the empty state, which registers as drift and re-applies NFS.
     let nfs_actual = from_report(&nfs::report(

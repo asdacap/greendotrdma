@@ -1,12 +1,13 @@
+//! The reconcile-relevant subset of `/etc/greendotrdma/config.toml` — the keys
+//! both greendotctl and greendot-web read. The web server's own keys (listen
+//! address, TLS, database paths) live in greendot-web's `Config`, which
+//! flattens this struct; unknown keys are ignored here so both binaries parse
+//! the same file. The configfs roots are read only by the privileged daemon.
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-/// The reconcile-relevant subset of `/etc/greendotrdma/config.toml` — the keys
-/// both greendotctl and greendot-web read. The web server's own keys (listen
-/// address, TLS, database paths) live in greendot-web's `Config`, which
-/// flattens this struct; unknown keys are ignored here so both binaries parse
-/// the same file.
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct Config {

@@ -143,17 +143,17 @@ async fn gather(
     form_error: Option<String>,
     task_id: Option<i64>,
 ) -> SettingsView {
-    let devs = rdma::devices();
+    let devs = rdma::devices(&state.helper).await;
     let nics: Vec<NicRow> = nic::interfaces(&state.helper)
         .await
         .into_iter()
         .filter_map(nic_row)
         .collect();
-    let deps: Vec<DepRow> = greendot_reconcile::os::REQUIRED_CLIS
+    let deps: Vec<DepRow> = greendot_proto::os::REQUIRED_CLIS
         .iter()
         .map(|&cli| DepRow {
             cli,
-            package: greendot_reconcile::os::package_for_cli(cli)
+            package: greendot_proto::os::package_for_cli(cli)
                 .unwrap_or("")
                 .to_string(),
             present: cli_present(cli),
@@ -166,8 +166,8 @@ async fn gather(
         .collect();
     missing.sort();
     missing.dedup();
-    let os = greendot_reconcile::os::detect();
-    let install_supported = matches!(os.family, greendot_reconcile::os::PkgFamily::Debian);
+    let os = greendot_proto::os::detect();
+    let install_supported = matches!(os.family, greendot_proto::os::PkgFamily::Debian);
     // Only packages apt can actually install belong in the one-click button; the
     // rest (e.g. nvmetcli, which Ubuntu 26.04 dropped) get a manual-install hint.
     // On non-apt distros there is nothing the in-app installer can supply.

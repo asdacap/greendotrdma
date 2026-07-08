@@ -30,8 +30,6 @@ async fn main() -> Result<()> {
         secure_cookies: tls.is_some(),
         db: state::Db::open(&config.db_path, &config.reconcile.state_path)?,
         metrics: metrics::Metrics::open(&config.metrics_db_path)?,
-        nvmet_root: config.reconcile.nvmet_root.clone(),
-        lio_root: config.reconcile.lio_root.clone(),
         reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
     });

@@ -4,7 +4,6 @@
 //! web via `Request::NfsReport` — and only *parsed* here.
 
 pub mod lio;
-pub mod nfs;
 pub mod nic;
 pub mod nvmet;
 pub mod rdma;

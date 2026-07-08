@@ -40,8 +40,6 @@ pub struct AppState {
     pub secure_cookies: bool,
     pub db: crate::state::Db,
     pub metrics: crate::metrics::Metrics,
-    pub nvmet_root: std::path::PathBuf,
-    pub lio_root: std::path::PathBuf,
     /// Serializes reconcile passes (UI actions vs the periodic task). Held — via
     /// an owned guard — across the now-backgrounded reconcile run, so two passes
     /// never overlap even though dispatch no longer blocks the caller.
@@ -298,16 +296,12 @@ pub(crate) mod testutil {
     /// stream answers `Request::Reconcile` with a successful task — so the
     /// drift gate + record/stream path is exercised without a real daemon.
     pub fn test_state() -> Arc<AppState> {
-        let nvmet_root =
-            std::env::temp_dir().join(format!("gd-nvmet-app{}", rand::random::<u32>()));
         Arc::new(AppState {
             helper: HelperClient::new(fake_helper_socket()),
             sessions: Sessions::new(Duration::from_secs(3600)),
             secure_cookies: false,
             db: crate::state::Db::in_memory().unwrap(),
             metrics: crate::metrics::Metrics::in_memory().unwrap(),
-            lio_root: nvmet_root.join("lio"),
-            nvmet_root,
             reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
             tasks: crate::task_runner::TaskHub::default(),
         })

@@ -131,7 +131,7 @@ pub async fn gather(
         .flatten()
         .and_then(|s| s.parse::<i64>().ok());
     let actual_nfs = actual::nfs::read(&state.helper).await;
-    let rdma = actual::rdma::devices();
+    let rdma = actual::rdma::devices(&state.helper).await;
     let listen = listen_addr(state);
     let mut ours: HashSet<String> = HashSet::new();
 
@@ -249,7 +249,7 @@ async fn gather_diagnose(state: &AppState, id: i64) -> NfsDiagnoseView {
         };
     };
     let actual_nfs = actual::nfs::read(&state.helper).await;
-    let rdma = actual::rdma::devices();
+    let rdma = actual::rdma::devices(&state.helper).await;
     let capable_disabled: Vec<String> = actual::nic::interfaces(&state.helper)
         .await
         .into_iter()

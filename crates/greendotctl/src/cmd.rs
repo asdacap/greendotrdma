@@ -5,8 +5,8 @@
 //! into an already-open (multi-step) subtask.
 
 pub use greendot_proto::EventSink;
+use greendot_proto::os::package_for_cli;
 use greendot_proto::{SubStatus, SubTask, Task, TaskEvent};
-use greendot_reconcile::os::package_for_cli;
 use std::io::{self, Read, Write};
 use std::process::{Command, Stdio};
 

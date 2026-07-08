@@ -9,14 +9,13 @@ use crate::actual;
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::dot::Criterion;
 use crate::dot::DotState;
-use crate::reconcile;
 use crate::state::{Db, IscsiExport, NfsExport, NvmeExport};
 use crate::task_runner::TaskOutcome;
 use askama::Template;
 use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use greendot_proto::{DevicePath, ExportName, NFS_RDMA_PORT, Request};
+use greendot_proto::{DevicePath, ExportName, Request};
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -30,8 +29,18 @@ pub const RECONCILE_ERROR_KEY: &str = "reconcile_error";
 /// run.
 pub const RECONCILE_TASK_KEY: &str = "reconcile_task_id";
 
-/// Serialized full reconcile against current desired state. A cheap in-process
-/// drift pre-check keeps the steady state (and the 60 s timer) silent; on drift
+/// The daemon's `ReconcileDryRun` verdict — one bool per protocol area. The
+/// `Default` (all `false` = drifted) covers a transport failure or empty output,
+/// so a lost daemon still triggers a real reconcile rather than silently no-op.
+#[derive(serde::Deserialize, Default)]
+struct DriftFlags {
+    nvmet_ok: bool,
+    lio_ok: bool,
+    nfs_ok: bool,
+}
+
+/// Serialized full reconcile against current desired state. A daemon-side drift
+/// pre-check keeps the steady state (and the 60 s timer) silent; on drift
 /// it asks the daemon to reconcile inline (`Request::Reconcile`, streamed back
 /// as a recorded task) and returns the task id *without waiting* — the outcome
 /// is surfaced on the export dots and the settings banner once it finishes (in
@@ -46,34 +55,17 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
     let guard = state.reconcile_lock.clone().lock_owned().await;
     let nvme_exports = state.db.list_nvme_exports()?;
     let iscsi_exports = state.db.list_iscsi_exports()?;
-    let listen: IpAddr = state
-        .db
-        .get_setting("listen_addr")?
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Ipv4Addr::UNSPECIFIED.into());
-
     let nfs_exports = state.db.list_nfs_exports()?;
-    let pci_addrs = actual::nic::pci_addrs();
-    let actual_nvmet = actual::nvmet::read(&state.nvmet_root);
-    let nvmet_ok = reconcile::nvmet_satisfied(
-        &reconcile::render_nvmet(
-            &nvme_exports,
-            listen,
-            &pci_addrs,
-            &reconcile::foreign_port_ids(&actual_nvmet),
-        ),
-        &actual_nvmet,
-    );
-    let lio_ok = reconcile::lio_satisfied(
-        &reconcile::render_lio(&iscsi_exports, listen, &pci_addrs),
-        &actual::lio::read(&state.lio_root),
-    );
-    // NFS actual state needs root, so this pre-check makes one helper round-trip
-    // (only matters when NFS exports exist; the steady state stays silent).
-    let nfs_ok = reconcile::nfs_satisfied(
-        &reconcile::render_nfs(&nfs_exports, NFS_RDMA_PORT),
-        &actual::nfs::read(&state.helper).await,
-    );
+
+    // The daemon renders its own desired state, reads actual configfs/sysfs, and
+    // diffs it in one privileged pass — the web does no hardware read. A
+    // transport failure deserializes to "all drifted", so we still reconcile.
+    let DriftFlags {
+        nvmet_ok,
+        lio_ok,
+        nfs_ok,
+    } = serde_json::from_str(&state.helper.collect(Request::ReconcileDryRun).await.stdout)
+        .unwrap_or_default();
     if nvmet_ok && lio_ok && nfs_ok {
         return Ok(None); // already realized — emit no task
     }

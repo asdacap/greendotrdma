@@ -55,6 +55,16 @@ pub enum Dispatch {
         label: &'static str,
         message: String,
     },
+    /// Structural/privileged reads the web collects as JSON (like `NfsReport`),
+    /// each serializing a shared `actual::*` DTO the web deserializes.
+    NvmetReport,
+    LioReport,
+    LioSessions,
+    RdmaDevices,
+    NicPciAddrs,
+    NicInterfaces,
+    /// The desired-vs-actual drift pre-check (renders + reads + diffs, no apply).
+    ReconcileDryRun,
 }
 
 pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
@@ -103,6 +113,13 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::NfsApply { desired } => Dispatch::NfsApply(desired),
         Request::NfsReport => Dispatch::NfsReport,
         Request::Reconcile => Dispatch::Reconcile,
+        Request::NvmetReport => Dispatch::NvmetReport,
+        Request::LioReport => Dispatch::LioReport,
+        Request::LioSessions => Dispatch::LioSessions,
+        Request::RdmaDevices => Dispatch::RdmaDevices,
+        Request::NicPciAddrs => Dispatch::NicPciAddrs,
+        Request::NicInterfaces => Dispatch::NicInterfaces,
+        Request::ReconcileDryRun => Dispatch::ReconcileDryRun,
 
         Request::EnsureModules { modules: list } => match modules::ensure(&list) {
             Some(spec) => Dispatch::Task(spec),
@@ -189,7 +206,7 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
         Request::LvDelete { vg, name } => Dispatch::Task(lvm::lv_delete(&vg, &name)),
 
         Request::InstallPackages { packages } => {
-            match install::install(&packages, &greendot_reconcile::os::detect()) {
+            match install::install(&packages, &greendot_proto::os::detect()) {
                 Ok(Some(spec)) => Dispatch::Task(spec),
                 Ok(None) => Dispatch::OneShot(Response::Ok),
                 Err(msg) => Dispatch::FailedTask {

@@ -1,12 +1,12 @@
-//! OS / packaging knowledge shared by greendot-web (dependency panel) and
-//! greendotctl (install hints and the install task): best-effort OS /
-//! package-manager detection from `/etc/os-release`, and the CLI → Debian
-//! package map.
+//! OS / packaging knowledge shared by greendot-web (dependency panel, rendered
+//! from a daemon-collected report) and greendotctl (install hints and the
+//! install task): best-effort OS / package-manager detection from
+//! `/etc/os-release`, and the CLI → Debian package map.
 
 use std::fs;
 
 /// The package-manager family we know how to drive.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PkgFamily {
     /// Debian/Ubuntu and derivatives — `apt-get`.
     Debian,
@@ -15,7 +15,7 @@ pub enum PkgFamily {
 }
 
 /// Detected OS, enough to pick an installer and label it in the UI.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OsInfo {
     pub family: PkgFamily,
     /// Human label for messages/UI, e.g. "Ubuntu 26.04 LTS".
@@ -63,7 +63,8 @@ fn unquote(s: &str) -> String {
 }
 
 /// Detect the running system. Reads `/etc/os-release` (fallback
-/// `/usr/lib/os-release`); unreadable → `Unsupported`/"unknown".
+/// `/usr/lib/os-release`); unreadable → `Unsupported`/"unknown". Only the
+/// privileged daemon calls this — greendot-web renders a daemon-collected report.
 pub fn detect() -> OsInfo {
     fs::read_to_string("/etc/os-release")
         .or_else(|_| fs::read_to_string("/usr/lib/os-release"))
@@ -167,7 +168,7 @@ pub const REQUIRED_CLIS: &[&str] = &[
 #[cfg(test)]
 mod package_tests {
     use super::*;
-    use greendot_proto::PackageName;
+    use crate::PackageName;
 
     #[test]
     fn cli_to_package_map() {

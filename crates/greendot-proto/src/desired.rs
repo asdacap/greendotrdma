@@ -2,18 +2,20 @@
 //! is the source of truth and lives in a hand-editable TOML file. The web
 //! service owns writing it (via its SQLite-backed `Db`); reconciliation only
 //! ever *reads* it here, so this module carries no database dependency.
+//!
+//! These types are the *desired* half of the protocol contract: greendot-web
+//! writes them and greendotctl's reconciler reads them, so both name one model.
 
+use crate::{Iqn, Nqn, PciAddress};
 use anyhow::{Context, Result};
-use greendot_proto::{Iqn, Nqn, PciAddress};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::IpAddr;
 use std::path::Path;
 
 /// Every export we create lives under these prefixes; reconciliation never
-/// touches configfs objects outside them. Defined in the shared protocol crate
-/// so the helper scopes its configfs writes to the same prefix.
-pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
+/// touches configfs objects outside them.
+pub use crate::{OUR_IQN_PREFIX, OUR_NQN_PREFIX};
 
 /// A block-device export served as an NVMe-oF subsystem. RDMA, TCP and the
 /// local loopback are all valid transports.
@@ -86,6 +88,79 @@ pub fn parse_listen_iface(s: &str) -> Option<PciAddress> {
         .and_then(|addr| PciAddress::new(addr).ok())
 }
 
+/// The IPs an export should listen on: its pinned interfaces resolved to their
+/// current IPs, or `default` when it pins none (the unchanged behavior). A
+/// selector that resolves to no current IP — link down, no DHCP lease yet, or an
+/// unknown scheme — contributes nothing, so the export simply isn't served there
+/// until an IP appears.
+pub fn listen_addrs(
+    interfaces: &[String],
+    default: IpAddr,
+    pci_addrs: &HashMap<String, Vec<IpAddr>>,
+) -> Vec<IpAddr> {
+    if interfaces.is_empty() {
+        return vec![default];
+    }
+    let mut addrs: Vec<IpAddr> = interfaces
+        .iter()
+        .filter_map(|s| parse_listen_iface(s))
+        .filter_map(|pci| pci_addrs.get(&pci.to_string()))
+        .flatten()
+        .copied()
+        .collect();
+    addrs.sort();
+    addrs.dedup();
+    addrs
+}
+
+/// Why an enabled NVMe-oF export cannot be rendered at all, mirroring exactly
+/// what the nvmet renderer skips. The renderers deliberately serve every valid
+/// entry rather than failing the whole area on one bad one; the dots and the
+/// reconcile task surface these reasons so a skipped export is loud, not
+/// silently absent.
+pub fn nvme_render_error(e: &NvmeExport) -> Option<String> {
+    crate::DevicePath::new(&e.device_path).is_err().then(|| {
+        format!(
+            "invalid device path {:?} — export cannot be served",
+            e.device_path
+        )
+    })
+}
+
+/// Why an enabled iSCSI export cannot be rendered at all (see
+/// [`nvme_render_error`]).
+pub fn iscsi_render_error(e: &IscsiExport) -> Option<String> {
+    if crate::BackstoreName::new(&e.name).is_err() {
+        return Some(format!(
+            "invalid export name {:?} — export cannot be served",
+            e.name
+        ));
+    }
+    crate::DevicePath::new(&e.device_path).is_err().then(|| {
+        format!(
+            "invalid device path {:?} — export cannot be served",
+            e.device_path
+        )
+    })
+}
+
+/// Why an enabled NFS export cannot be rendered at all (see
+/// [`nvme_render_error`]).
+pub fn nfs_render_error(e: &NfsExport) -> Option<String> {
+    if crate::NfsExportPath::new(&e.path).is_err() {
+        return Some(format!(
+            "invalid export path {:?} — export cannot be served",
+            e.path
+        ));
+    }
+    let valid = e
+        .clients
+        .iter()
+        .filter(|c| crate::NfsClient::new(&c.client).is_ok())
+        .count();
+    (valid == 0).then(|| "no valid client spec — export cannot be served".to_owned())
+}
+
 /// A file-level NFS export of an absolute directory path, served over RDMA.
 /// Unlike a block-device export, this has a directory path and a list of
 /// client access specs — different enough to warrant its own type/table.
@@ -108,7 +183,7 @@ pub struct NfsClientEntry {
     pub rw: bool,
 }
 
-pub(crate) fn default_true() -> bool {
+pub fn default_true() -> bool {
     true
 }
 

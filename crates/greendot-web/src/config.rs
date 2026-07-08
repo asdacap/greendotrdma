@@ -34,7 +34,7 @@ pub struct Config {
     pub tls_key: Option<PathBuf>,
     /// The shared keys greendotctl also reads (socket, state, configfs roots).
     #[serde(flatten)]
-    pub reconcile: greendot_reconcile::config::Config,
+    pub reconcile: greendot_proto::config::Config,
 }
 
 impl Default for Config {
@@ -45,7 +45,7 @@ impl Default for Config {
             metrics_db_path: "/var/lib/greendotrdma/metrics.db".into(),
             tls_cert: None,
             tls_key: None,
-            reconcile: greendot_reconcile::config::Config::default(),
+            reconcile: greendot_proto::config::Config::default(),
         }
     }
 }

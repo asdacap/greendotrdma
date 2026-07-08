@@ -1,38 +1,12 @@
 //! Read-only view of the nvmet configfs tree. A missing tree (module not
-//! loaded) reads as empty; malformed entries are skipped.
+//! loaded) reads as empty; malformed entries are skipped. The result types live
+//! in the shared protocol crate (`greendot_proto::actual::nvmet`); only this
+//! privileged reader lives here.
 
 use super::{dir_names, read_attr};
 use std::path::Path;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ActualNvmet {
-    pub subsystems: Vec<Subsys>,
-    pub ports: Vec<Port>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Subsys {
-    pub nqn: String,
-    pub allow_any_host: bool,
-    pub allowed_hosts: Vec<String>,
-    pub namespaces: Vec<Namespace>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Namespace {
-    pub nsid: u32,
-    pub device_path: String,
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Port {
-    pub id: u16,
-    pub trtype: String,
-    pub traddr: String,
-    pub trsvcid: String,
-    pub subsystems: Vec<String>,
-}
+pub use greendot_proto::actual::nvmet::*;
 
 pub fn read(root: &Path) -> ActualNvmet {
     let mut actual = ActualNvmet::default();

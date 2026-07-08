@@ -14,6 +14,7 @@
 //! `TryFrom`, which re-runs the validators — the daemon's second line of
 //! defense (prost does not validate on decode the way serde did).
 
+mod actual;
 mod cmd;
 mod dispatch;
 mod fs;
@@ -26,7 +27,9 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
+mod reads;
 mod reconcile;
+mod render;
 mod smart;
 mod util;
 mod zfs;
@@ -387,6 +390,43 @@ fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Resu
             // A refused operation (e.g. install on an unsupported distro)
             // recorded as a failed subtask carrying its reason.
             task.begin_subtask(label).fail(message);
+        }
+        // Structural reads: no mutate_lock; each streams one JSON blob the web
+        // collects and deserializes into a shared `actual::*` DTO.
+        Dispatch::NvmetReport => {
+            let mut sub = task.begin_subtask("Read nvmet state");
+            let status = reads::nvmet_report_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::LioReport => {
+            let mut sub = task.begin_subtask("Read LIO state");
+            let status = reads::lio_report_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::LioSessions => {
+            let mut sub = task.begin_subtask("Read iSCSI sessions");
+            let status = reads::lio_sessions_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::RdmaDevices => {
+            let mut sub = task.begin_subtask("Read RDMA devices");
+            let status = reads::rdma_devices_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::NicPciAddrs => {
+            let mut sub = task.begin_subtask("Read NIC PCI addresses");
+            let status = reads::nic_pci_addrs_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::NicInterfaces => {
+            let mut sub = task.begin_subtask("Read NIC RDMA status");
+            let status = reads::nic_interfaces_into(&mut sub)?;
+            sub.complete(status);
+        }
+        Dispatch::ReconcileDryRun => {
+            let mut sub = task.begin_subtask("Check reconcile drift");
+            let status = reconcile::dry_run_into(ctx.reconcile_config.clone(), &mut sub)?;
+            sub.complete(status);
         }
     }
     task.complete()

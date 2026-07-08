@@ -543,28 +543,18 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 name = "greendot-proto"
 version = "0.1.1"
 dependencies = [
+ "anyhow",
  "hyper-util",
  "prost",
  "rstest",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
+ "toml",
  "tonic",
  "tonic-build",
  "tower",
-]
-
-[[package]]
-name = "greendot-reconcile"
-version = "0.1.1"
-dependencies = [
- "anyhow",
- "greendot-proto",
- "nix",
- "rstest",
- "serde",
- "serde_json",
- "toml",
 ]
 
 [[package]]
@@ -578,7 +568,6 @@ dependencies = [
  "chrono",
  "croner",
  "greendot-proto",
- "greendot-reconcile",
  "http-body-util",
  "nix",
  "rand",
@@ -601,10 +590,10 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "greendot-proto",
- "greendot-reconcile",
  "nix",
  "pam",
  "rstest",
+ "serde",
  "serde_json",
  "tokio",
  "tokio-stream",
