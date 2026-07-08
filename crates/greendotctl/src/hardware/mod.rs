@@ -1,11 +1,14 @@
 //! NIC hardware vendors behind one trait. All vendor-specific knowledge — the
 //! PCI fingerprint, the privileged `devlink` commands to probe and turn on
 //! hardware RoCE, per-NIC diagnostic advisories, and the UI label — lives in
-//! impls of [`NetworkHardware`]. Adding a vendor is one impl plus a `REGISTRY`
-//! entry; nothing in greendot-web changes. The web only ever asks
-//! vendor-agnostic questions (which NICs are RoCE-capable hardware, "enable
-//! RoCE on this NIC", and per-NIC advisories); this module answers them off
-//! sysfs and the registry.
+//! impls of [`NetworkHardware`], one vendor per submodule. Adding a vendor is
+//! one impl plus a `REGISTRY` entry; nothing in greendot-web changes. The web
+//! only ever asks vendor-agnostic questions (which NICs are RoCE-capable
+//! hardware, "enable RoCE on this NIC", and per-NIC advisories); this module
+//! answers them off sysfs and the registry.
+
+mod intel;
+mod mellanox;
 
 use crate::cmd::{TaskSpec, capture_into, run_into};
 use crate::util::read_trimmed;
@@ -58,142 +61,11 @@ pub trait NetworkHardware: Sync {
     }
 }
 
-struct Mellanox;
-
-impl NetworkHardware for Mellanox {
-    fn vendor(&self) -> &'static str {
-        "Mellanox"
-    }
-
-    /// Mellanox PCI vendor id (ConnectX family).
-    fn matches(&self, vendor_id: &str) -> bool {
-        vendor_id == "0x15b3"
-    }
-
-    /// `devlink dev param show pci/<pci> -j` — read `enable_roce` before the fix.
-    fn probe(&self, pci: &PciAddress) -> TaskSpec {
-        devlink(&["dev", "param", "show", &format!("pci/{pci}"), "-j"])
-    }
-
-    fn interpret(&self, stdout: &str) -> RoceState {
-        match enable_roce_from_json(stdout) {
-            Some(false) => RoceState::Disabled,
-            Some(true) => RoceState::AlreadyEnabled,
-            None => RoceState::Unavailable,
-        }
-    }
-
-    fn enable(&self, pci: &PciAddress) -> Vec<TaskSpec> {
-        vec![
-            // `devlink dev param set pci/<pci> name enable_roce value true cmode
-            // driverinit`. Hard-coded to `enable_roce` so a compromised web side
-            // can't name an arbitrary param.
-            devlink(&[
-                "dev",
-                "param",
-                "set",
-                &format!("pci/{pci}"),
-                "name",
-                "enable_roce",
-                "value",
-                "true",
-                "cmode",
-                "driverinit",
-            ]),
-            // `devlink dev reload pci/<pci>` — re-init so the driverinit param
-            // takes effect. Resets the device's netdevs.
-            devlink(&["dev", "reload", &format!("pci/{pci}")]),
-        ]
-    }
-}
-
-/// Intel NICs. Advisory-only today: no Intel family has a supported one-click
-/// enable flow, but irdma-capable SR-IOV VFs get a diagnostic advisory (the
-/// host-side driver-ordering requirement is invisible from the VF).
-struct Intel;
-
-/// PCI device ids of Intel Ethernet *Adaptive Virtual Functions* (`iavf`) — the
-/// SR-IOV VFs of the irdma-capable families (E810/`ice`, X7xx/`i40e`). These
-/// VFs get RDMA only when the host loads `irdma` before the VF count is set;
-/// non-RDMA Intel VFs (igb/ixgbe) use other ids and are deliberately excluded.
-/// One entry today; extend the slice to cover more irdma VF ids.
-const INTEL_IRDMA_VF_IDS: &[&str] = &["0x1889"];
-
-/// Human advisory for a detected Intel irdma VF that has no RDMA.
-const IRDMA_VF_LABEL: &str = "SR-IOV VF: host must load the RDMA driver before creating VFs";
-const IRDMA_VF_DETAIL: &str = "This is an Intel Ethernet Adaptive virtual function. RDMA on the VF \
-     works only if the host loads the irdma driver (modprobe irdma) BEFORE the \
-     VF count is set via sriov_numvfs. VFs created before irdma is loaded come \
-     up without RDMA — on the host, load irdma, then re-create the VFs.";
-
-impl NetworkHardware for Intel {
-    fn vendor(&self) -> &'static str {
-        "Intel"
-    }
-
-    /// Intel's PCI vendor id.
-    fn matches(&self, vendor_id: &str) -> bool {
-        vendor_id == "0x8086"
-    }
-
-    /// No supported one-click enable flow — advisory-only.
-    fn enableable(&self, _net_dir: &Path) -> bool {
-        false
-    }
-
-    // probe/interpret/enable are unreachable while `enableable` is false; they
-    // state the honest answer anyway (no settable parameter, nothing to run).
-    fn probe(&self, pci: &PciAddress) -> TaskSpec {
-        devlink(&["dev", "param", "show", &format!("pci/{pci}"), "-j"])
-    }
-
-    fn interpret(&self, _stdout: &str) -> RoceState {
-        RoceState::Unavailable
-    }
-
-    fn enable(&self, _pci: &PciAddress) -> Vec<TaskSpec> {
-        Vec::new()
-    }
-
-    fn advice(&self, net_dir: &Path) -> Option<(&'static str, &'static str)> {
-        let dev = device_id(net_dir)?;
-        INTEL_IRDMA_VF_IDS
-            .contains(&dev.as_str())
-            .then_some((IRDMA_VF_LABEL, IRDMA_VF_DETAIL))
-    }
-}
-
 /// Every supported NIC vendor. Append one entry to add a vendor.
-static REGISTRY: &[&dyn NetworkHardware] = &[&Mellanox, &Intel];
+static REGISTRY: &[&dyn NetworkHardware] = &[&mellanox::Mellanox, &intel::Intel];
 
 fn devlink(args: &[&str]) -> TaskSpec {
     TaskSpec::new("devlink", args.iter().map(|s| s.to_string()).collect())
-}
-
-/// Parse `devlink dev param show -j` for `enable_roce`: `Some(true)`/`Some(false)`
-/// if present, `None` if absent (e.g. a VF that can't self-enable, or a parse
-/// error). devlink emits either `{"param":{"pci/<addr>":[…]}}` or `{"param":[…]}`.
-fn enable_roce_from_json(json: &str) -> Option<bool> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let param = v.get("param")?;
-    let groups: Vec<&serde_json::Value> = match param {
-        serde_json::Value::Object(map) => map.values().collect(),
-        serde_json::Value::Array(_) => vec![param],
-        _ => return None,
-    };
-    for arr in groups.iter().filter_map(|g| g.as_array()) {
-        for p in arr {
-            if p.get("name").and_then(serde_json::Value::as_str) == Some("enable_roce") {
-                return p
-                    .get("values")
-                    .and_then(serde_json::Value::as_array)
-                    .and_then(|vs| vs.first())
-                    .and_then(|val| val.get("value"))
-                    .and_then(serde_json::Value::as_bool);
-            }
-        }
-    }
-    None
 }
 
 // ---- sysfs detection (vendor-neutral readers; the vendor decision is the
@@ -343,6 +215,7 @@ pub fn enable_into(
 
 #[cfg(test)]
 mod tests {
+    use super::intel::IRDMA_VF_LABEL;
     use super::*;
 
     /// Builds a fake `/sys/class/net` tree: a netdev with ARPHRD `type` and, when
@@ -431,53 +304,5 @@ mod tests {
         );
         assert!(detect(&f.net_root(), "ens16v0").is_none());
         assert!(detect(&f.net_root(), "eth3").is_some());
-    }
-
-    #[test]
-    fn mellanox_probe_enable_and_interpret() {
-        let pci = PciAddress::new("0000:00:10.0").unwrap();
-        let probe = Mellanox.probe(&pci);
-        assert_eq!(probe.command, "devlink");
-        assert_eq!(
-            probe.args,
-            ["dev", "param", "show", "pci/0000:00:10.0", "-j"].map(String::from)
-        );
-        let steps = Mellanox.enable(&pci);
-        assert_eq!(steps.len(), 2);
-        assert_eq!(
-            steps[0].args,
-            [
-                "dev",
-                "param",
-                "set",
-                "pci/0000:00:10.0",
-                "name",
-                "enable_roce",
-                "value",
-                "true",
-                "cmode",
-                "driverinit"
-            ]
-            .map(String::from)
-        );
-        assert_eq!(
-            steps[1].args,
-            ["dev", "reload", "pci/0000:00:10.0"].map(String::from)
-        );
-
-        let disabled = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_eth","type":"generic","values":[{"cmode":"driverinit","value":true}]},
-            {"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":false}]}
-        ]}}"#;
-        let enabled = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_roce","type":"generic","values":[{"cmode":"driverinit","value":true}]}
-        ]}}"#;
-        let absent = r#"{"param":{"pci/0000:00:10.0":[
-            {"name":"enable_eth","type":"generic","values":[{"cmode":"driverinit","value":true}]}
-        ]}}"#;
-        assert_eq!(Mellanox.interpret(disabled), RoceState::Disabled);
-        assert_eq!(Mellanox.interpret(enabled), RoceState::AlreadyEnabled);
-        assert_eq!(Mellanox.interpret(absent), RoceState::Unavailable);
-        assert_eq!(Mellanox.interpret("not json"), RoceState::Unavailable);
     }
 }
