@@ -2,7 +2,7 @@
 //! [config.toml]` subcommand. Reconcile runs everything inline, in-process —
 //! the render/diff comes from `crate::render`, the applies are this crate's
 //! own — so the *caller* supplies the privilege: the daemon runs
-//! [`run`] on `Request::Reconcile` (the path greendot-web takes), and the
+//! [`run`] on `TaskRequest::Reconcile` (the path greendot-web takes), and the
 //! standalone subcommand proxies to a running daemon or, given an explicit
 //! config (or no daemon), applies locally as root.
 
@@ -15,14 +15,14 @@ use crate::{cmd, lio, modules, nfs, nvmet};
 use anyhow::Result;
 use greendot_proto::actual::nfs::from_report;
 use greendot_proto::config::Config;
-use greendot_proto::{NFS_RDMA_PORT, Request, SubStatus, SubTask, Task, TaskEvent, pb};
+use greendot_proto::{NFS_RDMA_PORT, SubStatus, SubTask, Task, TaskEvent, TaskRequest, pb};
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
 
 /// Runs the `reconcile` subcommand and exits with status 1 if any step failed.
 /// With no explicit config it prefers a running daemon — proxying
-/// `Request::Reconcile` over its socket, so an unprivileged caller can heal
+/// `TaskRequest::Reconcile` over its socket, so an unprivileged caller can heal
 /// drift and the daemon's mutate lock keeps every privileged task serialized.
 /// With an explicit config, or no daemon, it applies in-process, which needs
 /// root (the daemon reconciles only against its own `--config`, so a custom
@@ -61,7 +61,7 @@ fn proxy(socket: std::path::PathBuf) -> Result<()> {
     runtime.block_on(async {
         let mut client = greendot_proto::client::connect_uds(socket)?;
         let mut stream = client
-            .run_task(pb::Request::from(Request::Reconcile))
+            .run_task(pb::TaskRequest::from(TaskRequest::Reconcile))
             .await?
             .into_inner();
         let mut sink = StdoutSink;

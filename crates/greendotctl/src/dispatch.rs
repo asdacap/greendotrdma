@@ -1,10 +1,13 @@
-//! The privileged-operation allowlist. Each task op resolves to exactly one
-//! command (a [`TaskSpec`]); `Ping`/`Authenticate` are one-shot replies and
-//! are never recorded as tasks (auth would store the password).
+//! The privileged-operation allowlist. [`plan`] resolves each task op to exactly
+//! one command (a [`TaskSpec`]) or special arm; [`plan_call`] answers the two
+//! one-shot ops, which are never recorded as tasks (auth would store the
+//! password). Only `plan_call` needs the [`Ctx`] — task planning is pure.
 
 use crate::cmd::TaskSpec;
 use crate::{fs, install, lio, lvm, modules, pam, partition, smart, zfs};
-use greendot_proto::{BlockDev, NetdevName, NfsDesired, NvmetDesired, Request, Response};
+use greendot_proto::{
+    BlockDev, CallRequest, NetdevName, NfsDesired, NvmetDesired, Response, TaskRequest,
+};
 use std::sync::Mutex;
 
 pub struct Ctx {
@@ -12,14 +15,15 @@ pub struct Ctx {
     pub auth_limiter: Mutex<pam::RateLimiter>,
     /// Serializes task execution so configfs/zfs changes never interleave.
     pub mutate_lock: Mutex<()>,
-    /// The daemon's own config TOML path for `Request::Reconcile` (`--config`;
+    /// The daemon's own config TOML path for `TaskRequest::Reconcile` (`--config`;
     /// `None` = built-in defaults). The request deliberately carries no path,
     /// so the peer cannot name a file for root to read.
     pub reconcile_config: Option<String>,
 }
 
 pub enum Dispatch {
-    /// Immediate reply (ping, authentication) — not a task.
+    /// Nothing to run: the op resolved to a no-op (an empty module or package
+    /// set). `RunTask` folds this into a one-subtask task carrying the reply.
     OneShot(Response),
     /// One command to run as a streamed task.
     Task(TaskSpec),
@@ -67,72 +71,76 @@ pub enum Dispatch {
     ReconcileDryRun,
 }
 
-pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
+/// Answer a one-shot op. `Authenticate` runs PAM, so this blocks.
+pub fn plan_call(ctx: &Ctx, req: CallRequest) -> Response {
     match req {
-        Request::Ping => Dispatch::OneShot(Response::Ok),
-        Request::Authenticate { username, password } => Dispatch::OneShot(pam::authenticate(
-            &ctx.auth,
-            &ctx.auth_limiter,
-            &username,
-            &password,
-        )),
+        CallRequest::Ping => Response::Ok,
+        CallRequest::Authenticate { username, password } => {
+            pam::authenticate(&ctx.auth, &ctx.auth_limiter, &username, &password)
+        }
+    }
+}
 
-        Request::ZvolCreate {
+pub fn plan(req: TaskRequest) -> Dispatch {
+    match req {
+        TaskRequest::ZvolCreate {
             dataset,
             size,
             volblocksize,
             sparse,
         } => Dispatch::Task(zfs::zvol_create(&dataset, size, volblocksize, sparse)),
-        Request::ZvolDelete { dataset } => Dispatch::Task(zfs::zvol_delete(&dataset)),
-        Request::ZvolResize { dataset, new_size } => {
+        TaskRequest::ZvolDelete { dataset } => Dispatch::Task(zfs::zvol_delete(&dataset)),
+        TaskRequest::ZvolResize { dataset, new_size } => {
             Dispatch::Task(zfs::zvol_resize(&dataset, new_size))
         }
-        Request::SnapshotCreate { dataset, snap } => {
+        TaskRequest::SnapshotCreate { dataset, snap } => {
             Dispatch::Task(zfs::snapshot_create(&dataset, &snap))
         }
-        Request::SnapshotDestroy { dataset, snap } => {
+        TaskRequest::SnapshotDestroy { dataset, snap } => {
             Dispatch::Task(zfs::snapshot_destroy(&dataset, &snap))
         }
 
-        Request::ZfsFsCreate {
+        TaskRequest::ZfsFsCreate {
             dataset,
             mountpoint,
         } => Dispatch::Task(zfs::zfs_fs_create(&dataset, mountpoint.as_ref())),
-        Request::ZfsSetMountpoint {
+        TaskRequest::ZfsSetMountpoint {
             dataset,
             mountpoint,
         } => Dispatch::Task(zfs::zfs_set_mountpoint(&dataset, &mountpoint)),
-        Request::ZfsMount { dataset } => Dispatch::Task(zfs::zfs_mount(&dataset)),
-        Request::ZfsUnmount { dataset } => Dispatch::Task(zfs::zfs_unmount(&dataset)),
-        Request::ZfsDestroy { dataset, recursive } => {
+        TaskRequest::ZfsMount { dataset } => Dispatch::Task(zfs::zfs_mount(&dataset)),
+        TaskRequest::ZfsUnmount { dataset } => Dispatch::Task(zfs::zfs_unmount(&dataset)),
+        TaskRequest::ZfsDestroy { dataset, recursive } => {
             Dispatch::Task(zfs::zfs_destroy(&dataset, recursive))
         }
 
-        Request::NvmetApply { desired } => Dispatch::NvmetApply(desired),
-        Request::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
-        Request::NfsApply { desired } => Dispatch::NfsApply(desired),
-        Request::NfsReport => Dispatch::NfsReport,
-        Request::Reconcile => Dispatch::Reconcile,
-        Request::NvmetReport => Dispatch::NvmetReport,
-        Request::LioReport => Dispatch::LioReport,
-        Request::LioSessions => Dispatch::LioSessions,
-        Request::RdmaDevices => Dispatch::RdmaDevices,
-        Request::NicPciAddrs => Dispatch::NicPciAddrs,
-        Request::NicInterfaces => Dispatch::NicInterfaces,
-        Request::ReconcileDryRun => Dispatch::ReconcileDryRun,
+        TaskRequest::NvmetApply { desired } => Dispatch::NvmetApply(desired),
+        TaskRequest::LioApply { desired } => Dispatch::Task(lio::apply_spec(&desired)),
+        TaskRequest::NfsApply { desired } => Dispatch::NfsApply(desired),
+        TaskRequest::NfsReport => Dispatch::NfsReport,
+        TaskRequest::Reconcile => Dispatch::Reconcile,
+        TaskRequest::NvmetReport => Dispatch::NvmetReport,
+        TaskRequest::LioReport => Dispatch::LioReport,
+        TaskRequest::LioSessions => Dispatch::LioSessions,
+        TaskRequest::RdmaDevices => Dispatch::RdmaDevices,
+        TaskRequest::NicPciAddrs => Dispatch::NicPciAddrs,
+        TaskRequest::NicInterfaces => Dispatch::NicInterfaces,
+        TaskRequest::ReconcileDryRun => Dispatch::ReconcileDryRun,
 
-        Request::EnsureModules { modules: list } => match modules::ensure(&list) {
+        TaskRequest::EnsureModules { modules: list } => match modules::ensure(&list) {
             Some(spec) => Dispatch::Task(spec),
             None => Dispatch::OneShot(Response::Ok),
         },
-        Request::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
-        Request::RoceCapableNics => Dispatch::RoceCapableNics,
-        Request::NicRdmaAdvice => Dispatch::NicRdmaAdvice,
-        Request::EnableRoce { netdev } => Dispatch::EnableRoce(netdev),
-        Request::RdmaResources => Dispatch::Task(modules::rdma_resources()),
+        TaskRequest::RxeLinkAdd { netdev } => Dispatch::Task(modules::rxe_link_add(&netdev)),
+        TaskRequest::RoceCapableNics => Dispatch::RoceCapableNics,
+        TaskRequest::NicRdmaAdvice => Dispatch::NicRdmaAdvice,
+        TaskRequest::EnableRoce { netdev } => Dispatch::EnableRoce(netdev),
+        TaskRequest::RdmaResources => Dispatch::Task(modules::rdma_resources()),
 
-        Request::PartitionTableCreate { disk } => Dispatch::Task(partition::table_create(&disk)),
-        Request::PartitionCreate {
+        TaskRequest::PartitionTableCreate { disk } => {
+            Dispatch::Task(partition::table_create(&disk))
+        }
+        TaskRequest::PartitionCreate {
             disk,
             start_sector,
             size_sectors,
@@ -143,69 +151,71 @@ pub fn plan(ctx: &Ctx, req: Request) -> Dispatch {
             size_sectors,
             &label,
         )),
-        Request::PartitionDelete { disk, number } => {
+        TaskRequest::PartitionDelete { disk, number } => {
             Dispatch::Task(partition::partition_delete(&disk, number))
         }
-        Request::PartitionResize {
+        TaskRequest::PartitionResize {
             disk,
             number,
             size_sectors,
         } => Dispatch::Task(partition::partition_resize(&disk, number, size_sectors)),
 
-        Request::Fsck { device } => Dispatch::Task(fs::fsck(&device)),
-        Request::ResizeExt {
+        TaskRequest::Fsck { device } => Dispatch::Task(fs::fsck(&device)),
+        TaskRequest::ResizeExt {
             device,
             new_size_sectors,
         } => Dispatch::Task(fs::resize_ext(&device, new_size_sectors)),
-        Request::BtrfsMount { device, mount_path } => {
+        TaskRequest::BtrfsMount { device, mount_path } => {
             Dispatch::Task(fs::btrfs_mount(&device, &mount_path))
         }
-        Request::BtrfsResize {
+        TaskRequest::BtrfsResize {
             mount_path,
             new_size,
         } => Dispatch::Task(fs::btrfs_resize(&mount_path, new_size)),
-        Request::Umount { mount_path } => Dispatch::Task(fs::umount(&mount_path)),
+        TaskRequest::Umount { mount_path } => Dispatch::Task(fs::umount(&mount_path)),
 
-        Request::PoolCreate {
+        TaskRequest::PoolCreate {
             name,
             vdev,
             devices,
             ashift,
         } => Dispatch::Task(zfs::pool_create(&name, vdev, &devices, ashift)),
-        Request::PoolDeviceAdd { pool, device } => {
+        TaskRequest::PoolDeviceAdd { pool, device } => {
             Dispatch::Task(zfs::pool_device_add(&pool, &device))
         }
 
-        Request::SmartReport { device } => Dispatch::Task(smart::report(&device)),
-        Request::SmartHealth { devices } => Dispatch::SmartHealth(devices),
+        TaskRequest::SmartReport { device } => Dispatch::Task(smart::report(&device)),
+        TaskRequest::SmartHealth { devices } => Dispatch::SmartHealth(devices),
 
-        Request::LvmReport { what } => Dispatch::Task(lvm::report(what)),
-        Request::VgCreate { name, devices } => Dispatch::Task(lvm::vg_create(&name, &devices)),
-        Request::VgExtend { vg, device } => Dispatch::Task(lvm::vg_extend(&vg, &device)),
-        Request::VgReduce { vg, device } => Dispatch::Task(lvm::vg_reduce(&vg, &device)),
-        Request::VgRemove { vg } => Dispatch::Task(lvm::vg_remove(&vg)),
-        Request::LvCreate { vg, name, size } => Dispatch::Task(lvm::lv_create(&vg, &name, size)),
-        Request::ThinPoolCreate { vg, name, size } => {
+        TaskRequest::LvmReport { what } => Dispatch::Task(lvm::report(what)),
+        TaskRequest::VgCreate { name, devices } => Dispatch::Task(lvm::vg_create(&name, &devices)),
+        TaskRequest::VgExtend { vg, device } => Dispatch::Task(lvm::vg_extend(&vg, &device)),
+        TaskRequest::VgReduce { vg, device } => Dispatch::Task(lvm::vg_reduce(&vg, &device)),
+        TaskRequest::VgRemove { vg } => Dispatch::Task(lvm::vg_remove(&vg)),
+        TaskRequest::LvCreate { vg, name, size } => {
+            Dispatch::Task(lvm::lv_create(&vg, &name, size))
+        }
+        TaskRequest::ThinPoolCreate { vg, name, size } => {
             Dispatch::Task(lvm::thin_pool_create(&vg, &name, size))
         }
-        Request::ThinLvCreate {
+        TaskRequest::ThinLvCreate {
             vg,
             pool,
             name,
             virtual_size,
         } => Dispatch::Task(lvm::thin_lv_create(&vg, &pool, &name, virtual_size)),
-        Request::LvResize { vg, name, new_size } => {
+        TaskRequest::LvResize { vg, name, new_size } => {
             Dispatch::Task(lvm::lv_resize(&vg, &name, new_size))
         }
-        Request::LvShrink { vg, name, new_size } => {
+        TaskRequest::LvShrink { vg, name, new_size } => {
             Dispatch::Task(lvm::lv_shrink(&vg, &name, new_size))
         }
-        Request::LvRename { vg, name, new_name } => {
+        TaskRequest::LvRename { vg, name, new_name } => {
             Dispatch::Task(lvm::lv_rename(&vg, &name, &new_name))
         }
-        Request::LvDelete { vg, name } => Dispatch::Task(lvm::lv_delete(&vg, &name)),
+        TaskRequest::LvDelete { vg, name } => Dispatch::Task(lvm::lv_delete(&vg, &name)),
 
-        Request::InstallPackages { packages } => {
+        TaskRequest::InstallPackages { packages } => {
             match install::install(&packages, &greendot_proto::os::detect()) {
                 Ok(Some(spec)) => Dispatch::Task(spec),
                 Ok(None) => Dispatch::OneShot(Response::Ok),
@@ -275,186 +285,185 @@ mod tests {
     /// wrong field) is caught without re-spelling the command line here.
     #[rstest]
     #[case::zvol_create(
-        Request::ZvolCreate { dataset: ds("tank/vm1"), size: 5 << 30, volblocksize: Some(8192), sparse: true },
+        TaskRequest::ZvolCreate { dataset: ds("tank/vm1"), size: 5 << 30, volblocksize: Some(8192), sparse: true },
         zfs::zvol_create(&ds("tank/vm1"), 5 << 30, Some(8192), true))]
     #[case::zvol_delete(
-        Request::ZvolDelete { dataset: ds("tank/vm1") },
+        TaskRequest::ZvolDelete { dataset: ds("tank/vm1") },
         zfs::zvol_delete(&ds("tank/vm1")))]
     #[case::zvol_resize(
-        Request::ZvolResize { dataset: ds("tank/vm1"), new_size: 7 << 30 },
+        TaskRequest::ZvolResize { dataset: ds("tank/vm1"), new_size: 7 << 30 },
         zfs::zvol_resize(&ds("tank/vm1"), 7 << 30))]
     #[case::snapshot_create(
-        Request::SnapshotCreate { dataset: ds("tank/vm1"), snap: sn("daily") },
+        TaskRequest::SnapshotCreate { dataset: ds("tank/vm1"), snap: sn("daily") },
         zfs::snapshot_create(&ds("tank/vm1"), &sn("daily")))]
     #[case::snapshot_destroy(
-        Request::SnapshotDestroy { dataset: ds("tank/vm1"), snap: sn("daily") },
+        TaskRequest::SnapshotDestroy { dataset: ds("tank/vm1"), snap: sn("daily") },
         zfs::snapshot_destroy(&ds("tank/vm1"), &sn("daily")))]
     #[case::zfs_fs_create(
-        Request::ZfsFsCreate { dataset: ds("tank/share"), mountpoint: Some(MountPoint::new("/srv/share").unwrap()) },
+        TaskRequest::ZfsFsCreate { dataset: ds("tank/share"), mountpoint: Some(MountPoint::new("/srv/share").unwrap()) },
         zfs::zfs_fs_create(&ds("tank/share"), Some(&MountPoint::new("/srv/share").unwrap())))]
     #[case::zfs_set_mountpoint(
-        Request::ZfsSetMountpoint { dataset: ds("tank/share"), mountpoint: MountPoint::new("/srv/share").unwrap() },
+        TaskRequest::ZfsSetMountpoint { dataset: ds("tank/share"), mountpoint: MountPoint::new("/srv/share").unwrap() },
         zfs::zfs_set_mountpoint(&ds("tank/share"), &MountPoint::new("/srv/share").unwrap()))]
     #[case::zfs_mount(
-        Request::ZfsMount { dataset: ds("tank/share") },
+        TaskRequest::ZfsMount { dataset: ds("tank/share") },
         zfs::zfs_mount(&ds("tank/share")))]
     #[case::zfs_unmount(
-        Request::ZfsUnmount { dataset: ds("tank/share") },
+        TaskRequest::ZfsUnmount { dataset: ds("tank/share") },
         zfs::zfs_unmount(&ds("tank/share")))]
     #[case::zfs_destroy(
-        Request::ZfsDestroy { dataset: ds("tank/share"), recursive: true },
+        TaskRequest::ZfsDestroy { dataset: ds("tank/share"), recursive: true },
         zfs::zfs_destroy(&ds("tank/share"), true))]
     #[case::pool_create(
-        Request::PoolCreate { name: PoolName::new("tank").unwrap(), vdev: VdevLayout::Mirror, devices: vec![dev("/dev/sdb"), dev("/dev/sdc")], ashift: Some(12) },
+        TaskRequest::PoolCreate { name: PoolName::new("tank").unwrap(), vdev: VdevLayout::Mirror, devices: vec![dev("/dev/sdb"), dev("/dev/sdc")], ashift: Some(12) },
         zfs::pool_create(&PoolName::new("tank").unwrap(), VdevLayout::Mirror, &[dev("/dev/sdb"), dev("/dev/sdc")], Some(12)))]
     #[case::pool_device_add(
-        Request::PoolDeviceAdd { pool: PoolName::new("tank").unwrap(), device: dev("/dev/sdd") },
+        TaskRequest::PoolDeviceAdd { pool: PoolName::new("tank").unwrap(), device: dev("/dev/sdd") },
         zfs::pool_device_add(&PoolName::new("tank").unwrap(), &dev("/dev/sdd")))]
     #[case::smart_report(
-        Request::SmartReport { device: disk("sda") },
+        TaskRequest::SmartReport { device: disk("sda") },
         smart::report(&disk("sda")))]
     #[case::lio_apply(
-        Request::LioApply { desired: LioDesired::default() },
+        TaskRequest::LioApply { desired: LioDesired::default() },
         lio::apply_spec(&LioDesired::default()))]
     #[case::ensure_modules(
-        Request::EnsureModules { modules: vec![KernelModule::Rxe] },
+        TaskRequest::EnsureModules { modules: vec![KernelModule::Rxe] },
         modules::ensure(&[KernelModule::Rxe]).unwrap())]
     #[case::rxe_link_add(
-        Request::RxeLinkAdd { netdev: NetdevName::new("eth0").unwrap() },
+        TaskRequest::RxeLinkAdd { netdev: NetdevName::new("eth0").unwrap() },
         modules::rxe_link_add(&NetdevName::new("eth0").unwrap()))]
     #[case::partition_table_create(
-        Request::PartitionTableCreate { disk: disk("sdb") },
+        TaskRequest::PartitionTableCreate { disk: disk("sdb") },
         partition::table_create(&disk("sdb")))]
     #[case::partition_create(
-        Request::PartitionCreate { disk: disk("sdb"), start_sector: Some(2048), size_sectors: Some(1 << 20), label: PartLabel::new("data").unwrap() },
+        TaskRequest::PartitionCreate { disk: disk("sdb"), start_sector: Some(2048), size_sectors: Some(1 << 20), label: PartLabel::new("data").unwrap() },
         partition::partition_create(&disk("sdb"), Some(2048), Some(1 << 20), &PartLabel::new("data").unwrap()))]
     #[case::partition_delete(
-        Request::PartitionDelete { disk: disk("sdb"), number: 2 },
+        TaskRequest::PartitionDelete { disk: disk("sdb"), number: 2 },
         partition::partition_delete(&disk("sdb"), 2))]
     #[case::partition_resize(
-        Request::PartitionResize { disk: disk("sdb"), number: 2, size_sectors: 1 << 21 },
+        TaskRequest::PartitionResize { disk: disk("sdb"), number: 2, size_sectors: 1 << 21 },
         partition::partition_resize(&disk("sdb"), 2, 1 << 21))]
     #[case::fsck(
-        Request::Fsck { device: dev("/dev/sdb2") },
+        TaskRequest::Fsck { device: dev("/dev/sdb2") },
         fs::fsck(&dev("/dev/sdb2")))]
     #[case::resize_ext(
-        Request::ResizeExt { device: dev("/dev/sdb2"), new_size_sectors: 1 << 21 },
+        TaskRequest::ResizeExt { device: dev("/dev/sdb2"), new_size_sectors: 1 << 21 },
         fs::resize_ext(&dev("/dev/sdb2"), 1 << 21))]
     #[case::btrfs_mount(
-        Request::BtrfsMount { device: dev("/dev/sdb2"), mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
+        TaskRequest::BtrfsMount { device: dev("/dev/sdb2"), mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
         fs::btrfs_mount(&dev("/dev/sdb2"), &mp("/run/greendotrdma/btrfs-resize-sdb2")))]
     #[case::btrfs_resize(
-        Request::BtrfsResize { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2"), new_size: 1 << 30 },
+        TaskRequest::BtrfsResize { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2"), new_size: 1 << 30 },
         fs::btrfs_resize(&mp("/run/greendotrdma/btrfs-resize-sdb2"), 1 << 30))]
     #[case::umount(
-        Request::Umount { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
+        TaskRequest::Umount { mount_path: mp("/run/greendotrdma/btrfs-resize-sdb2") },
         fs::umount(&mp("/run/greendotrdma/btrfs-resize-sdb2")))]
     #[case::lvm_report(
-        Request::LvmReport { what: LvmReport::Vgs },
+        TaskRequest::LvmReport { what: LvmReport::Vgs },
         lvm::report(LvmReport::Vgs))]
     #[case::vg_create(
-        Request::VgCreate { name: vg("vg0"), devices: vec![dev("/dev/sdb")] },
+        TaskRequest::VgCreate { name: vg("vg0"), devices: vec![dev("/dev/sdb")] },
         lvm::vg_create(&vg("vg0"), &[dev("/dev/sdb")]))]
     #[case::vg_extend(
-        Request::VgExtend { vg: vg("vg0"), device: dev("/dev/sdc") },
+        TaskRequest::VgExtend { vg: vg("vg0"), device: dev("/dev/sdc") },
         lvm::vg_extend(&vg("vg0"), &dev("/dev/sdc")))]
     #[case::vg_reduce(
-        Request::VgReduce { vg: vg("vg0"), device: dev("/dev/sdc") },
+        TaskRequest::VgReduce { vg: vg("vg0"), device: dev("/dev/sdc") },
         lvm::vg_reduce(&vg("vg0"), &dev("/dev/sdc")))]
     #[case::vg_remove(
-        Request::VgRemove { vg: vg("vg0") },
+        TaskRequest::VgRemove { vg: vg("vg0") },
         lvm::vg_remove(&vg("vg0")))]
     #[case::lv_create(
-        Request::LvCreate { vg: vg("vg0"), name: lv("data"), size: 10 << 30 },
+        TaskRequest::LvCreate { vg: vg("vg0"), name: lv("data"), size: 10 << 30 },
         lvm::lv_create(&vg("vg0"), &lv("data"), 10 << 30))]
     #[case::thin_pool_create(
-        Request::ThinPoolCreate { vg: vg("vg0"), name: lv("pool0"), size: 50 << 30 },
+        TaskRequest::ThinPoolCreate { vg: vg("vg0"), name: lv("pool0"), size: 50 << 30 },
         lvm::thin_pool_create(&vg("vg0"), &lv("pool0"), 50 << 30))]
     #[case::thin_lv_create(
-        Request::ThinLvCreate { vg: vg("vg0"), pool: lv("pool0"), name: lv("vm1"), virtual_size: 20 << 30 },
+        TaskRequest::ThinLvCreate { vg: vg("vg0"), pool: lv("pool0"), name: lv("vm1"), virtual_size: 20 << 30 },
         lvm::thin_lv_create(&vg("vg0"), &lv("pool0"), &lv("vm1"), 20 << 30))]
     #[case::lv_resize(
-        Request::LvResize { vg: vg("vg0"), name: lv("data"), new_size: 12 << 30 },
+        TaskRequest::LvResize { vg: vg("vg0"), name: lv("data"), new_size: 12 << 30 },
         lvm::lv_resize(&vg("vg0"), &lv("data"), 12 << 30))]
     #[case::lv_shrink(
-        Request::LvShrink { vg: vg("vg0"), name: lv("data"), new_size: 8 << 30 },
+        TaskRequest::LvShrink { vg: vg("vg0"), name: lv("data"), new_size: 8 << 30 },
         lvm::lv_shrink(&vg("vg0"), &lv("data"), 8 << 30))]
     #[case::lv_rename(
-        Request::LvRename { vg: vg("vg0"), name: lv("data"), new_name: lv("archive") },
+        TaskRequest::LvRename { vg: vg("vg0"), name: lv("data"), new_name: lv("archive") },
         lvm::lv_rename(&vg("vg0"), &lv("data"), &lv("archive")))]
     #[case::lv_delete(
-        Request::LvDelete { vg: vg("vg0"), name: lv("data") },
+        TaskRequest::LvDelete { vg: vg("vg0"), name: lv("data") },
         lvm::lv_delete(&vg("vg0"), &lv("data")))]
-    fn task_requests_route_to_their_builder(#[case] req: Request, #[case] expected: TaskSpec) {
-        assert_eq!(task(plan(&ctx(), req)), expected);
+    fn task_requests_route_to_their_builder(#[case] req: TaskRequest, #[case] expected: TaskSpec) {
+        assert_eq!(task(plan(req)), expected);
     }
 
-    /// The non-task arms: immediate replies, configfs apply, and the empty-set
-    /// shortcuts that need no command at all.
+    /// The two one-shot ops, which never become tasks.
     #[test]
-    fn oneshot_and_special_arms() {
+    fn call_ops_reply_immediately() {
         let ctx = ctx();
-        assert!(matches!(
-            plan(&ctx, Request::Ping),
-            Dispatch::OneShot(Response::Ok)
-        ));
+        assert_eq!(plan_call(&ctx, CallRequest::Ping), Response::Ok);
         // Rate limiter is exhausted, so the reply is Busy (not real PAM auth).
         assert!(matches!(
-            plan(
+            plan_call(
                 &ctx,
-                Request::Authenticate {
+                CallRequest::Authenticate {
                     username: Username::new("alice").unwrap(),
                     password: Secret("secret".into()),
                 }
             ),
-            Dispatch::OneShot(Response::Err {
+            Response::Err {
                 kind: ErrKind::Busy,
                 ..
-            })
+            }
         ));
+    }
+
+    /// The non-task arms: configfs apply, privileged reads, and the empty-set
+    /// shortcuts that need no command at all.
+    #[test]
+    fn oneshot_and_special_arms() {
         // Empty module / package sets resolve to a no-op reply, not a task.
         assert!(matches!(
-            plan(&ctx, Request::EnsureModules { modules: vec![] }),
+            plan(TaskRequest::EnsureModules { modules: vec![] }),
             Dispatch::OneShot(Response::Ok)
         ));
         assert!(matches!(
-            plan(&ctx, Request::InstallPackages { packages: vec![] }),
+            plan(TaskRequest::InstallPackages { packages: vec![] }),
             Dispatch::OneShot(Response::Ok)
         ));
         // NVMe-oF apply is carried through verbatim for the helper to write.
         let desired = NvmetDesired::default();
         assert!(matches!(
-            plan(&ctx, Request::NvmetApply { desired: desired.clone() }),
+            plan(TaskRequest::NvmetApply { desired: desired.clone() }),
             Dispatch::NvmetApply(d) if d == desired
         ));
         // NFS apply/report route to their special arms.
         let nfs = NfsDesired::default();
         assert!(matches!(
-            plan(&ctx, Request::NfsApply { desired: nfs.clone() }),
+            plan(TaskRequest::NfsApply { desired: nfs.clone() }),
             Dispatch::NfsApply(d) if d == nfs
         ));
-        assert!(matches!(
-            plan(&ctx, Request::NfsReport),
-            Dispatch::NfsReport
-        ));
+        assert!(matches!(plan(TaskRequest::NfsReport), Dispatch::NfsReport));
         // RoCE hardware read + enable route to their special arms (the
         // vendor-specific work lives in `hardware`, not a single TaskSpec).
         assert!(matches!(
-            plan(&ctx, Request::RoceCapableNics),
+            plan(TaskRequest::RoceCapableNics),
             Dispatch::RoceCapableNics
         ));
         assert!(matches!(
-            plan(&ctx, Request::NicRdmaAdvice),
+            plan(TaskRequest::NicRdmaAdvice),
             Dispatch::NicRdmaAdvice
         ));
         assert!(matches!(
-            plan(&ctx, Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
+            plan(TaskRequest::EnableRoce { netdev: NetdevName::new("ens16").unwrap() }),
             Dispatch::EnableRoce(nd) if nd.as_str() == "ens16"
         ));
         // SMART health is a batch read routed to its own arm (one TaskSpec can't
         // express "run smartctl per device and merge").
         assert!(matches!(
-            plan(&ctx, Request::SmartHealth { devices: vec![disk("sda")] }),
+            plan(TaskRequest::SmartHealth { devices: vec![disk("sda")] }),
             Dispatch::SmartHealth(d) if d.len() == 1 && d[0].as_str() == "sda"
         ));
     }

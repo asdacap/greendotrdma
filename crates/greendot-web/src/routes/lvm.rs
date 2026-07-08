@@ -13,7 +13,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DevicePath, LvName, Request, VgName};
+use greendot_proto::{DevicePath, LvName, TaskRequest, VgName};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -292,7 +292,7 @@ async fn vg_detail_page(
 /// partial with the outcome.
 async fn run_lv(
     state: &Arc<AppState>,
-    req: Request,
+    req: TaskRequest,
     kind: &str,
     title: &str,
     vg: &str,
@@ -386,7 +386,7 @@ async fn lv_detail_page(
 /// partial with the outcome (stay-on-page ops: grow / shrink / rename).
 async fn run_lv_detail(
     state: &Arc<AppState>,
-    req: Request,
+    req: TaskRequest,
     kind: &str,
     title: &str,
     vg: &str,
@@ -530,7 +530,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
             return lv_failed(&state, &scope, "invalid thin pool").await;
         };
         (
-            Request::ThinLvCreate {
+            TaskRequest::ThinLvCreate {
                 vg: vg.clone(),
                 pool,
                 name: name.clone(),
@@ -543,7 +543,7 @@ async fn lv_create(State(state): State<Arc<AppState>>, Form(form): Form<LvCreate
             return lv_failed(&state, &scope, "choose a volume group").await;
         };
         (
-            Request::LvCreate {
+            TaskRequest::LvCreate {
                 vg: vg.clone(),
                 name: name.clone(),
                 size,
@@ -573,7 +573,7 @@ async fn thin_pool_create(
     let Some(size) = parse_size(&form.size, &form.unit) else {
         return lv_failed(&state, &scope, "invalid size").await;
     };
-    let req = Request::ThinPoolCreate {
+    let req = TaskRequest::ThinPoolCreate {
         vg: vg.clone(),
         name: name.clone(),
         size,
@@ -611,7 +611,7 @@ async fn lv_resize(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         Ok(v) => v,
         Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
-    let req = Request::LvResize {
+    let req = TaskRequest::LvResize {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
@@ -633,7 +633,7 @@ async fn lv_shrink(State(state): State<Arc<AppState>>, Form(form): Form<LvResize
         Ok(v) => v,
         Err(e) => return lv_detail_failed(&state, &scope_vg, &scope_name, e).await,
     };
-    let req = Request::LvShrink {
+    let req = TaskRequest::LvShrink {
         vg: vg.clone(),
         name: name.clone(),
         new_size,
@@ -671,7 +671,7 @@ async fn lv_rename(State(state): State<Arc<AppState>>, Form(form): Form<LvRename
         )
         .await;
     };
-    let req = Request::LvRename {
+    let req = TaskRequest::LvRename {
         vg: vg.clone(),
         name: name.clone(),
         new_name: new_name.clone(),
@@ -706,7 +706,7 @@ async fn lv_delete(
         return lv_detail_failed(&state, &scope_vg, &scope_name, "invalid logical volume").await;
     };
     let title = format!("delete {vg}/{name}");
-    let req = Request::LvDelete {
+    let req = TaskRequest::LvDelete {
         vg: vg.clone(),
         name: name.clone(),
     };
@@ -734,7 +734,7 @@ async fn vg_extend(State(state): State<Arc<AppState>>, Form(form): Form<VgDevice
     ) else {
         return lv_failed(&state, &scope, "invalid volume group or device").await;
     };
-    let req = Request::VgExtend {
+    let req = TaskRequest::VgExtend {
         vg: vg.clone(),
         device: device.clone(),
     };
@@ -763,7 +763,7 @@ async fn vg_reduce(
         return pv_detail_failed(&state, &device_scope, "invalid volume group or device").await;
     };
     let title = format!("remove {device} from {vg}");
-    let req = Request::VgReduce {
+    let req = TaskRequest::VgReduce {
         vg: vg.clone(),
         device: device.clone(),
     };
@@ -790,7 +790,7 @@ async fn vg_remove(
         return lv_failed(&state, &scope, "invalid volume group").await;
     };
     let title = format!("remove volume group {vg}");
-    let req = Request::VgRemove { vg: vg.clone() };
+    let req = TaskRequest::VgRemove { vg: vg.clone() };
     match crate::task_runner::start(&state, req, "vg-remove", &title) {
         Ok(_) => nav_redirect(&headers, "/lvm"),
         Err(e) => lv_failed(&state, &scope, format!("{e:#}")).await,
@@ -922,7 +922,7 @@ async fn vg_create(
         return vg_create_failed(&state, selected, "select at least one device".into()).await;
     }
     let title = format!("create volume group {vg}");
-    let req = Request::VgCreate {
+    let req = TaskRequest::VgCreate {
         name: vg,
         devices: device_paths,
     };

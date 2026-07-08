@@ -3,7 +3,7 @@
 
 use crate::routes::AppState;
 use crate::state::{SubTaskRecord, TaskStatus};
-use greendot_proto::{Request, SubStatus, TaskEvent};
+use greendot_proto::{SubStatus, TaskEvent, TaskRequest};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{broadcast, mpsc};
@@ -152,7 +152,12 @@ pub(crate) fn begin(state: &AppState, kind: &str, title: &str) -> anyhow::Result
 /// *without* waiting for it: the run is driven to completion — recorded and
 /// streamed — on a background task. Handlers respond at once and surface a link
 /// to /tasks/{id}.
-pub fn start(state: &Arc<AppState>, req: Request, kind: &str, title: &str) -> anyhow::Result<i64> {
+pub fn start(
+    state: &Arc<AppState>,
+    req: TaskRequest,
+    kind: &str,
+    title: &str,
+) -> anyhow::Result<i64> {
     let id = begin(state, kind, title)?;
     let rx = state.helper.run_task(req);
     let state = state.clone();
@@ -168,7 +173,7 @@ pub fn start(state: &Arc<AppState>, req: Request, kind: &str, title: &str) -> an
 /// tests that need the outcome synchronously; HTTP handlers use [`start`].
 pub async fn run(
     state: &AppState,
-    req: Request,
+    req: TaskRequest,
     kind: &str,
     title: &str,
 ) -> anyhow::Result<TaskOutcome> {

@@ -15,7 +15,7 @@ use askama::Template;
 use axum::extract::{Form, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use greendot_proto::{DevicePath, ExportName, Request};
+use greendot_proto::{DevicePath, ExportName, TaskRequest};
 use serde::Deserialize;
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -41,7 +41,7 @@ struct DriftFlags {
 
 /// Serialized full reconcile against current desired state. A daemon-side drift
 /// pre-check keeps the steady state (and the 60 s timer) silent; on drift
-/// it asks the daemon to reconcile inline (`Request::Reconcile`, streamed back
+/// it asks the daemon to reconcile inline (`TaskRequest::Reconcile`, streamed back
 /// as a recorded task) and returns the task id *without waiting* — the outcome
 /// is surfaced on the export dots and the settings banner once it finishes (in
 /// the background). The web stays the sole writer of the desired state — the
@@ -64,8 +64,14 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
         nvmet_ok,
         lio_ok,
         nfs_ok,
-    } = serde_json::from_str(&state.helper.collect(Request::ReconcileDryRun).await.stdout)
-        .unwrap_or_default();
+    } = serde_json::from_str(
+        &state
+            .helper
+            .collect(TaskRequest::ReconcileDryRun)
+            .await
+            .stdout,
+    )
+    .unwrap_or_default();
     if nvmet_ok && lio_ok && nfs_ok {
         return Ok(None); // already realized — emit no task
     }
@@ -78,12 +84,13 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
     let st = state.clone();
     tokio::spawn(async move {
         let _guard = guard; // serialize: released only when the run is done
-        let outcome = crate::task_runner::drive(&st, id, st.helper.run_task(Request::Reconcile))
-            .await
-            .unwrap_or_else(|e| TaskOutcome {
-                ok: false,
-                error: Some(format!("{e:#}")),
-            });
+        let outcome =
+            crate::task_runner::drive(&st, id, st.helper.run_task(TaskRequest::Reconcile))
+                .await
+                .unwrap_or_else(|e| TaskOutcome {
+                    ok: false,
+                    error: Some(format!("{e:#}")),
+                });
         st.tasks.unregister(id);
         if let Err(e) = apply_reconcile_outcome(
             &st,

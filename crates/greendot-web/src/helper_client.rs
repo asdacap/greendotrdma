@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result, anyhow};
 use greendot_proto::pb::helper_client::HelperClient as GrpcClient;
-use greendot_proto::{Request, Response, SubStatus, TaskEvent, pb};
+use greendot_proto::{CallRequest, Response, SubStatus, TaskEvent, TaskRequest, pb};
 use std::path::PathBuf;
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
@@ -40,10 +40,12 @@ impl HelperClient {
         HelperClient { inner }
     }
 
-    pub async fn call(&self, req: Request) -> Result<Response> {
+    /// Sends a one-shot request (`Ping`/`Authenticate`) and awaits its reply.
+    /// These are the only ops the helper answers without a recorded task.
+    pub async fn call(&self, req: CallRequest) -> Result<Response> {
         let mut client = self.inner.clone();
         let resp = client
-            .call(pb::Request::from(req))
+            .call(pb::CallRequest::from(req))
             .await
             .context("helper call failed")?
             .into_inner();
@@ -53,7 +55,7 @@ impl HelperClient {
     /// Runs a task request to completion, collecting its output without
     /// recording a DB task. Used for privileged *reads* (e.g. LVM reporting)
     /// that must not clutter the Tasks page.
-    pub async fn collect(&self, req: Request) -> HelperOutput {
+    pub async fn collect(&self, req: TaskRequest) -> HelperOutput {
         let mut rx = self.run_task(req);
         let mut out = HelperOutput::default();
         while let Some(ev) = rx.recv().await {
@@ -74,11 +76,11 @@ impl HelperClient {
     /// Runs a task request, delivering the helper's streamed events on the
     /// returned channel. A synthetic `Finished` is always sent (even on
     /// transport failure) so the consumer can rely on a terminal event.
-    pub fn run_task(&self, req: Request) -> mpsc::Receiver<TaskEvent> {
+    pub fn run_task(&self, req: TaskRequest) -> mpsc::Receiver<TaskEvent> {
         let mut client = self.inner.clone();
         let (tx, rx) = mpsc::channel(128);
         tokio::spawn(async move {
-            let mut stream = match client.run_task(pb::Request::from(req)).await {
+            let mut stream = match client.run_task(pb::TaskRequest::from(req)).await {
                 Ok(resp) => resp.into_inner(),
                 Err(e) => {
                     let _ = tx

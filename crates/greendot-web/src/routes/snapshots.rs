@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{DatasetName, Request, SnapName};
+use greendot_proto::{DatasetName, SnapName, TaskRequest};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -450,7 +450,7 @@ async fn manual_snapshot(
         )
         .await;
     };
-    let req = Request::SnapshotCreate {
+    let req = TaskRequest::SnapshotCreate {
         dataset: dataset.clone(),
         snap: snap.clone(),
     };
@@ -478,7 +478,7 @@ async fn snapshot_delete(
     let (Ok(dataset), Ok(snap)) = (DatasetName::new(dataset), SnapName::new(snap)) else {
         return snap_detail(&form.name, None, Some("invalid snapshot name".into()), None).await;
     };
-    let req = Request::SnapshotDestroy { dataset, snap };
+    let req = TaskRequest::SnapshotDestroy { dataset, snap };
     let title = format!("destroy {}", form.name);
     // Removing the snapshot means its page no longer applies — go back to the
     // index; the destroy task is viewable on /tasks.

@@ -3,17 +3,26 @@ syntax = "proto3";
 // gRPC transport for the greendot-web (unprivileged) <-> greendotctl (root)
 // helper protocol. These messages are a "dumb string" transport layer: unlike
 // the validated newtypes in the domain model, prost decoding does NOT re-run
-// the validators, so the daemon MUST convert every incoming Request through
-// `TryFrom<pb::Request> for Request` (src/convert.rs), which re-validates every
-// field. That conversion is the single security choke point.
+// the validators, so the daemon MUST convert every incoming request through
+// `TryFrom<pb::CallRequest>` / `TryFrom<pb::TaskRequest>` (src/convert.rs),
+// which re-validate every field. Those conversions are the security choke point.
 package greendot.helper.v1;
 
-// The privileged helper. `Call` is the unary path (Ping / Authenticate);
-// `RunTask` streams task output (Started/Stdout/Stderr/Finished) for every
-// mutating operation and privileged read.
+// The privileged helper. The two RPCs differ in reply shape, and each takes the
+// request message holding exactly the ops that can produce that reply:
+//
+//   Call    -> one `Response`. Only `Ping` and `Authenticate`, which are never
+//              recorded as tasks (a task records its request, so recording
+//              `Authenticate` would write the password into the task log).
+//   RunTask -> the recorded task stream (Started/Stdout/Stderr/Finished), for
+//              every mutating operation and every privileged read.
+//
+// The two request messages partition the ops between them, so the RPC you call
+// decides *in the type system* which ops you may name: there is no "task op sent
+// to Call" case for the daemon to reject at runtime.
 service Helper {
-  rpc Call(Request) returns (Response);
-  rpc RunTask(Request) returns (stream TaskEvent);
+  rpc Call(CallRequest) returns (Response);
+  rpc RunTask(TaskRequest) returns (stream TaskEvent);
 }
 
 // Placeholder for unit request variants (Ping, NfsReport, ...). A oneof arm
@@ -139,9 +148,24 @@ message NfsClientSpec {
   bool rw = 2;
 }
 
-// ---- Request variants (one message per domain Request variant). ----
+// ---- Call: the one-shot ops. ----
 
+// PAM authentication plus the admin-group check, answered with `OkAuth` or an
+// `AUTH_FAILED`/`NOT_IN_ADMIN_GROUP`/`BUSY` (rate-limited) error. It lives
+// behind the root helper because greendot-web is unprivileged and only root can
+// read `/etc/shadow`. It is a `Call` rather than a `RunTask` so the password
+// never reaches a recorded task.
 message Authenticate { string username = 1; string password = 2; }
+
+// The ops answered by a single `Response`. Exactly one arm is set.
+message CallRequest {
+  oneof op {
+    Empty ping = 1;
+    Authenticate authenticate = 2;
+  }
+}
+
+// ---- Task request variants (one message per domain TaskRequest variant). ----
 
 message ZvolCreate {
   string dataset = 1;
@@ -170,6 +194,12 @@ message PartitionCreate {
 message PartitionDelete { string disk = 1; uint32 number = 2; }
 message PartitionResize { string disk = 1; uint32 number = 2; uint64 size_sectors = 3; }
 
+// Filesystem shrink steps. ext* shrinks offline, addressing the device
+// directly (`e2fsck` then `resize2fs`). btrfs has no offline shrink — `btrfs
+// filesystem resize` only works on a *mounted* filesystem, and it names the
+// mount point, not the device. So a btrfs shrink is three steps: mount the
+// device at a helper-owned temp path under `/run/greendotrdma`, resize, unmount.
+// That is the only reason a filesystem type appears by name in this protocol.
 message Fsck { string device = 1; }
 message ResizeExt { string device = 1; uint64 new_size_sectors = 2; }
 message BtrfsMount { string device = 1; string mount_path = 2; }
@@ -207,39 +237,60 @@ message NfsApply { NfsDesired desired = 1; }
 // peer cannot name a file for root to read.
 message Reconcile { reserved 1; reserved "config"; }
 
+// `modprobe` the Linux kernel modules an enabled feature needs (see the
+// `KernelModule` enum: nvmet_rdma, iscsi_target_mod, rdma_rxe, ...). Modules
+// already loaded are skipped, and an empty set is a no-op.
 message EnsureModules { repeated KernelModule modules = 1; }
 message RxeLinkAdd { string netdev = 1; }
 message EnableRoce { string netdev = 1; }
 message InstallPackages { repeated string packages = 1; }
 
-// The tagged request. Exactly one arm is set.
-message Request {
+// The ops answered by a recorded task stream: every mutation, plus the reads
+// that need root. Exactly one arm is set.
+message TaskRequest {
+  // 1 and 2 stayed with `CallRequest` when the original single `Request` oneof
+  // was split; the arms below keep the numbers they had there.
+  reserved 1, 2;
+
   oneof op {
-    Empty ping = 1;
-    Authenticate authenticate = 2;
+    // ZFS zvols and snapshots (reads happen unprivileged in greendot-web).
     ZvolCreate zvol_create = 3;
     ZvolDelete zvol_delete = 4;
     ZvolResize zvol_resize = 5;
     SnapshotCreate snapshot_create = 6;
     SnapshotDestroy snapshot_destroy = 7;
+
+    // ZFS filesystem datasets (mount lifecycle).
     ZfsFsCreate zfs_fs_create = 8;
     ZfsSetMountpoint zfs_set_mountpoint = 9;
     ZfsMount zfs_mount = 10;
     ZfsUnmount zfs_unmount = 11;
     ZfsDestroy zfs_destroy = 12;
+
+    // Partitioning (sfdisk).
     PartitionTableCreate partition_table_create = 13;
     PartitionCreate partition_create = 14;
     PartitionDelete partition_delete = 15;
     PartitionResize partition_resize = 16;
+
+    // Filesystem shrink steps, one command each; the web sequences them, the
+    // filesystem always before the partition. See the messages above for why
+    // btrfs needs its own mount/umount pair and ext* does not.
     Fsck fsck = 17;
     ResizeExt resize_ext = 18;
     BtrfsMount btrfs_mount = 19;
     BtrfsResize btrfs_resize = 20;
     Umount umount = 21;
+
+    // ZFS pools.
     PoolCreate pool_create = 22;
     PoolDeviceAdd pool_device_add = 23;
+
+    // SMART: privileged reads, since smartctl needs root.
     SmartReport smart_report = 24;
     SmartHealth smart_health = 25;
+
+    // LVM. Its reads need root too (unlike the ZFS reads), so they come here.
     LvmReport lvm_report = 26;
     VgCreate vg_create = 27;
     VgExtend vg_extend = 28;
@@ -252,10 +303,14 @@ message Request {
     LvShrink lv_shrink = 35;
     LvRename lv_rename = 36;
     LvDelete lv_delete = 37;
+
+    // NVMe-oF / iSCSI / NFS desired-state applies, plus the NFS privileged read.
     NvmetApply nvmet_apply = 38;
     LioApply lio_apply = 39;
     NfsApply nfs_apply = 40;
     Empty nfs_report = 41;
+
+    // System: kernel modules, RDMA link setup, RoCE enablement, package installs.
     EnsureModules ensure_modules = 42;
     RxeLinkAdd rxe_link_add = 43;
     Empty roce_capable_nics = 44;
@@ -263,7 +318,10 @@ message Request {
     Empty nic_rdma_advice = 46;
     Empty rdma_resources = 47;
     InstallPackages install_packages = 48;
+
+    // The full desired-state reconcile pass, one subtask per area.
     Reconcile reconcile = 49;
+
     // Privileged/structural reads collected by the web (JSON on the task's
     // stdout, like nfs_report). All fieldless — the daemon reads the canonical
     // system paths and serializes a shared actual-state DTO.

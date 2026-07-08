@@ -150,7 +150,7 @@ pub async fn login_post(
     let Ok(username) = Username::new(form.username) else {
         return login_failed("invalid username or password");
     };
-    let req = greendot_proto::Request::Authenticate {
+    let req = greendot_proto::CallRequest::Authenticate {
         username,
         password: Secret(form.password),
     };

@@ -1,18 +1,23 @@
 //! Protocol between greendot-web (unprivileged) and greendotctl (root).
 //!
-//! This module holds the *validated domain model* — `Request`/`Response`/
-//! `TaskEvent` and the newtypes in `types`. Every request variant is one
-//! allowlisted privileged operation, and all strings that end up as path
-//! components or command arguments are validated newtypes.
+//! This module holds the *validated domain model* — [`CallRequest`]/
+//! [`TaskRequest`]/[`Response`]/[`TaskEvent`] and the newtypes in `types`. Every
+//! request variant is one allowlisted privileged operation, and all strings that
+//! end up as path components or command arguments are validated newtypes.
+//!
+//! A request is one of two kinds, split by what the helper answers with: a
+//! [`CallRequest`] gets a single [`Response`], a [`TaskRequest`] gets a recorded
+//! stream of [`TaskEvent`]s. Only the two ops that must not be recorded are
+//! calls (see [`CallRequest`]); everything else is a task.
 //!
 //! The transport is gRPC (tonic): the generated protobuf types live in [`pb`],
 //! and [`convert`] provides the conversions. Crucially, protobuf messages are
 //! plain strings that prost does *not* validate on decode, so every incoming
-//! `pb::Request` must pass the `TryFrom` conversion (in `convert`), which
-//! re-runs the validators. The `server::Validated` adapter (feature `server`)
-//! performs that conversion in exactly one place, so daemon code only ever
-//! handles the validated domain `Request` — the security choke point cannot
-//! be skipped.
+//! `pb::CallRequest`/`pb::TaskRequest` must pass the `TryFrom` conversion (in
+//! `convert`), which re-runs the validators. The `server::Validated` adapter
+//! (feature `server`) performs that conversion in exactly one place, so daemon
+//! code only ever handles the validated domain types — the security choke point
+//! cannot be skipped.
 
 /// Actual-state DTOs and their pure parsers (the read half of the contract).
 pub mod actual;
@@ -41,14 +46,27 @@ pub mod pb {
 pub use convert::ConvertError;
 pub use types::*;
 
+/// The ops the helper answers with one [`Response`] instead of a recorded task.
+///
+/// Membership is not a performance choice: a task records the request that
+/// started it, so `Authenticate` must never be one — that would write the
+/// password into the task log. `Ping` is here because a liveness probe with a
+/// task record per call is useless. Everything else is a [`TaskRequest`].
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Request {
+pub enum CallRequest {
     Ping,
+    /// PAM authentication + admin-group check, run by root because the web is
+    /// unprivileged and only root can read `/etc/shadow`.
     Authenticate {
         username: Username,
         password: Secret,
     },
+}
 
+/// Every mutating operation and every privileged read: the helper answers these
+/// with a stream of [`TaskEvent`]s that the web records as a task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskRequest {
     // ZFS (reads happen unprivileged in greendot-web)
     ZvolCreate {
         dataset: DatasetName,
@@ -117,7 +135,10 @@ pub enum Request {
     },
 
     // Filesystem shrink steps (each one CLI command; the web side sequences
-    // them, filesystem always before the partition).
+    // them, filesystem always before the partition). ext* shrinks offline and
+    // names the device (`Fsck` + `ResizeExt`); btrfs has no offline shrink —
+    // `btrfs filesystem resize` names a *mount point* — so it needs the
+    // mount/resize/umount trio against a helper-owned temp path.
     Fsck {
         device: DevicePath,
     },
@@ -245,6 +266,8 @@ pub enum Request {
     Reconcile,
 
     // System
+    /// `modprobe` the Linux kernel modules an enabled feature needs. Modules
+    /// already loaded are skipped; an empty set is a no-op.
     EnsureModules {
         modules: Vec<KernelModule>,
     },
@@ -596,7 +619,7 @@ mod tests {
 
     #[test]
     fn secret_debug_is_redacted() {
-        let req = Request::Authenticate {
+        let req = CallRequest::Authenticate {
             username: Username::new("alice").unwrap(),
             password: Secret("hunter2".into()),
         };

@@ -4,7 +4,7 @@
 
 use crate::helper_client::HelperClient;
 use anyhow::{Context, Result};
-use greendot_proto::{LvmReport, Request};
+use greendot_proto::{LvmReport, TaskRequest};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,7 +171,7 @@ pub fn parse_pvs_json(out: &str) -> Result<Vec<Pv>> {
 /// Runs an LVM report through the helper. A missing binary (`is not installed`)
 /// maps to `None`, the "LVM not installed" state, mirroring `zfs::run`.
 async fn report(helper: &HelperClient, what: LvmReport) -> Result<Option<String>> {
-    let out = helper.collect(Request::LvmReport { what }).await;
+    let out = helper.collect(TaskRequest::LvmReport { what }).await;
     if out
         .error
         .as_deref()

@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{BlockDev, DevicePath, MountPath, PartLabel, Request};
+use greendot_proto::{BlockDev, DevicePath, MountPath, PartLabel, TaskRequest};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -409,7 +409,13 @@ async fn disk_detail_page(
 
 /// Runs a disk-level request as a recorded task and re-renders the owning disk's
 /// detail partial with the outcome.
-async fn run(state: &Arc<AppState>, req: Request, kind: &str, title: &str, disk: &str) -> Response {
+async fn run(
+    state: &Arc<AppState>,
+    req: TaskRequest,
+    kind: &str,
+    title: &str,
+    disk: &str,
+) -> Response {
     let view = match crate::task_runner::start(state, req, kind, title) {
         Ok(id) => {
             gather_disk_detail(
@@ -523,7 +529,7 @@ async fn table_create(State(state): State<Arc<AppState>>, Form(form): Form<Table
         return disk_detail_failed(&state, &scope, format!("invalid disk name {:?}", form.disk))
             .await;
     };
-    let req = Request::PartitionTableCreate { disk: disk.clone() };
+    let req = TaskRequest::PartitionTableCreate { disk: disk.clone() };
     run(
         &state,
         req,
@@ -569,7 +575,7 @@ async fn part_create(
             None => return disk_detail_failed(&state, &scope, "invalid size").await,
         },
     };
-    let req = Request::PartitionCreate {
+    let req = TaskRequest::PartitionCreate {
         disk: disk.clone(),
         start_sector: None,
         size_sectors,
@@ -609,7 +615,7 @@ async fn part_delete(
         )
         .await;
     };
-    let req = Request::PartitionDelete {
+    let req = TaskRequest::PartitionDelete {
         disk: disk.clone(),
         number: form.number,
     };
@@ -635,7 +641,7 @@ struct PartShrinkForm {
 /// Runs one shrink step; `Ok(())` on success, `Err(message)` otherwise.
 async fn run_step(
     state: &AppState,
-    req: Request,
+    req: TaskRequest,
     kind: &'static str,
     title: String,
 ) -> Result<(), String> {
@@ -721,7 +727,7 @@ async fn part_shrink(
     let new_sectors = bytes / 512;
     // Shrink the filesystem 1 MiB short of the new partition end for slack.
     let fs_target = bytes - (1 << 20);
-    let resize_part = Request::PartitionResize {
+    let resize_part = TaskRequest::PartitionResize {
         disk: disk.clone(),
         number: form.number,
         size_sectors: new_sectors,
@@ -750,14 +756,14 @@ async fn part_shrink(
                 Shrink::Ext => (
                     "fsck",
                     format!("check {device}"),
-                    Request::Fsck {
+                    TaskRequest::Fsck {
                         device: device.clone(),
                     },
                 ),
                 Shrink::Btrfs => (
                     "btrfs-mount",
                     format!("mount {device}"),
-                    Request::BtrfsMount {
+                    TaskRequest::BtrfsMount {
                         device: device.clone(),
                         mount_path: mp.clone(),
                     },
@@ -820,7 +826,7 @@ async fn drive_shrink(
     device: &DevicePath,
     mp: MountPath,
     fs_target: u64,
-    resize_part: Request,
+    resize_part: TaskRequest,
 ) -> Result<(), String> {
     first?;
     match kind {
@@ -830,7 +836,7 @@ async fn drive_shrink(
         Shrink::Ext => {
             run_step(
                 st,
-                Request::ResizeExt {
+                TaskRequest::ResizeExt {
                     device: device.clone(),
                     new_size_sectors: fs_target / 512,
                 },
@@ -849,7 +855,7 @@ async fn drive_shrink(
         Shrink::Btrfs => {
             if let Err(e) = run_step(
                 st,
-                Request::BtrfsResize {
+                TaskRequest::BtrfsResize {
                     mount_path: mp.clone(),
                     new_size: fs_target,
                 },
@@ -861,7 +867,7 @@ async fn drive_shrink(
                 // Best-effort cleanup; the temp mount otherwise clears on reboot.
                 let _ = run_step(
                     st,
-                    Request::Umount {
+                    TaskRequest::Umount {
                         mount_path: mp.clone(),
                     },
                     "umount",
@@ -873,7 +879,7 @@ async fn drive_shrink(
             // Hard gate: never resize the partition while the fs is still mounted.
             run_step(
                 st,
-                Request::Umount { mount_path: mp },
+                TaskRequest::Umount { mount_path: mp },
                 "umount",
                 "unmount".into(),
             )

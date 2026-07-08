@@ -144,8 +144,8 @@ pub(crate) mod testutil {
     use greendot_proto::pb;
     use greendot_proto::pb::helper_server::{Helper, HelperServer};
     use greendot_proto::{
-        ErrKind, LvmReport, Request as HelperRequest, Response as HelperResponse, SubStatus,
-        TaskEvent,
+        CallRequest as HelperCall, ErrKind, LvmReport, Response as HelperResponse, SubStatus,
+        TaskEvent, TaskRequest as HelperTask,
     };
     use http_body_util::BodyExt;
     use std::pin::Pin;
@@ -160,7 +160,7 @@ pub(crate) mod testutil {
 
     /// Canned task-event stream for a request (the read ops carry the JSON the
     /// pages parse; everything else is a Started + successful Finished).
-    fn fake_events(req: &HelperRequest) -> Vec<TaskEvent> {
+    fn fake_events(req: &HelperTask) -> Vec<TaskEvent> {
         let started = TaskEvent::SubtaskStarted {
             name: "fake".into(),
             command: Some("fake".into()),
@@ -178,7 +178,7 @@ pub(crate) mod testutil {
         };
         let stdout = |data: &str| TaskEvent::Stdout { data: data.into() };
         match req {
-            HelperRequest::LvmReport { what } => {
+            HelperTask::LvmReport { what } => {
                 let json = match what {
                     LvmReport::Vgs => {
                         r#"{"report":[{"vg":[{"vg_name":"vg0","vg_size":"107374182400","vg_free":"53687091200","pv_count":"1","lv_count":"2"}]}]}"#
@@ -194,7 +194,7 @@ pub(crate) mod testutil {
             }
             // RoCE-capable NIC inventory: eth0 with a sample vendor so the NIC
             // table shows a capable-disabled row (the web renders it opaquely).
-            HelperRequest::RoceCapableNics => {
+            HelperTask::RoceCapableNics => {
                 vec![
                     started,
                     stdout(r#"[{"netdev":"eth0","vendor":"Acme"}]"#),
@@ -203,7 +203,7 @@ pub(crate) mod testutil {
                 ]
             }
             // SMART batch health: a small canned inventory (dot + temperature).
-            HelperRequest::SmartHealth { .. } => {
+            HelperTask::SmartHealth { .. } => {
                 vec![
                     started,
                     stdout(r#"[{"device":"sda","passed":true,"temp_c":38}]"#),
@@ -213,7 +213,7 @@ pub(crate) mod testutil {
             }
             // SMART full report: smartctl exits nonzero on healthy drives, so the
             // subtask/task finish Failed to prove the web shows stdout regardless.
-            HelperRequest::SmartReport { .. } => vec![
+            HelperTask::SmartReport { .. } => vec![
                 started,
                 stdout("smartctl 7.3\nSMART overall-health self-assessment test result: PASSED\n"),
                 TaskEvent::SubtaskFinished {
@@ -226,7 +226,7 @@ pub(crate) mod testutil {
                     error: None,
                 },
             ],
-            // Everything else (incl. EnableRoce, EnsureModules) is a task.
+            // Everything else (incl. EnableRoce, EnsureModules) is a plain task.
             _ => vec![started, sub_ok, ok_finished],
         }
     }
@@ -235,13 +235,13 @@ pub(crate) mod testutil {
     impl Helper for FakeHelper {
         async fn call(
             &self,
-            request: tonic::Request<pb::Request>,
+            request: tonic::Request<pb::CallRequest>,
         ) -> std::result::Result<tonic::Response<pb::Response>, tonic::Status> {
-            let req = HelperRequest::try_from(request.into_inner())
+            let req = HelperCall::try_from(request.into_inner())
                 .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
             let resp = match req {
-                HelperRequest::Ping => HelperResponse::Ok,
-                HelperRequest::Authenticate { username, password } => {
+                HelperCall::Ping => HelperResponse::Ok,
+                HelperCall::Authenticate { username, password } => {
                     if username.as_str() == "alice" && password.0 == "secret" {
                         HelperResponse::OkAuth {
                             username: username.to_string(),
@@ -250,7 +250,6 @@ pub(crate) mod testutil {
                         HelperResponse::err(ErrKind::AuthFailed, "invalid username or password")
                     }
                 }
-                _ => HelperResponse::Ok,
             };
             Ok(tonic::Response::new(resp.into()))
         }
@@ -265,9 +264,9 @@ pub(crate) mod testutil {
         #[allow(clippy::result_large_err)] // tonic::Status is large; fine for a test stub
         async fn run_task(
             &self,
-            request: tonic::Request<pb::Request>,
+            request: tonic::Request<pb::TaskRequest>,
         ) -> std::result::Result<tonic::Response<Self::RunTaskStream>, tonic::Status> {
-            let req = HelperRequest::try_from(request.into_inner())
+            let req = HelperTask::try_from(request.into_inner())
                 .map_err(|e| tonic::Status::invalid_argument(e.to_string()))?;
             let events: Vec<std::result::Result<pb::TaskEvent, tonic::Status>> = fake_events(&req)
                 .into_iter()
@@ -293,7 +292,7 @@ pub(crate) mod testutil {
     }
 
     /// A test `AppState` backed by the fake helper, whose canned `RunTask`
-    /// stream answers `Request::Reconcile` with a successful task — so the
+    /// stream answers `TaskRequest::Reconcile` with a successful task — so the
     /// drift gate + record/stream path is exercised without a real daemon.
     pub fn test_state() -> Arc<AppState> {
         Arc::new(AppState {

@@ -1,6 +1,6 @@
 //! Conversions between the generated protobuf transport types (`crate::pb`) and
-//! the validated domain model (`Request`/`Response`/`TaskEvent` and the newtypes
-//! in `types`).
+//! the validated domain model (`CallRequest`/`TaskRequest`/`Response`/
+//! `TaskEvent` and the newtypes in `types`).
 //!
 //! Direction matters for security:
 //! - **`From<domain> for pb::…`** (client egress) is infallible: domain values
@@ -12,12 +12,12 @@
 
 use crate::pb;
 use crate::{
-    BackstoreName, BlockDev, DatasetName, DevicePath, ErrKind, Iqn, KernelModule, LioBackstoreSpec,
-    LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvName, LvmReport, MountPath, MountPoint,
-    NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn,
-    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName, PartLabel, PoolName,
-    Request, Response, Secret, SnapName, SubStatus, TaskEvent, Transport, Username,
-    ValidationError, VdevLayout, VgName,
+    BackstoreName, BlockDev, CallRequest, DatasetName, DevicePath, ErrKind, Iqn, KernelModule,
+    LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvName, LvmReport,
+    MountPath, MountPoint, NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath,
+    NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName,
+    PartLabel, PoolName, Response, Secret, SnapName, SubStatus, TaskEvent, TaskRequest, Transport,
+    Username, ValidationError, VdevLayout, VgName,
 };
 use std::net::IpAddr;
 
@@ -496,18 +496,47 @@ impl TryFrom<pb::NfsClientSpec> for NfsClientSpec {
     }
 }
 
-// ---- Request ----
+// ---- CallRequest ----
 
-impl From<Request> for pb::Request {
-    fn from(r: Request) -> Self {
-        use pb::request::Op;
+impl From<CallRequest> for pb::CallRequest {
+    fn from(r: CallRequest) -> Self {
+        use pb::call_request::Op;
         let op = match r {
-            Request::Ping => Op::Ping(pb::Empty {}),
-            Request::Authenticate { username, password } => Op::Authenticate(pb::Authenticate {
-                username: username.as_str().to_owned(),
-                password: password.0,
-            }),
-            Request::ZvolCreate {
+            CallRequest::Ping => Op::Ping(pb::Empty {}),
+            CallRequest::Authenticate { username, password } => {
+                Op::Authenticate(pb::Authenticate {
+                    username: username.as_str().to_owned(),
+                    password: password.0,
+                })
+            }
+        };
+        pb::CallRequest { op: Some(op) }
+    }
+}
+
+impl TryFrom<pb::CallRequest> for CallRequest {
+    type Error = ConvertError;
+    fn try_from(r: pb::CallRequest) -> Result<Self, ConvertError> {
+        use pb::call_request::Op;
+        let op =
+            r.op.ok_or_else(|| ConvertError("call request has no op set".into()))?;
+        Ok(match op {
+            Op::Ping(_) => CallRequest::Ping,
+            Op::Authenticate(a) => CallRequest::Authenticate {
+                username: Username::new(a.username)?,
+                password: Secret(a.password),
+            },
+        })
+    }
+}
+
+// ---- TaskRequest ----
+
+impl From<TaskRequest> for pb::TaskRequest {
+    fn from(r: TaskRequest) -> Self {
+        use pb::task_request::Op;
+        let op = match r {
+            TaskRequest::ZvolCreate {
                 dataset,
                 size,
                 volblocksize,
@@ -518,53 +547,55 @@ impl From<Request> for pb::Request {
                 volblocksize,
                 sparse,
             }),
-            Request::ZvolDelete { dataset } => Op::ZvolDelete(pb::ZvolDelete {
+            TaskRequest::ZvolDelete { dataset } => Op::ZvolDelete(pb::ZvolDelete {
                 dataset: dataset.as_str().to_owned(),
             }),
-            Request::ZvolResize { dataset, new_size } => Op::ZvolResize(pb::ZvolResize {
+            TaskRequest::ZvolResize { dataset, new_size } => Op::ZvolResize(pb::ZvolResize {
                 dataset: dataset.as_str().to_owned(),
                 new_size,
             }),
-            Request::SnapshotCreate { dataset, snap } => Op::SnapshotCreate(pb::SnapshotCreate {
-                dataset: dataset.as_str().to_owned(),
-                snap: snap.as_str().to_owned(),
-            }),
-            Request::SnapshotDestroy { dataset, snap } => {
+            TaskRequest::SnapshotCreate { dataset, snap } => {
+                Op::SnapshotCreate(pb::SnapshotCreate {
+                    dataset: dataset.as_str().to_owned(),
+                    snap: snap.as_str().to_owned(),
+                })
+            }
+            TaskRequest::SnapshotDestroy { dataset, snap } => {
                 Op::SnapshotDestroy(pb::SnapshotDestroy {
                     dataset: dataset.as_str().to_owned(),
                     snap: snap.as_str().to_owned(),
                 })
             }
-            Request::ZfsFsCreate {
+            TaskRequest::ZfsFsCreate {
                 dataset,
                 mountpoint,
             } => Op::ZfsFsCreate(pb::ZfsFsCreate {
                 dataset: dataset.as_str().to_owned(),
                 mountpoint: mountpoint.map(|m| m.as_str().to_owned()),
             }),
-            Request::ZfsSetMountpoint {
+            TaskRequest::ZfsSetMountpoint {
                 dataset,
                 mountpoint,
             } => Op::ZfsSetMountpoint(pb::ZfsSetMountpoint {
                 dataset: dataset.as_str().to_owned(),
                 mountpoint: mountpoint.as_str().to_owned(),
             }),
-            Request::ZfsMount { dataset } => Op::ZfsMount(pb::ZfsMount {
+            TaskRequest::ZfsMount { dataset } => Op::ZfsMount(pb::ZfsMount {
                 dataset: dataset.as_str().to_owned(),
             }),
-            Request::ZfsUnmount { dataset } => Op::ZfsUnmount(pb::ZfsUnmount {
+            TaskRequest::ZfsUnmount { dataset } => Op::ZfsUnmount(pb::ZfsUnmount {
                 dataset: dataset.as_str().to_owned(),
             }),
-            Request::ZfsDestroy { dataset, recursive } => Op::ZfsDestroy(pb::ZfsDestroy {
+            TaskRequest::ZfsDestroy { dataset, recursive } => Op::ZfsDestroy(pb::ZfsDestroy {
                 dataset: dataset.as_str().to_owned(),
                 recursive,
             }),
-            Request::PartitionTableCreate { disk } => {
+            TaskRequest::PartitionTableCreate { disk } => {
                 Op::PartitionTableCreate(pb::PartitionTableCreate {
                     disk: disk.as_str().to_owned(),
                 })
             }
-            Request::PartitionCreate {
+            TaskRequest::PartitionCreate {
                 disk,
                 start_sector,
                 size_sectors,
@@ -575,11 +606,13 @@ impl From<Request> for pb::Request {
                 size_sectors,
                 label: label.as_str().to_owned(),
             }),
-            Request::PartitionDelete { disk, number } => Op::PartitionDelete(pb::PartitionDelete {
-                disk: disk.as_str().to_owned(),
-                number,
-            }),
-            Request::PartitionResize {
+            TaskRequest::PartitionDelete { disk, number } => {
+                Op::PartitionDelete(pb::PartitionDelete {
+                    disk: disk.as_str().to_owned(),
+                    number,
+                })
+            }
+            TaskRequest::PartitionResize {
                 disk,
                 number,
                 size_sectors,
@@ -588,31 +621,31 @@ impl From<Request> for pb::Request {
                 number,
                 size_sectors,
             }),
-            Request::Fsck { device } => Op::Fsck(pb::Fsck {
+            TaskRequest::Fsck { device } => Op::Fsck(pb::Fsck {
                 device: device.as_str().to_owned(),
             }),
-            Request::ResizeExt {
+            TaskRequest::ResizeExt {
                 device,
                 new_size_sectors,
             } => Op::ResizeExt(pb::ResizeExt {
                 device: device.as_str().to_owned(),
                 new_size_sectors,
             }),
-            Request::BtrfsMount { device, mount_path } => Op::BtrfsMount(pb::BtrfsMount {
+            TaskRequest::BtrfsMount { device, mount_path } => Op::BtrfsMount(pb::BtrfsMount {
                 device: device.as_str().to_owned(),
                 mount_path: mount_path.as_str().to_owned(),
             }),
-            Request::BtrfsResize {
+            TaskRequest::BtrfsResize {
                 mount_path,
                 new_size,
             } => Op::BtrfsResize(pb::BtrfsResize {
                 mount_path: mount_path.as_str().to_owned(),
                 new_size,
             }),
-            Request::Umount { mount_path } => Op::Umount(pb::Umount {
+            TaskRequest::Umount { mount_path } => Op::Umount(pb::Umount {
                 mount_path: mount_path.as_str().to_owned(),
             }),
-            Request::PoolCreate {
+            TaskRequest::PoolCreate {
                 name,
                 vdev,
                 devices,
@@ -623,45 +656,47 @@ impl From<Request> for pb::Request {
                 devices: strs(&devices),
                 ashift: ashift.map(u32::from),
             }),
-            Request::PoolDeviceAdd { pool, device } => Op::PoolDeviceAdd(pb::PoolDeviceAdd {
+            TaskRequest::PoolDeviceAdd { pool, device } => Op::PoolDeviceAdd(pb::PoolDeviceAdd {
                 pool: pool.as_str().to_owned(),
                 device: device.as_str().to_owned(),
             }),
-            Request::SmartReport { device } => Op::SmartReport(pb::SmartReport {
+            TaskRequest::SmartReport { device } => Op::SmartReport(pb::SmartReport {
                 device: device.as_str().to_owned(),
             }),
-            Request::SmartHealth { devices } => Op::SmartHealth(pb::SmartHealth {
+            TaskRequest::SmartHealth { devices } => Op::SmartHealth(pb::SmartHealth {
                 devices: strs(&devices),
             }),
-            Request::LvmReport { what } => Op::LvmReport(pb::LvmReport {
+            TaskRequest::LvmReport { what } => Op::LvmReport(pb::LvmReport {
                 what: pb::LvmReportKind::from(what) as i32,
             }),
-            Request::VgCreate { name, devices } => Op::VgCreate(pb::VgCreate {
+            TaskRequest::VgCreate { name, devices } => Op::VgCreate(pb::VgCreate {
                 name: name.as_str().to_owned(),
                 devices: strs(&devices),
             }),
-            Request::VgExtend { vg, device } => Op::VgExtend(pb::VgExtend {
+            TaskRequest::VgExtend { vg, device } => Op::VgExtend(pb::VgExtend {
                 vg: vg.as_str().to_owned(),
                 device: device.as_str().to_owned(),
             }),
-            Request::VgReduce { vg, device } => Op::VgReduce(pb::VgReduce {
+            TaskRequest::VgReduce { vg, device } => Op::VgReduce(pb::VgReduce {
                 vg: vg.as_str().to_owned(),
                 device: device.as_str().to_owned(),
             }),
-            Request::VgRemove { vg } => Op::VgRemove(pb::VgRemove {
+            TaskRequest::VgRemove { vg } => Op::VgRemove(pb::VgRemove {
                 vg: vg.as_str().to_owned(),
             }),
-            Request::LvCreate { vg, name, size } => Op::LvCreate(pb::LvCreate {
+            TaskRequest::LvCreate { vg, name, size } => Op::LvCreate(pb::LvCreate {
                 vg: vg.as_str().to_owned(),
                 name: name.as_str().to_owned(),
                 size,
             }),
-            Request::ThinPoolCreate { vg, name, size } => Op::ThinPoolCreate(pb::ThinPoolCreate {
-                vg: vg.as_str().to_owned(),
-                name: name.as_str().to_owned(),
-                size,
-            }),
-            Request::ThinLvCreate {
+            TaskRequest::ThinPoolCreate { vg, name, size } => {
+                Op::ThinPoolCreate(pb::ThinPoolCreate {
+                    vg: vg.as_str().to_owned(),
+                    name: name.as_str().to_owned(),
+                    size,
+                })
+            }
+            TaskRequest::ThinLvCreate {
                 vg,
                 pool,
                 name,
@@ -672,264 +707,259 @@ impl From<Request> for pb::Request {
                 name: name.as_str().to_owned(),
                 virtual_size,
             }),
-            Request::LvResize { vg, name, new_size } => Op::LvResize(pb::LvResize {
+            TaskRequest::LvResize { vg, name, new_size } => Op::LvResize(pb::LvResize {
                 vg: vg.as_str().to_owned(),
                 name: name.as_str().to_owned(),
                 new_size,
             }),
-            Request::LvShrink { vg, name, new_size } => Op::LvShrink(pb::LvShrink {
+            TaskRequest::LvShrink { vg, name, new_size } => Op::LvShrink(pb::LvShrink {
                 vg: vg.as_str().to_owned(),
                 name: name.as_str().to_owned(),
                 new_size,
             }),
-            Request::LvRename { vg, name, new_name } => Op::LvRename(pb::LvRename {
+            TaskRequest::LvRename { vg, name, new_name } => Op::LvRename(pb::LvRename {
                 vg: vg.as_str().to_owned(),
                 name: name.as_str().to_owned(),
                 new_name: new_name.as_str().to_owned(),
             }),
-            Request::LvDelete { vg, name } => Op::LvDelete(pb::LvDelete {
+            TaskRequest::LvDelete { vg, name } => Op::LvDelete(pb::LvDelete {
                 vg: vg.as_str().to_owned(),
                 name: name.as_str().to_owned(),
             }),
-            Request::NvmetApply { desired } => Op::NvmetApply(pb::NvmetApply {
+            TaskRequest::NvmetApply { desired } => Op::NvmetApply(pb::NvmetApply {
                 desired: Some(desired.into()),
             }),
-            Request::LioApply { desired } => Op::LioApply(pb::LioApply {
+            TaskRequest::LioApply { desired } => Op::LioApply(pb::LioApply {
                 desired: Some(desired.into()),
             }),
-            Request::NfsApply { desired } => Op::NfsApply(pb::NfsApply {
+            TaskRequest::NfsApply { desired } => Op::NfsApply(pb::NfsApply {
                 desired: Some(desired.into()),
             }),
-            Request::NfsReport => Op::NfsReport(pb::Empty {}),
-            Request::Reconcile => Op::Reconcile(pb::Reconcile {}),
-            Request::EnsureModules { modules } => Op::EnsureModules(pb::EnsureModules {
+            TaskRequest::NfsReport => Op::NfsReport(pb::Empty {}),
+            TaskRequest::Reconcile => Op::Reconcile(pb::Reconcile {}),
+            TaskRequest::EnsureModules { modules } => Op::EnsureModules(pb::EnsureModules {
                 modules: modules
                     .into_iter()
                     .map(|m| pb::KernelModule::from(m) as i32)
                     .collect(),
             }),
-            Request::RxeLinkAdd { netdev } => Op::RxeLinkAdd(pb::RxeLinkAdd {
+            TaskRequest::RxeLinkAdd { netdev } => Op::RxeLinkAdd(pb::RxeLinkAdd {
                 netdev: netdev.as_str().to_owned(),
             }),
-            Request::RoceCapableNics => Op::RoceCapableNics(pb::Empty {}),
-            Request::EnableRoce { netdev } => Op::EnableRoce(pb::EnableRoce {
+            TaskRequest::RoceCapableNics => Op::RoceCapableNics(pb::Empty {}),
+            TaskRequest::EnableRoce { netdev } => Op::EnableRoce(pb::EnableRoce {
                 netdev: netdev.as_str().to_owned(),
             }),
-            Request::NicRdmaAdvice => Op::NicRdmaAdvice(pb::Empty {}),
-            Request::RdmaResources => Op::RdmaResources(pb::Empty {}),
-            Request::InstallPackages { packages } => Op::InstallPackages(pb::InstallPackages {
+            TaskRequest::NicRdmaAdvice => Op::NicRdmaAdvice(pb::Empty {}),
+            TaskRequest::RdmaResources => Op::RdmaResources(pb::Empty {}),
+            TaskRequest::InstallPackages { packages } => Op::InstallPackages(pb::InstallPackages {
                 packages: strs(&packages),
             }),
-            Request::NvmetReport => Op::NvmetReport(pb::Empty {}),
-            Request::LioReport => Op::LioReport(pb::Empty {}),
-            Request::LioSessions => Op::LioSessions(pb::Empty {}),
-            Request::RdmaDevices => Op::RdmaDevices(pb::Empty {}),
-            Request::NicPciAddrs => Op::NicPciAddrs(pb::Empty {}),
-            Request::NicInterfaces => Op::NicInterfaces(pb::Empty {}),
-            Request::ReconcileDryRun => Op::ReconcileDryRun(pb::Empty {}),
+            TaskRequest::NvmetReport => Op::NvmetReport(pb::Empty {}),
+            TaskRequest::LioReport => Op::LioReport(pb::Empty {}),
+            TaskRequest::LioSessions => Op::LioSessions(pb::Empty {}),
+            TaskRequest::RdmaDevices => Op::RdmaDevices(pb::Empty {}),
+            TaskRequest::NicPciAddrs => Op::NicPciAddrs(pb::Empty {}),
+            TaskRequest::NicInterfaces => Op::NicInterfaces(pb::Empty {}),
+            TaskRequest::ReconcileDryRun => Op::ReconcileDryRun(pb::Empty {}),
         };
-        pb::Request { op: Some(op) }
+        pb::TaskRequest { op: Some(op) }
     }
 }
 
-impl TryFrom<pb::Request> for Request {
+impl TryFrom<pb::TaskRequest> for TaskRequest {
     type Error = ConvertError;
-    fn try_from(r: pb::Request) -> Result<Self, ConvertError> {
-        use pb::request::Op;
+    fn try_from(r: pb::TaskRequest) -> Result<Self, ConvertError> {
+        use pb::task_request::Op;
         let op =
-            r.op.ok_or_else(|| ConvertError("request has no op set".into()))?;
+            r.op.ok_or_else(|| ConvertError("task request has no op set".into()))?;
         Ok(match op {
-            Op::Ping(_) => Request::Ping,
-            Op::Authenticate(a) => Request::Authenticate {
-                username: Username::new(a.username)?,
-                password: Secret(a.password),
-            },
-            Op::ZvolCreate(z) => Request::ZvolCreate {
+            Op::ZvolCreate(z) => TaskRequest::ZvolCreate {
                 dataset: DatasetName::new(z.dataset)?,
                 size: z.size,
                 volblocksize: z.volblocksize,
                 sparse: z.sparse,
             },
-            Op::ZvolDelete(z) => Request::ZvolDelete {
+            Op::ZvolDelete(z) => TaskRequest::ZvolDelete {
                 dataset: DatasetName::new(z.dataset)?,
             },
-            Op::ZvolResize(z) => Request::ZvolResize {
+            Op::ZvolResize(z) => TaskRequest::ZvolResize {
                 dataset: DatasetName::new(z.dataset)?,
                 new_size: z.new_size,
             },
-            Op::SnapshotCreate(s) => Request::SnapshotCreate {
+            Op::SnapshotCreate(s) => TaskRequest::SnapshotCreate {
                 dataset: DatasetName::new(s.dataset)?,
                 snap: SnapName::new(s.snap)?,
             },
-            Op::SnapshotDestroy(s) => Request::SnapshotDestroy {
+            Op::SnapshotDestroy(s) => TaskRequest::SnapshotDestroy {
                 dataset: DatasetName::new(s.dataset)?,
                 snap: SnapName::new(s.snap)?,
             },
-            Op::ZfsFsCreate(z) => Request::ZfsFsCreate {
+            Op::ZfsFsCreate(z) => TaskRequest::ZfsFsCreate {
                 dataset: DatasetName::new(z.dataset)?,
                 mountpoint: z.mountpoint.map(MountPoint::new).transpose()?,
             },
-            Op::ZfsSetMountpoint(z) => Request::ZfsSetMountpoint {
+            Op::ZfsSetMountpoint(z) => TaskRequest::ZfsSetMountpoint {
                 dataset: DatasetName::new(z.dataset)?,
                 mountpoint: MountPoint::new(z.mountpoint)?,
             },
-            Op::ZfsMount(z) => Request::ZfsMount {
+            Op::ZfsMount(z) => TaskRequest::ZfsMount {
                 dataset: DatasetName::new(z.dataset)?,
             },
-            Op::ZfsUnmount(z) => Request::ZfsUnmount {
+            Op::ZfsUnmount(z) => TaskRequest::ZfsUnmount {
                 dataset: DatasetName::new(z.dataset)?,
             },
-            Op::ZfsDestroy(z) => Request::ZfsDestroy {
+            Op::ZfsDestroy(z) => TaskRequest::ZfsDestroy {
                 dataset: DatasetName::new(z.dataset)?,
                 recursive: z.recursive,
             },
-            Op::PartitionTableCreate(p) => Request::PartitionTableCreate {
+            Op::PartitionTableCreate(p) => TaskRequest::PartitionTableCreate {
                 disk: BlockDev::new(p.disk)?,
             },
-            Op::PartitionCreate(p) => Request::PartitionCreate {
+            Op::PartitionCreate(p) => TaskRequest::PartitionCreate {
                 disk: BlockDev::new(p.disk)?,
                 start_sector: p.start_sector,
                 size_sectors: p.size_sectors,
                 label: PartLabel::new(p.label)?,
             },
-            Op::PartitionDelete(p) => Request::PartitionDelete {
+            Op::PartitionDelete(p) => TaskRequest::PartitionDelete {
                 disk: BlockDev::new(p.disk)?,
                 number: p.number,
             },
-            Op::PartitionResize(p) => Request::PartitionResize {
+            Op::PartitionResize(p) => TaskRequest::PartitionResize {
                 disk: BlockDev::new(p.disk)?,
                 number: p.number,
                 size_sectors: p.size_sectors,
             },
-            Op::Fsck(f) => Request::Fsck {
+            Op::Fsck(f) => TaskRequest::Fsck {
                 device: DevicePath::new(f.device)?,
             },
-            Op::ResizeExt(r) => Request::ResizeExt {
+            Op::ResizeExt(r) => TaskRequest::ResizeExt {
                 device: DevicePath::new(r.device)?,
                 new_size_sectors: r.new_size_sectors,
             },
-            Op::BtrfsMount(b) => Request::BtrfsMount {
+            Op::BtrfsMount(b) => TaskRequest::BtrfsMount {
                 device: DevicePath::new(b.device)?,
                 mount_path: MountPath::new(b.mount_path)?,
             },
-            Op::BtrfsResize(b) => Request::BtrfsResize {
+            Op::BtrfsResize(b) => TaskRequest::BtrfsResize {
                 mount_path: MountPath::new(b.mount_path)?,
                 new_size: b.new_size,
             },
-            Op::Umount(u) => Request::Umount {
+            Op::Umount(u) => TaskRequest::Umount {
                 mount_path: MountPath::new(u.mount_path)?,
             },
-            Op::PoolCreate(p) => Request::PoolCreate {
+            Op::PoolCreate(p) => TaskRequest::PoolCreate {
                 name: PoolName::new(p.name)?,
                 vdev: dec_vdev(p.vdev)?,
                 devices: map_new(p.devices, DevicePath::new)?,
                 ashift: p.ashift.map(|v| to_u8(v, "ashift")).transpose()?,
             },
-            Op::PoolDeviceAdd(p) => Request::PoolDeviceAdd {
+            Op::PoolDeviceAdd(p) => TaskRequest::PoolDeviceAdd {
                 pool: PoolName::new(p.pool)?,
                 device: DevicePath::new(p.device)?,
             },
-            Op::SmartReport(s) => Request::SmartReport {
+            Op::SmartReport(s) => TaskRequest::SmartReport {
                 device: BlockDev::new(s.device)?,
             },
-            Op::SmartHealth(s) => Request::SmartHealth {
+            Op::SmartHealth(s) => TaskRequest::SmartHealth {
                 devices: map_new(s.devices, BlockDev::new)?,
             },
-            Op::LvmReport(l) => Request::LvmReport {
+            Op::LvmReport(l) => TaskRequest::LvmReport {
                 what: dec_lvm_report(l.what)?,
             },
-            Op::VgCreate(v) => Request::VgCreate {
+            Op::VgCreate(v) => TaskRequest::VgCreate {
                 name: VgName::new(v.name)?,
                 devices: map_new(v.devices, DevicePath::new)?,
             },
-            Op::VgExtend(v) => Request::VgExtend {
+            Op::VgExtend(v) => TaskRequest::VgExtend {
                 vg: VgName::new(v.vg)?,
                 device: DevicePath::new(v.device)?,
             },
-            Op::VgReduce(v) => Request::VgReduce {
+            Op::VgReduce(v) => TaskRequest::VgReduce {
                 vg: VgName::new(v.vg)?,
                 device: DevicePath::new(v.device)?,
             },
-            Op::VgRemove(v) => Request::VgRemove {
+            Op::VgRemove(v) => TaskRequest::VgRemove {
                 vg: VgName::new(v.vg)?,
             },
-            Op::LvCreate(l) => Request::LvCreate {
+            Op::LvCreate(l) => TaskRequest::LvCreate {
                 vg: VgName::new(l.vg)?,
                 name: LvName::new(l.name)?,
                 size: l.size,
             },
-            Op::ThinPoolCreate(t) => Request::ThinPoolCreate {
+            Op::ThinPoolCreate(t) => TaskRequest::ThinPoolCreate {
                 vg: VgName::new(t.vg)?,
                 name: LvName::new(t.name)?,
                 size: t.size,
             },
-            Op::ThinLvCreate(t) => Request::ThinLvCreate {
+            Op::ThinLvCreate(t) => TaskRequest::ThinLvCreate {
                 vg: VgName::new(t.vg)?,
                 pool: LvName::new(t.pool)?,
                 name: LvName::new(t.name)?,
                 virtual_size: t.virtual_size,
             },
-            Op::LvResize(l) => Request::LvResize {
+            Op::LvResize(l) => TaskRequest::LvResize {
                 vg: VgName::new(l.vg)?,
                 name: LvName::new(l.name)?,
                 new_size: l.new_size,
             },
-            Op::LvShrink(l) => Request::LvShrink {
+            Op::LvShrink(l) => TaskRequest::LvShrink {
                 vg: VgName::new(l.vg)?,
                 name: LvName::new(l.name)?,
                 new_size: l.new_size,
             },
-            Op::LvRename(l) => Request::LvRename {
+            Op::LvRename(l) => TaskRequest::LvRename {
                 vg: VgName::new(l.vg)?,
                 name: LvName::new(l.name)?,
                 new_name: LvName::new(l.new_name)?,
             },
-            Op::LvDelete(l) => Request::LvDelete {
+            Op::LvDelete(l) => TaskRequest::LvDelete {
                 vg: VgName::new(l.vg)?,
                 name: LvName::new(l.name)?,
             },
-            Op::NvmetApply(n) => Request::NvmetApply {
+            Op::NvmetApply(n) => TaskRequest::NvmetApply {
                 desired: n
                     .desired
                     .ok_or_else(|| ConvertError("nvmet_apply missing desired".into()))?
                     .try_into()?,
             },
-            Op::LioApply(l) => Request::LioApply {
+            Op::LioApply(l) => TaskRequest::LioApply {
                 desired: l
                     .desired
                     .ok_or_else(|| ConvertError("lio_apply missing desired".into()))?
                     .try_into()?,
             },
-            Op::NfsApply(n) => Request::NfsApply {
+            Op::NfsApply(n) => TaskRequest::NfsApply {
                 desired: n
                     .desired
                     .ok_or_else(|| ConvertError("nfs_apply missing desired".into()))?
                     .try_into()?,
             },
-            Op::NfsReport(_) => Request::NfsReport,
-            Op::Reconcile(_) => Request::Reconcile,
-            Op::EnsureModules(e) => Request::EnsureModules {
+            Op::NfsReport(_) => TaskRequest::NfsReport,
+            Op::Reconcile(_) => TaskRequest::Reconcile,
+            Op::EnsureModules(e) => TaskRequest::EnsureModules {
                 modules: dec_kernel_modules(e.modules)?,
             },
-            Op::RxeLinkAdd(r) => Request::RxeLinkAdd {
+            Op::RxeLinkAdd(r) => TaskRequest::RxeLinkAdd {
                 netdev: NetdevName::new(r.netdev)?,
             },
-            Op::RoceCapableNics(_) => Request::RoceCapableNics,
-            Op::EnableRoce(e) => Request::EnableRoce {
+            Op::RoceCapableNics(_) => TaskRequest::RoceCapableNics,
+            Op::EnableRoce(e) => TaskRequest::EnableRoce {
                 netdev: NetdevName::new(e.netdev)?,
             },
-            Op::NicRdmaAdvice(_) => Request::NicRdmaAdvice,
-            Op::RdmaResources(_) => Request::RdmaResources,
-            Op::InstallPackages(i) => Request::InstallPackages {
+            Op::NicRdmaAdvice(_) => TaskRequest::NicRdmaAdvice,
+            Op::RdmaResources(_) => TaskRequest::RdmaResources,
+            Op::InstallPackages(i) => TaskRequest::InstallPackages {
                 packages: map_new(i.packages, PackageName::new)?,
             },
-            Op::NvmetReport(_) => Request::NvmetReport,
-            Op::LioReport(_) => Request::LioReport,
-            Op::LioSessions(_) => Request::LioSessions,
-            Op::RdmaDevices(_) => Request::RdmaDevices,
-            Op::NicPciAddrs(_) => Request::NicPciAddrs,
-            Op::NicInterfaces(_) => Request::NicInterfaces,
-            Op::ReconcileDryRun(_) => Request::ReconcileDryRun,
+            Op::NvmetReport(_) => TaskRequest::NvmetReport,
+            Op::LioReport(_) => TaskRequest::LioReport,
+            Op::LioSessions(_) => TaskRequest::LioSessions,
+            Op::RdmaDevices(_) => TaskRequest::RdmaDevices,
+            Op::NicPciAddrs(_) => TaskRequest::NicPciAddrs,
+            Op::NicInterfaces(_) => TaskRequest::NicInterfaces,
+            Op::ReconcileDryRun(_) => TaskRequest::ReconcileDryRun,
         })
     }
 }
@@ -1077,37 +1107,32 @@ mod tests {
 
     /// domain -> pb -> wire bytes -> pb -> domain must be the identity. This
     /// exercises the real gRPC path (prost encode/decode), not just the structs.
-    fn wire_roundtrip(req: &Request) -> Request {
-        let on_wire = pb::Request::from(req.clone()).encode_to_vec();
-        let decoded = pb::Request::decode(on_wire.as_slice()).unwrap();
-        Request::try_from(decoded).unwrap()
+    fn wire_roundtrip(req: &TaskRequest) -> TaskRequest {
+        let on_wire = pb::TaskRequest::from(req.clone()).encode_to_vec();
+        let decoded = pb::TaskRequest::decode(on_wire.as_slice()).unwrap();
+        TaskRequest::try_from(decoded).unwrap()
     }
 
     #[rstest]
-    #[case::ping(Request::Ping)]
-    #[case::auth(Request::Authenticate {
-        username: Username::new("alice").unwrap(),
-        password: Secret("hunter2".into()),
-    })]
-    #[case::zvol_some(Request::ZvolCreate {
+    #[case::zvol_some(TaskRequest::ZvolCreate {
         dataset: DatasetName::new("tank/vols/vm1").unwrap(),
         size: 10 << 30,
         volblocksize: Some(16384),
         sparse: true,
     })]
-    #[case::zvol_none(Request::ZvolCreate {
+    #[case::zvol_none(TaskRequest::ZvolCreate {
         dataset: DatasetName::new("tank/vols/vm1").unwrap(),
         size: 10 << 30,
         volblocksize: None,
         sparse: false,
     })]
-    #[case::part_create(Request::PartitionCreate {
+    #[case::part_create(TaskRequest::PartitionCreate {
         disk: BlockDev::new("sdb").unwrap(),
         start_sector: None,
         size_sectors: Some(2097152),
         label: PartLabel::new("data").unwrap(),
     })]
-    #[case::pool_create(Request::PoolCreate {
+    #[case::pool_create(TaskRequest::PoolCreate {
         name: PoolName::new("tank").unwrap(),
         vdev: VdevLayout::Mirror,
         devices: vec![
@@ -1116,20 +1141,20 @@ mod tests {
         ],
         ashift: Some(12),
     })]
-    #[case::lvm_report(Request::LvmReport { what: LvmReport::Lvs })]
-    #[case::thin_lv(Request::ThinLvCreate {
+    #[case::lvm_report(TaskRequest::LvmReport { what: LvmReport::Lvs })]
+    #[case::thin_lv(TaskRequest::ThinLvCreate {
         vg: VgName::new("vg0").unwrap(),
         pool: LvName::new("pool0").unwrap(),
         name: LvName::new("vm1").unwrap(),
         virtual_size: 20 << 30,
     })]
-    #[case::modules(Request::EnsureModules {
+    #[case::modules(TaskRequest::EnsureModules {
         modules: vec![KernelModule::NvmetRdma, KernelModule::Rxe],
     })]
-    #[case::smart_health(Request::SmartHealth {
+    #[case::smart_health(TaskRequest::SmartHealth {
         devices: vec![BlockDev::new("sda").unwrap(), BlockDev::new("nvme0n1").unwrap()],
     })]
-    #[case::nvmet(Request::NvmetApply {
+    #[case::nvmet(TaskRequest::NvmetApply {
         desired: NvmetDesired {
             subsystems: vec![NvmetSubsysSpec {
                 nqn: Nqn::new("nqn.2026-06.io.greendot:vm1").unwrap(),
@@ -1149,7 +1174,7 @@ mod tests {
             }],
         },
     })]
-    #[case::lio(Request::LioApply {
+    #[case::lio(TaskRequest::LioApply {
         desired: LioDesired {
             backstores: vec![LioBackstoreSpec {
                 name: BackstoreName::new("vm1").unwrap(),
@@ -1165,7 +1190,7 @@ mod tests {
             }],
         },
     })]
-    #[case::nfs(Request::NfsApply {
+    #[case::nfs(TaskRequest::NfsApply {
         desired: NfsDesired {
             rdma_port: NFS_RDMA_PORT,
             exports: vec![NfsExportSpec {
@@ -1178,24 +1203,48 @@ mod tests {
             }],
         },
     })]
-    #[case::nfs_report(Request::NfsReport)]
-    #[case::reconcile(Request::Reconcile)]
-    #[case::roce(Request::RoceCapableNics)]
-    #[case::enable_roce(Request::EnableRoce { netdev: NetdevName::new("ens16").unwrap() })]
-    #[case::advice(Request::NicRdmaAdvice)]
-    #[case::rdma(Request::RdmaResources)]
-    #[case::install(Request::InstallPackages {
+    #[case::nfs_report(TaskRequest::NfsReport)]
+    #[case::reconcile(TaskRequest::Reconcile)]
+    #[case::roce(TaskRequest::RoceCapableNics)]
+    #[case::enable_roce(TaskRequest::EnableRoce { netdev: NetdevName::new("ens16").unwrap() })]
+    #[case::advice(TaskRequest::NicRdmaAdvice)]
+    #[case::rdma(TaskRequest::RdmaResources)]
+    #[case::install(TaskRequest::InstallPackages {
         packages: vec![PackageName::new("nvme-cli").unwrap()],
     })]
-    #[case::nvmet_report(Request::NvmetReport)]
-    #[case::lio_report(Request::LioReport)]
-    #[case::lio_sessions(Request::LioSessions)]
-    #[case::rdma_devices(Request::RdmaDevices)]
-    #[case::nic_pci_addrs(Request::NicPciAddrs)]
-    #[case::nic_interfaces(Request::NicInterfaces)]
-    #[case::reconcile_dry_run(Request::ReconcileDryRun)]
-    fn request_wire_roundtrips(#[case] req: Request) {
+    #[case::nvmet_report(TaskRequest::NvmetReport)]
+    #[case::lio_report(TaskRequest::LioReport)]
+    #[case::lio_sessions(TaskRequest::LioSessions)]
+    #[case::rdma_devices(TaskRequest::RdmaDevices)]
+    #[case::nic_pci_addrs(TaskRequest::NicPciAddrs)]
+    #[case::nic_interfaces(TaskRequest::NicInterfaces)]
+    #[case::reconcile_dry_run(TaskRequest::ReconcileDryRun)]
+    fn task_request_wire_roundtrips(#[case] req: TaskRequest) {
         assert_eq!(wire_roundtrip(&req), req);
+    }
+
+    #[rstest]
+    #[case::ping(CallRequest::Ping)]
+    #[case::auth(CallRequest::Authenticate {
+        username: Username::new("alice").unwrap(),
+        password: Secret("hunter2".into()),
+    })]
+    fn call_request_wire_roundtrips(#[case] req: CallRequest) {
+        let on_wire = pb::CallRequest::from(req.clone()).encode_to_vec();
+        let decoded = pb::CallRequest::decode(on_wire.as_slice()).unwrap();
+        assert_eq!(CallRequest::try_from(decoded).unwrap(), req);
+    }
+
+    /// A `Call` username is validated on ingress just like every task field.
+    #[test]
+    fn invalid_call_payload_is_rejected_on_ingress() {
+        let bad = pb::CallRequest {
+            op: Some(pb::call_request::Op::Authenticate(pb::Authenticate {
+                username: "root; reboot".into(),
+                password: "x".into(),
+            })),
+        };
+        assert!(CallRequest::try_from(bad).is_err());
     }
 
     #[test]
@@ -1273,15 +1322,15 @@ mod tests {
         }
     }
 
-    // Build a `pb::Request` directly from an op (bypassing validation, as a
+    // Build a `pb::TaskRequest` directly from an op (bypassing validation, as a
     // malicious/buggy client could) to prove ingress `TryFrom` rejects it.
-    fn bad(op: pb::request::Op) -> ConvertError {
-        Request::try_from(pb::Request { op: Some(op) }).unwrap_err()
+    fn bad(op: pb::task_request::Op) -> ConvertError {
+        TaskRequest::try_from(pb::TaskRequest { op: Some(op) }).unwrap_err()
     }
 
     #[test]
     fn invalid_payloads_are_rejected_on_ingress() {
-        use pb::request::Op;
+        use pb::task_request::Op;
         // The equivalent of the serde corpus in lib.rs — validation must still
         // run at the proto->domain boundary (prost does not run it for us).
         bad(Op::ZvolDelete(pb::ZvolDelete {
@@ -1380,6 +1429,7 @@ mod tests {
 
     #[test]
     fn missing_op_is_rejected() {
-        assert!(Request::try_from(pb::Request { op: None }).is_err());
+        assert!(TaskRequest::try_from(pb::TaskRequest { op: None }).is_err());
+        assert!(CallRequest::try_from(pb::CallRequest { op: None }).is_err());
     }
 }

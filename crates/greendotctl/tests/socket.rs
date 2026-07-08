@@ -6,7 +6,9 @@
 
 use greendot_proto::pb;
 use greendot_proto::pb::helper_client::HelperClient;
-use greendot_proto::{DatasetName, KernelModule, Request, Response, SubStatus, TaskEvent};
+use greendot_proto::{
+    CallRequest, DatasetName, KernelModule, Response, SubStatus, TaskEvent, TaskRequest,
+};
 use std::path::PathBuf;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -61,7 +63,7 @@ impl Drop for Helper {
 }
 
 /// Sends a task request and collects the streamed events up to Finished.
-async fn run_task(client: &mut HelperClient<Channel>, req: pb::Request) -> Vec<TaskEvent> {
+async fn run_task(client: &mut HelperClient<Channel>, req: pb::TaskRequest) -> Vec<TaskEvent> {
     let mut stream = client.run_task(req).await.unwrap().into_inner();
     let mut events = Vec::new();
     while let Some(ev) = stream.message().await.unwrap() {
@@ -78,7 +80,7 @@ async fn ping_streamed_task_oneshot_and_validation() {
     // Ping is one-shot (unary Call) and works repeatedly on one channel.
     for _ in 0..2 {
         let resp = client
-            .call(pb::Request::from(Request::Ping))
+            .call(pb::CallRequest::from(CallRequest::Ping))
             .await
             .unwrap()
             .into_inner();
@@ -89,7 +91,7 @@ async fn ping_streamed_task_oneshot_and_validation() {
     // so this exercises the missing-binary install hint over the real socket.
     let events = run_task(
         &mut client,
-        pb::Request::from(Request::ZvolDelete {
+        pb::TaskRequest::from(TaskRequest::ZvolDelete {
             dataset: DatasetName::new("tank/x").unwrap(),
         }),
     )
@@ -109,7 +111,7 @@ async fn ping_streamed_task_oneshot_and_validation() {
     // one-subtask task ending in a successful Finished (no command to run).
     let events = run_task(
         &mut client,
-        pb::Request::from(Request::EnsureModules {
+        pb::TaskRequest::from(TaskRequest::EnsureModules {
             modules: Vec::<KernelModule>::new(),
         }),
     )
@@ -125,8 +127,8 @@ async fn ping_streamed_task_oneshot_and_validation() {
     // A request that fails validation at the proto->domain boundary is reported
     // as a failed task (the daemon re-validates every field on ingress). Build
     // the protobuf directly, since the domain type would refuse to construct it.
-    let bad = pb::Request {
-        op: Some(pb::request::Op::ZvolDelete(pb::ZvolDelete {
+    let bad = pb::TaskRequest {
+        op: Some(pb::task_request::Op::ZvolDelete(pb::ZvolDelete {
             dataset: "../etc".into(),
         })),
     };
@@ -177,7 +179,7 @@ want_tcp = true
 
     let events = tokio::time::timeout(
         Duration::from_secs(60),
-        run_task(&mut client, pb::Request::from(Request::Reconcile)),
+        run_task(&mut client, pb::TaskRequest::from(TaskRequest::Reconcile)),
     )
     .await
     .expect("reconcile stream must terminate, not hang");

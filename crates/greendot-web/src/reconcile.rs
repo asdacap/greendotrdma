@@ -1,6 +1,6 @@
 //! Desired-state reconciliation runs entirely in the privileged daemon now: the
 //! web's drift pre-check (`routes::block_export::reconcile_state`) asks the daemon
-//! via `Request::ReconcileDryRun` rather than rendering/diffing locally. The only
+//! via `TaskRequest::ReconcileDryRun` rather than rendering/diffing locally. The only
 //! pure bit the web still needs for display — resolving an export's pinned
 //! interfaces to their listen IPs — comes from the shared protocol crate.
 

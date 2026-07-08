@@ -8,7 +8,7 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, Request, VdevLayout};
+use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, TaskRequest, VdevLayout};
 use serde::Deserialize;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -243,7 +243,7 @@ fn pool_of(dataset: &str) -> &str {
 /// detail partial with the outcome.
 async fn run_pool_op(
     state: &Arc<AppState>,
-    req: Request,
+    req: TaskRequest,
     kind: &str,
     title: &str,
     pool: &str,
@@ -350,7 +350,7 @@ async fn zvol_detail_page(
 /// detail partial with the outcome.
 async fn run_zvol_op(
     state: &Arc<AppState>,
-    req: Request,
+    req: TaskRequest,
     kind: &str,
     title: &str,
     pool: &str,
@@ -405,7 +405,7 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
             Err(_) => return pool_op_failed(&state, &pool, "invalid volblocksize").await,
         },
     };
-    let req = Request::ZvolCreate {
+    let req = TaskRequest::ZvolCreate {
         dataset: dataset.clone(),
         size,
         volblocksize,
@@ -437,7 +437,7 @@ async fn zvol_resize(State(state): State<Arc<AppState>>, Form(form): Form<Resize
     let Some(new_size) = parse_size(&form.size, &form.unit) else {
         return zvol_detail_failed(&pool, &rest, "invalid size").await;
     };
-    let req = Request::ZvolResize {
+    let req = TaskRequest::ZvolResize {
         dataset: dataset.clone(),
         new_size,
     };
@@ -467,7 +467,7 @@ async fn zvol_delete(
     let Ok(dataset) = DatasetName::new(form.dataset) else {
         return zvol_detail_failed(&pool, &rest, "invalid dataset name").await;
     };
-    let req = Request::ZvolDelete {
+    let req = TaskRequest::ZvolDelete {
         dataset: dataset.clone(),
     };
     // Removing the zvol means its page no longer applies — go back to the pool;
@@ -507,7 +507,7 @@ async fn fs_create(State(state): State<Arc<AppState>>, Form(form): Form<FsCreate
             }
         },
     };
-    let req = Request::ZfsFsCreate {
+    let req = TaskRequest::ZfsFsCreate {
         dataset: dataset.clone(),
         mountpoint,
     };
@@ -533,7 +533,7 @@ async fn fs_mount(State(state): State<Arc<AppState>>, Form(form): Form<FsDataset
     };
     run_pool_op(
         &state,
-        Request::ZfsMount {
+        TaskRequest::ZfsMount {
             dataset: dataset.clone(),
         },
         "fs-mount",
@@ -553,7 +553,7 @@ async fn fs_unmount(
     };
     run_pool_op(
         &state,
-        Request::ZfsUnmount {
+        TaskRequest::ZfsUnmount {
             dataset: dataset.clone(),
         },
         "fs-unmount",
@@ -587,7 +587,7 @@ async fn fs_set_mountpoint(
     };
     run_pool_op(
         &state,
-        Request::ZfsSetMountpoint {
+        TaskRequest::ZfsSetMountpoint {
             dataset: dataset.clone(),
             mountpoint: mountpoint.clone(),
         },
@@ -613,7 +613,7 @@ async fn fs_destroy(
     let Ok(dataset) = DatasetName::new(form.dataset) else {
         return pool_op_failed(&state, &pool, "invalid dataset name").await;
     };
-    let req = Request::ZfsDestroy {
+    let req = TaskRequest::ZfsDestroy {
         dataset: dataset.clone(),
         recursive: form.recursive.is_some(),
     };
@@ -645,7 +645,7 @@ async fn pool_add_device(
     let Ok(device) = DevicePath::new(form.device.trim()) else {
         return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
     };
-    let req = Request::PoolDeviceAdd {
+    let req = TaskRequest::PoolDeviceAdd {
         pool: pool.clone(),
         device: device.clone(),
     };
@@ -800,7 +800,7 @@ async fn pool_create(
         },
     };
     let title = format!("create pool {pool}");
-    let req = Request::PoolCreate {
+    let req = TaskRequest::PoolCreate {
         name: pool,
         vdev: layout,
         devices: device_paths,

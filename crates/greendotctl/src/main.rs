@@ -6,13 +6,14 @@
 //! socket). `greendotctl reconcile` heals drift through a running daemon (any
 //! uid with socket access), or applies inline as root when given a config or
 //! when no daemon is up; the web reconciles through the daemon's
-//! `Request::Reconcile`, which reads the daemon's own `--config` — never a
+//! `TaskRequest::Reconcile`, which reads the daemon's own `--config` — never a
 //! peer-supplied path (see [`reconcile`]).
 //!
-//! Transport is gRPC (tonic) over the Unix socket. Every incoming `pb::Request`
-//! is converted to the validated domain [`greendot_proto::Request`] via
-//! `TryFrom`, which re-runs the validators — the daemon's second line of
-//! defense (prost does not validate on decode the way serde did).
+//! Transport is gRPC (tonic) over the Unix socket. Every incoming protobuf
+//! request is converted to its validated domain type (`CallRequest` for `Call`,
+//! `TaskRequest` for `RunTask`) via `TryFrom`, which re-runs the validators —
+//! the daemon's second line of defense (prost does not validate on decode the
+//! way serde did).
 
 mod actual;
 mod cmd;
@@ -40,7 +41,8 @@ use dispatch::{Ctx, Dispatch};
 use greendot_proto::pb::helper_server::HelperServer;
 use greendot_proto::server::{DomainHelper, Validated};
 use greendot_proto::{
-    ErrKind, Request as GdRequest, Response as GdResponse, SubStatus, Task, TaskEvent, pb,
+    CallRequest as GdCall, ErrKind, Response as GdResponse, SubStatus, Task, TaskEvent,
+    TaskRequest as GdTask, pb,
 };
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -66,7 +68,7 @@ struct Opts {
     allow_uid: Option<u32>,
     pam_service: String,
     admin_group: String,
-    /// Config TOML for `Request::Reconcile` (`None` = built-in defaults).
+    /// Config TOML for `TaskRequest::Reconcile` (`None` = built-in defaults).
     config: Option<String>,
 }
 
@@ -216,7 +218,7 @@ fn peer_uid(_stream: &UnixStream) -> nix::Result<u32> {
 
 /// The domain-level service behind the [`Validated`] ingress adapter, which
 /// converts (and validates) every incoming protobuf request before it gets
-/// here — this code never sees a raw `pb::Request`.
+/// here — this code never sees a raw `pb::TaskRequest`.
 struct HelperSvc {
     ctx: Arc<Ctx>,
 }
@@ -263,23 +265,17 @@ impl EventSink for ChannelSink {
 
 #[tonic::async_trait]
 impl DomainHelper for HelperSvc {
-    async fn call(&self, domain: GdRequest) -> GdResponse {
+    async fn call(&self, domain: GdCall) -> GdResponse {
         let ctx = Arc::clone(&self.ctx);
         // `Authenticate` runs PAM, which can block; do it off the reactor.
-        tokio::task::spawn_blocking(move || match dispatch::plan(&ctx, domain) {
-            Dispatch::OneShot(resp) => resp,
-            _ => GdResponse::err(
-                ErrKind::Validation,
-                "Call expects a one-shot request (Ping/Authenticate); use RunTask",
-            ),
-        })
-        .await
-        .unwrap_or_else(|e| GdResponse::err(ErrKind::Sys, format!("worker panicked: {e}")))
+        tokio::task::spawn_blocking(move || dispatch::plan_call(&ctx, domain))
+            .await
+            .unwrap_or_else(|e| GdResponse::err(ErrKind::Sys, format!("worker panicked: {e}")))
     }
 
     async fn run_task(
         &self,
-        req: std::result::Result<GdRequest, String>,
+        req: std::result::Result<GdTask, String>,
     ) -> mpsc::Receiver<std::result::Result<pb::TaskEvent, Status>> {
         let (tx, rx) = mpsc::channel::<std::result::Result<pb::TaskEvent, Status>>(128);
         let ctx = Arc::clone(&self.ctx);
@@ -325,9 +321,9 @@ impl DomainHelper for HelperSvc {
 /// Executes a planned request, streaming its output to `sink`. This is the old
 /// synchronous `serve` match body, unchanged except that a one-shot response is
 /// translated into terminal task events (RunTask always yields a stream).
-fn run_dispatch(ctx: &Ctx, req: GdRequest, sink: &mut dyn EventSink) -> io::Result<()> {
+fn run_dispatch(ctx: &Ctx, req: GdTask, sink: &mut dyn EventSink) -> io::Result<()> {
     let mut task = Task::new(sink);
-    match dispatch::plan(ctx, req) {
+    match dispatch::plan(req) {
         Dispatch::OneShot(resp) => emit_oneshot(&mut task, resp),
         Dispatch::Task(spec) => {
             let _guard = ctx.mutate_lock.lock().unwrap();

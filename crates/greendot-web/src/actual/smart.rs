@@ -4,7 +4,7 @@
 //! and `temperature.current` fields — it carries no device-vendor knowledge.
 
 use crate::helper_client::HelperClient;
-use greendot_proto::{BlockDev, Request};
+use greendot_proto::{BlockDev, TaskRequest};
 use std::collections::HashMap;
 
 /// Per-device SMART health and current temperature.
@@ -23,7 +23,7 @@ pub async fn health(helper: &HelperClient, devices: &[BlockDev]) -> HashMap<Stri
     if devices.is_empty() {
         return HashMap::new();
     }
-    let req = Request::SmartHealth {
+    let req = TaskRequest::SmartHealth {
         devices: devices.to_vec(),
     };
     parse_health(&helper.collect(req).await.stdout)
@@ -88,7 +88,7 @@ fn report_installed(error: Option<&str>) -> bool {
 
 pub async fn report(helper: &HelperClient, device: &BlockDev) -> SmartReportOut {
     let out = helper
-        .collect(Request::SmartReport {
+        .collect(TaskRequest::SmartReport {
             device: device.clone(),
         })
         .await;

@@ -56,7 +56,7 @@ pub fn parse_roce_capable(stdout: &str) -> HashMap<String, String> {
 /// An opaque per-NIC RDMA advisory from the helper: a human label and detail
 /// explaining why a NIC may lack RDMA and how to fix it. The web renders these
 /// verbatim and reads nothing into them — all vendor knowledge stays in the
-/// helper (`Request::NicRdmaAdvice`).
+/// helper (`TaskRequest::NicRdmaAdvice`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NicAdvice {
     pub label: String,
