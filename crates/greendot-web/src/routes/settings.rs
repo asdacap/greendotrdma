@@ -169,7 +169,7 @@ async fn gather(
     let os = greendot_proto::os::detect();
     let install_supported = matches!(os.family, greendot_proto::os::PkgFamily::Debian);
     // Only packages apt can actually install belong in the one-click button; the
-    // rest (e.g. nvmetcli, which Ubuntu 26.04 dropped) get a manual-install hint.
+    // rest (e.g. nvmetcli, which Ubuntu has never packaged) get a manual-install hint.
     // On non-apt distros there is nothing the in-app installer can supply.
     let available = if install_supported {
         crate::actual::apt::available(&missing).await
@@ -561,7 +561,7 @@ mod tests {
 
     #[test]
     fn partition_missing_splits_installable_from_manual() {
-        // nvmetcli has no apt candidate (e.g. Ubuntu 26.04); the rest do.
+        // nvmetcli has no apt candidate (Ubuntu has never packaged it); the rest do.
         let missing = ["nvmetcli", "targetcli-fb", "nvme-cli"]
             .map(String::from)
             .to_vec();

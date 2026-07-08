@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn parses_only_packages_with_a_real_candidate() {
         // Shape of `apt-cache policy nvme-cli held-pkg` — note an unknown package
-        // (e.g. nvmetcli on Ubuntu 26.04) produces no block at all on stdout.
+        // (e.g. nvmetcli, which Ubuntu has never packaged) produces no block at all on stdout.
         let out = "\
 nvme-cli:
   Installed: (none)

@@ -7,6 +7,7 @@ use greendot_proto::{
     VdevTarget,
 };
 use std::io;
+use std::path::Path;
 
 fn spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zfs", args)
@@ -51,6 +52,51 @@ pub fn snapshot_create(dataset: &DatasetName, snap: &SnapName) -> TaskSpec {
 
 pub fn snapshot_destroy(dataset: &DatasetName, snap: &SnapName) -> TaskSpec {
     spec(s(&["destroy", &format!("{dataset}@{snap}")]))
+}
+
+/// `zfs clone <dataset>@<snap> <target>`.
+pub fn zfs_clone(dataset: &DatasetName, snap: &SnapName, target: &DatasetName) -> TaskSpec {
+    spec(s(&["clone", &format!("{dataset}@{snap}"), target.as_str()]))
+}
+
+/// `zfs clone` then the optional volsize bump as one task (a clone inherits
+/// the origin's volsize, so creating a bigger volume from a snapshot is one
+/// intent). The resize is skipped when the clone itself failed.
+pub fn zfs_clone_and_resize(
+    task: &mut Task,
+    dataset: &DatasetName,
+    snap: &SnapName,
+    target: &DatasetName,
+    new_size: Option<u64>,
+) -> io::Result<()> {
+    if cmd::run(
+        task,
+        format!("Clone {dataset}@{snap} to {target}"),
+        &zfs_clone(dataset, snap, target),
+    )? != SubStatus::Success
+    {
+        return Ok(());
+    }
+    if let Some(size) = new_size {
+        cmd::run(task, format!("Resize {target}"), &zvol_resize(target, size))?;
+    }
+    Ok(())
+}
+
+/// Whether `/dev/zvol/<dataset>` exists and its size in bytes, via the udev
+/// symlink and the block device's `size` attribute (512-byte sectors) — pure
+/// filesystem reads, no `zfs` CLI. Roots are parameters for the tempdir tests.
+pub fn zvol_info(dev_zvol: &Path, sys_block: &Path, dataset: &DatasetName) -> (bool, u64) {
+    let Ok(target) = std::fs::canonicalize(dev_zvol.join(dataset.as_str())) else {
+        return (false, 0);
+    };
+    let Some(name) = target.file_name().and_then(|n| n.to_str()) else {
+        return (false, 0);
+    };
+    let sectors: u64 = crate::util::read_trim(&sys_block.join(name).join("size"))
+        .parse()
+        .unwrap_or(0);
+    (true, sectors * 512)
 }
 
 /// `zpool create [-o ashift=N] <name> [mirror|raidzN] <dev>…`. A plain stripe
@@ -259,6 +305,49 @@ mod tests {
             snapshot_destroy(&ds("tank/vm1"), &SnapName::new("s1").unwrap()).args,
             s(&["destroy", "tank/vm1@s1"])
         );
+        assert_eq!(
+            zfs_clone(
+                &ds("tank/csi/pvc-1"),
+                &SnapName::new("csi-s1").unwrap(),
+                &ds("tank/csi/pvc-2"),
+            )
+            .args,
+            s(&["clone", "tank/csi/pvc-1@csi-s1", "tank/csi/pvc-2"])
+        );
+    }
+
+    /// `zvol_info` through a fake udev/sysfs tree: present (symlink → zd0 with
+    /// a sector count), absent, and a dangling symlink all answer sensibly.
+    #[test]
+    fn zvol_info_resolves_size_via_sysfs() {
+        let tmp = std::env::temp_dir().join(format!("gd-zvolinfo{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let (dev, sys) = (tmp.join("dev/zvol"), tmp.join("sys/block"));
+        std::fs::create_dir_all(dev.join("tank/csi")).unwrap();
+        std::fs::create_dir_all(sys.join("zd0")).unwrap();
+        std::fs::write(sys.join("zd0/size"), "2097152\n").unwrap(); // 1 GiB
+        std::fs::write(tmp.join("zd0-target"), "").unwrap();
+        std::os::unix::fs::symlink(tmp.join("zd0-target"), dev.join("tank/csi/pvc-1")).unwrap();
+        // The canonicalized target's basename must match the sysfs dir; point
+        // the link at a file literally named zd0.
+        std::fs::rename(tmp.join("zd0-target"), tmp.join("zd0")).unwrap();
+        std::os::unix::fs::symlink(tmp.join("zd0"), dev.join("tank/csi/pvc-2")).unwrap();
+
+        assert_eq!(
+            zvol_info(&dev, &sys, &ds("tank/csi/pvc-2")),
+            (true, 1 << 30)
+        );
+        assert_eq!(
+            zvol_info(&dev, &sys, &ds("tank/csi/absent")),
+            (false, 0),
+            "no symlink"
+        );
+        assert_eq!(
+            zvol_info(&dev, &sys, &ds("tank/csi/pvc-1")),
+            (false, 0),
+            "dangling symlink"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

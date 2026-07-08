@@ -6,7 +6,7 @@
 
 use greendot_proto::pb;
 use greendot_proto::pb::helper_client::HelperClient;
-use greendot_proto::{AuthResult, DatasetName, ErrKind, SubStatus, TaskEvent, ops};
+use greendot_proto::{AuthResult, CsiNqn, DatasetName, ErrKind, Nqn, SubStatus, TaskEvent, ops};
 use std::path::PathBuf;
 use std::time::Duration;
 use tonic::transport::Channel;
@@ -241,4 +241,162 @@ want_tcp = true
         finished == 1 && matches!(events.last(), Some(TaskEvent::Finished { .. })),
         "exactly one terminal Finished; events: {events:?}"
     );
+}
+
+fn task_status(events: &[TaskEvent]) -> SubStatus {
+    match events.last() {
+        Some(TaskEvent::Finished { status, .. }) => *status,
+        other => panic!("task did not finish: {other:?}"),
+    }
+}
+
+/// The CSI lifecycle over the real socket against a `--nvmet-root` tempdir:
+/// apply → grant → revoke (the fence) → delete, plus ingress rejection of a
+/// web-prefix NQN — the ownership boundary enforced at the choke point.
+#[tokio::test]
+async fn csi_ops_drive_the_nvmet_root_end_to_end() {
+    let dir = test_dir("csi");
+    let root = dir.join("nvmet");
+    std::fs::create_dir_all(&root).unwrap();
+    let helper = Helper::start(&["--nvmet-root", root.to_str().unwrap()]);
+    let mut client = helper.client();
+
+    let nqn = CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap();
+    let host = Nqn::new("nqn.2014-08.org.nvmexpress:host1").unwrap();
+    let apply = ops::CsiNvmeApply {
+        nqn: nqn.clone(),
+        // A device node that exists everywhere: the apply op waits for the
+        // node before touching configfs (the zvol/udev race), and this test
+        // has no real zvol.
+        device_path: greendot_proto::DevicePath::new("/dev/null").unwrap(),
+        device_uuid: greendot_proto::NsUuid::new("58668891-c3e4-45d0-b90e-824525c16080").unwrap(),
+        traddr: "10.0.0.5".parse().unwrap(),
+        trsvcid: 4421,
+        transport: greendot_proto::Transport::Rdma,
+    };
+
+    let events = drain(
+        client
+            .csi_nvme_apply(pb::CsiNvmeApply::from(apply))
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
+    let subsys = root.join("subsystems/nqn.2026-06.io.greendot.csi:pvc-1");
+    assert_eq!(
+        std::fs::read_to_string(subsys.join("namespaces/1/device_uuid")).unwrap(),
+        "58668891-c3e4-45d0-b90e-824525c16080"
+    );
+
+    let events = drain(
+        client
+            .csi_host_grant(pb::CsiHostGrant::from(ops::CsiHostGrant {
+                nqn: nqn.clone(),
+                hostnqn: host.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success);
+
+    let events = drain(
+        client
+            .csi_host_revoke(pb::CsiHostRevoke::from(ops::CsiHostRevoke {
+                nqn: nqn.clone(),
+                hostnqn: host,
+            }))
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success);
+    assert!(
+        subsys
+            .join("allowed_hosts/nqn.2014-08.org.nvmexpress:host1")
+            .symlink_metadata()
+            .is_err(),
+        "fence removed the grant"
+    );
+
+    let events = drain(
+        client
+            .csi_nvme_delete(pb::CsiNvmeDelete::from(ops::CsiNvmeDelete { nqn }))
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success);
+    assert!(!subsys.exists());
+
+    // A web-prefix NQN cannot reach the CSI ops: rejected at ingress, surfaced
+    // as a failed task.
+    let events = drain(
+        client
+            .csi_nvme_delete(pb::CsiNvmeDelete {
+                nqn: "nqn.2026-06.io.greendot:vm1".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    match events.last() {
+        Some(TaskEvent::Finished {
+            status: SubStatus::Failed,
+            error: Some(msg),
+        }) => assert!(msg.contains("invalid request"), "{msg}"),
+        other => panic!("expected rejected task, got {other:?}"),
+    }
+}
+
+/// gRPC/h2 through a spawned `greendotctl pipe` child's stdio — exactly the
+/// byte path the SSH forced command gives the CSI controller. Ping and a task
+/// stream must both survive the relay.
+#[tokio::test]
+async fn pipe_relays_grpc_over_stdio() {
+    let helper = Helper::start(&[]);
+    // Wait for the daemon socket to accept (Helper::start only polls existence).
+    let mut client = helper.client();
+    client.ping(pb::Empty {}).await.unwrap();
+
+    let socket = helper.socket.clone();
+    let connector = tower::service_fn(move |_uri| {
+        let socket = socket.clone();
+        async move {
+            let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_greendotctl"))
+                .arg("pipe")
+                .arg(&socket)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+            let stdout = child.stdout.take().unwrap();
+            let stdin = child.stdin.take().unwrap();
+            // The child must outlive the connection; parking it in a task tied
+            // to nothing keeps kill_on_drop from firing until the test ends.
+            tokio::spawn(async move { child.wait().await });
+            Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(tokio::io::join(stdout, stdin)))
+        }
+    });
+    let channel = tonic::transport::Endpoint::try_from("http://[::1]:50051")
+        .unwrap()
+        .connect_with_connector_lazy(connector);
+    let mut piped = HelperClient::new(channel);
+
+    piped.ping(pb::Empty {}).await.expect("ping over the pipe");
+    let events = drain(
+        piped
+            .install_packages(pb::InstallPackages { packages: vec![] })
+            .await
+            .expect("task rpc over the pipe")
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
 }

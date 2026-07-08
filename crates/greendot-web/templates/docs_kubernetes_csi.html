@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+
+{% block title %}Kubernetes CSI — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Kubernetes CSI</h1>
+<p class="muted">
+  This appliance ships a native CSI driver (<code>csi/</code> in the source tree):
+  dynamically provisioned PersistentVolumes backed by ZFS zvols, served over NVMe-oF/RDMA,
+  with <strong>per-node host-NQN fencing</strong>. CSI volumes appear on
+  <a href="/nvme">NVMe-oF</a> badged <span class="badge">External</span> with a live RDMA
+  dot — the web never manages them, it only tells you the truth about them.
+</p>
+
+<h2>1. How it connects</h2>
+<pre class="log">controller pod ── ssh (pubkey, pinned host key) ──▶ greendot-csi user
+                    gRPC over the session stdio        └─ forced command: greendotctl pipe
+                                                           └─ the helper daemon socket
+worker kernels ── NVMe/RDMA, port 4421 ────────────▶ dedicated CSI nvmet port</pre>
+<p>The cluster holds <strong>no root credential</strong>. The SSH login is the packaged
+<code>greendot-csi</code> user; its <code>authorized_keys</code> entry forces
+<code>greendotctl pipe</code> (with <code>restrict</code>), so the key can only speak the
+helper's typed protocol — every request is re-validated by the daemon's allowlist, exactly
+as greendot's own web UI is. The controller always verifies the box's SSH host key against
+a pinned <code>known_hosts</code>.</p>
+
+<h2>2. Box-side setup</h2>
+<pre class="log"># parent dataset for CSI volumes
+zfs create tank/csi
+# trust the controller's public key, pipe-only
+install -d -o greendot-csi -g greendot-csi -m 700 /var/lib/greendotrdma/csi/.ssh
+echo 'command="/usr/libexec/greendotrdma/greendotctl pipe",restrict ssh-ed25519 AAAA…' \
+  &gt; /var/lib/greendotrdma/csi/.ssh/authorized_keys</pre>
+
+<h2>3. Cluster-side setup</h2>
+<pre class="log">kubectl -n kube-system create secret generic greendot-csi-ssh --from-file=id_ed25519=…
+ssh-keyscan -H STORAGE_HOST | kubectl -n kube-system create configmap \
+  greendot-csi-known-hosts --from-file=known_hosts=/dev/stdin
+kubectl apply -f csi/deploy/    # edit controller.yaml's addresses first</pre>
+<p>Each worker needs the fabric module loaded (<code>modprobe nvme-rdma</code>, or
+<code>nvme-tcp</code> for TCP; persist via <code>/etc/modules-load.d</code>). No
+<code>nvme-cli</code> is required on workers — the node plugin writes
+<code>/dev/nvme-fabrics</code> directly. Note the transport is whatever the driver is
+configured with: <code>rdma</code> serves RDMA, <code>tcp</code> serves TCP — nothing
+"falls back" silently, and the dot on the Exports page shows which one initiators
+actually use.</p>
+
+<h2>4. Fencing — why RWO is safe here</h2>
+<p>Every volume is exported <strong>closed</strong> (<code>allow_any_host=0</code>, empty
+ACL). Attaching a pod grants exactly that node's host NQN; detaching runs a three-step
+fence on the target: revoke the ACL, unlink the subsystem from the port — which the kernel
+answers by <em>deleting the node's live controllers</em> — then relink. The fenced node's
+reconnect is rejected with DNR, so a rescheduled RWO pod can never leave two nodes writing
+the same block device, even when the old node is unreachable.</p>
+
+<h2>5. Snapshots and expansion</h2>
+<p>CSI snapshots are native ZFS snapshots of the volume's zvol; volumes can be cloned from
+them, and both online expansion halves work (the target grows the zvol and revalidates the
+namespace; the node grows the filesystem). greendot's own scheduled snapshot policies
+coexist — same COW objects, different names.</p>
+
+<h2>6. Using democratic-csi instead</h2>
+<p><a href="https://github.com/democratic-csi/democratic-csi">democratic-csi</a>'s
+<code>zfs-generic-nvmeof</code> driver also works against this box, with trade-offs to
+understand:</p>
+<ul>
+  <li>It drives the box over SSH as <strong>root</strong> (or sudo — which for its
+  stdin-fed <code>nvmetcli</code> and <code>zfs</code> invocations is root-equivalent),
+  bypassing greendot's helper and its typed allowlist entirely, and it does not verify the
+  SSH host key.</li>
+  <li>It needs <code>nvmetcli</code> on the box, which Ubuntu has never packaged — you
+  install it from source or pip. (greendot itself needs no nvmetcli: the helper writes
+  configfs directly.)</li>
+  <li>Its example config ships <code>allow_any_host: 1</code> — no fencing. Lock each
+  subsystem to the consuming node's NQN if you use it for RWO volumes.</li>
+  <li>NVMe-oF coexistence is safe (greendot only reconciles its own NQN prefix; foreign
+  subsystems show as <span class="badge">External</span>). <strong>Do not</strong> run its
+  iSCSI driver here: greendot applies iSCSI via <code>targetctl restore</code>, which
+  clobbers <code>targetcli</code>-created targets on the next reconcile.</li>
+</ul>
+{% endblock %}

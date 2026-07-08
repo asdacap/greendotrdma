@@ -74,6 +74,13 @@ validated_string!(
     /// NVMe qualified name, e.g. `nqn.2026-06.io.greendot:vm1`.
     Nqn, validate::nqn, "NQN");
 validated_string!(
+    /// An NQN restricted to [`CSI_NQN_PREFIX`] — the type is the authorization:
+    /// no CSI rpc can name a web-managed or foreign subsystem.
+    CsiNqn, validate::csi_nqn, "CSI NQN");
+validated_string!(
+    /// Lowercase hyphenated UUID for nvmet's namespace `device_uuid`.
+    NsUuid, validate::ns_uuid, "namespace UUID");
+validated_string!(
     /// iSCSI qualified name, e.g. `iqn.2026-06.io.greendot:vm1`.
     Iqn, validate::iqn, "IQN");
 validated_string!(
@@ -235,6 +242,19 @@ pub enum KernelModule {
 /// foreign (manually created) objects untouched.
 pub const OUR_NQN_PREFIX: &str = "nqn.2026-06.io.greendot:";
 pub const OUR_IQN_PREFIX: &str = "iqn.2026-06.io.greendot:";
+
+/// CSI-owned subsystems live under this sibling prefix. Deliberately NOT under
+/// [`OUR_NQN_PREFIX`] (`.csi:` diverges from `:` at the same byte), so
+/// reconcile classifies them as foreign and never prunes or relinks them,
+/// while the web renders them as External exports with live dots.
+pub const CSI_NQN_PREFIX: &str = "nqn.2026-06.io.greendot.csi:";
+
+/// The dedicated CSI nvmet port. CSI subsystems never link into a
+/// render-managed port (whose `addr_*` rewrites drop only [`OUR_NQN_PREFIX`]
+/// links and would then EBUSY against a CSI link), and the fixed high id is
+/// also passed to `render_nvmet` as reserved so its sequential allocation can
+/// never claim the port while it sits empty between CSI volumes.
+pub const CSI_PORT_ID: u16 = 61000;
 
 // ---- Desired-state documents (the helper applies NvmetDesired directly to
 // configfs; LioDesired is rendered to targetctl JSON and applied via restore) ----
@@ -454,6 +474,44 @@ mod tests {
     #[case::too_long(&format!("nqn.{}", "a".repeat(224)), false)]
     fn nqn(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(Nqn::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::pvc("nqn.2026-06.io.greendot.csi:pvc-4f9b2c8a", true)]
+    #[case::empty("", false)]
+    #[case::bare_prefix("nqn.2026-06.io.greendot.csi:", false)]
+    #[case::web_prefix("nqn.2026-06.io.greendot:vm1", false)]
+    #[case::foreign("nqn.2014-08.org.nvmexpress:uuid:x", false)]
+    #[case::slash("nqn.2026-06.io.greendot.csi:a/b", false)]
+    #[case::too_long(&format!("nqn.2026-06.io.greendot.csi:{}", "a".repeat(224)), false)]
+    fn csi_nqn(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(CsiNqn::new(input).is_ok(), ok, "{input:?}");
+        // The invariant the whole ownership split rests on: a CSI NQN is never
+        // under the web-managed prefix, so reconcile treats it as foreign.
+        if let Ok(nqn) = CsiNqn::new(input) {
+            assert!(!nqn.as_str().starts_with(OUR_NQN_PREFIX));
+        }
+    }
+
+    #[rstest]
+    #[case::v4("58668891-c3e4-45d0-b90e-824525c16080", true)]
+    #[case::v5("74738ff5-5367-5958-9aee-98fffdcd1876", true)]
+    #[case::empty("", false)]
+    #[case::uppercase("58668891-C3E4-45D0-B90E-824525C16080", false)]
+    #[case::braced("{58668891-c3e4-45d0-b90e-824525c16080}", false)]
+    #[case::unhyphenated("58668891c3e445d0b90e824525c16080", false)]
+    #[case::short_group("58668891-c3e-45d0-b90e-824525c16080", false)]
+    #[case::extra_group("58668891-c3e4-45d0-b90e-824525c16080-ff", false)]
+    #[case::nonhex("58668891-c3e4-45d0-b90e-824525c1608g", false)]
+    fn ns_uuid(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(NsUuid::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[test]
+    fn csi_prefix_diverges_from_web_prefix() {
+        // Pinned forever: if someone "fixes" CSI_NQN_PREFIX to nest under the
+        // web prefix, reconcile would prune every CSI volume not in state.toml.
+        assert!(!format!("{CSI_NQN_PREFIX}x").starts_with(OUR_NQN_PREFIX));
     }
 
     #[rstest]

@@ -10,13 +10,16 @@
 //!   generic rpc middleware requires this bound, so no rpc can skip it — this
 //!   is the security choke point.
 
-use crate::convert::{dec_lvm_report, dec_vdev, map_new, strs, to_u8};
+use crate::convert::{
+    dec_lvm_report, dec_transport, dec_vdev, map_new, parse_ip, strs, to_u8, to_u16,
+};
 use crate::pb;
 use crate::{
-    BlockDev, ConvertError, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
-    MountPoint, NetdevName, PackageName, PartLabel, PoolName, Secret, SnapName, Username,
-    VdevLayout, VdevTarget, VgName,
+    BlockDev, ConvertError, CsiNqn, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
+    MountPoint, NetdevName, Nqn, NsUuid, PackageName, PartLabel, PoolName, Secret, SnapName,
+    Transport, Username, VdevLayout, VdevTarget, VgName,
 };
+use std::net::IpAddr;
 
 /// Fieldless ops: a unit marker struct with the trivial (but still mandatory)
 /// ingress conversion, so the daemon's middleware bound holds uniformly.
@@ -189,6 +192,62 @@ impl From<SnapshotDestroy> for pb::SnapshotDestroy {
         pb::SnapshotDestroy {
             dataset: s.dataset.as_str().to_owned(),
             snap: s.snap.as_str().to_owned(),
+        }
+    }
+}
+
+/// `zfs clone <dataset>@<snap> <target>`, optionally followed by a volsize
+/// bump — creating a bigger volume from a snapshot is one intent, so the
+/// resize rides along server-side rather than as a client-side sequence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZfsClone {
+    pub dataset: DatasetName,
+    pub snap: SnapName,
+    pub target: DatasetName,
+    pub new_size: Option<u64>,
+}
+
+impl TryFrom<pb::ZfsClone> for ZfsClone {
+    type Error = ConvertError;
+    fn try_from(c: pb::ZfsClone) -> Result<Self, ConvertError> {
+        Ok(ZfsClone {
+            dataset: DatasetName::new(c.dataset)?,
+            snap: SnapName::new(c.snap)?,
+            target: DatasetName::new(c.target)?,
+            new_size: c.new_size,
+        })
+    }
+}
+impl From<ZfsClone> for pb::ZfsClone {
+    fn from(c: ZfsClone) -> Self {
+        pb::ZfsClone {
+            dataset: c.dataset.as_str().to_owned(),
+            snap: c.snap.as_str().to_owned(),
+            target: c.target.as_str().to_owned(),
+            new_size: c.new_size,
+        }
+    }
+}
+
+/// Structural read: does the zvol exist, and how big is it? (CSI CreateVolume
+/// idempotency and expand no-op detection.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZvolInfo {
+    pub dataset: DatasetName,
+}
+
+impl TryFrom<pb::ZvolInfo> for ZvolInfo {
+    type Error = ConvertError;
+    fn try_from(z: pb::ZvolInfo) -> Result<Self, ConvertError> {
+        Ok(ZvolInfo {
+            dataset: DatasetName::new(z.dataset)?,
+        })
+    }
+}
+impl From<ZvolInfo> for pb::ZvolInfo {
+    fn from(z: ZvolInfo) -> Self {
+        pb::ZvolInfo {
+            dataset: z.dataset.as_str().to_owned(),
         }
     }
 }
@@ -950,6 +1009,159 @@ impl From<InstallPackages> for pb::InstallPackages {
     }
 }
 
+// ---- CSI exports ----
+//
+// Imperative, idempotent, and scoped by type: every subsystem these ops can
+// name is a `CsiNqn`, whose prefix is a sibling of (not nested under) the
+// web-managed prefix — reconcile treats CSI subsystems as foreign, so the two
+// owners never fight over the same configfs objects.
+
+/// Idempotent upsert of one CSI export: subsystem (`allow_any_host=0`),
+/// namespace 1 with the pinned `device_uuid` (written before enable, so the
+/// initiator's `/dev/disk/by-id` path is deterministic and no read-back rpc is
+/// needed), the dedicated CSI port ensured, and the subsystem linked to it.
+/// Never touches `allowed_hosts`: grants survive re-apply.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiNvmeApply {
+    pub nqn: CsiNqn,
+    pub device_path: DevicePath,
+    pub device_uuid: NsUuid,
+    pub traddr: IpAddr,
+    pub trsvcid: u16,
+    pub transport: Transport,
+}
+
+impl TryFrom<pb::CsiNvmeApply> for CsiNvmeApply {
+    type Error = ConvertError;
+    fn try_from(a: pb::CsiNvmeApply) -> Result<Self, ConvertError> {
+        Ok(CsiNvmeApply {
+            nqn: CsiNqn::new(a.nqn)?,
+            device_path: DevicePath::new(a.device_path)?,
+            device_uuid: NsUuid::new(a.device_uuid)?,
+            traddr: parse_ip(&a.traddr)?,
+            trsvcid: to_u16(a.trsvcid, "trsvcid")?,
+            transport: dec_transport(a.transport)?,
+        })
+    }
+}
+impl From<CsiNvmeApply> for pb::CsiNvmeApply {
+    fn from(a: CsiNvmeApply) -> Self {
+        pb::CsiNvmeApply {
+            nqn: a.nqn.as_str().to_owned(),
+            device_path: a.device_path.as_str().to_owned(),
+            device_uuid: a.device_uuid.as_str().to_owned(),
+            traddr: a.traddr.to_string(),
+            trsvcid: u32::from(a.trsvcid),
+            transport: pb::Transport::from(a.transport) as i32,
+        }
+    }
+}
+
+/// Absent-tolerant teardown; also reaps the CSI port once its last link is
+/// gone (an empty port's id would otherwise be reclaimable by the renderer).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiNvmeDelete {
+    pub nqn: CsiNqn,
+}
+
+impl TryFrom<pb::CsiNvmeDelete> for CsiNvmeDelete {
+    type Error = ConvertError;
+    fn try_from(d: pb::CsiNvmeDelete) -> Result<Self, ConvertError> {
+        Ok(CsiNvmeDelete {
+            nqn: CsiNqn::new(d.nqn)?,
+        })
+    }
+}
+impl From<CsiNvmeDelete> for pb::CsiNvmeDelete {
+    fn from(d: CsiNvmeDelete) -> Self {
+        pb::CsiNvmeDelete {
+            nqn: d.nqn.as_str().to_owned(),
+        }
+    }
+}
+
+/// Add one initiator NQN to the subsystem's `allowed_hosts` (the attach ACL).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiHostGrant {
+    pub nqn: CsiNqn,
+    pub hostnqn: Nqn,
+}
+
+impl TryFrom<pb::CsiHostGrant> for CsiHostGrant {
+    type Error = ConvertError;
+    fn try_from(g: pb::CsiHostGrant) -> Result<Self, ConvertError> {
+        Ok(CsiHostGrant {
+            nqn: CsiNqn::new(g.nqn)?,
+            hostnqn: Nqn::new(g.hostnqn)?,
+        })
+    }
+}
+impl From<CsiHostGrant> for pb::CsiHostGrant {
+    fn from(g: CsiHostGrant) -> Self {
+        pb::CsiHostGrant {
+            nqn: g.nqn.as_str().to_owned(),
+            hostnqn: g.hostnqn.as_str().to_owned(),
+        }
+    }
+}
+
+/// The fence, three steps in strict order: drop the host from `allowed_hosts`
+/// (closes the door — the kernel rejects its reconnect with DNR, so the
+/// initiator deletes its own controller), unlink the subsystem from the CSI
+/// port (severs live controllers), relink. The ACL edit precedes the relink
+/// so the fenced host cannot slip back in through the reopened port.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiHostRevoke {
+    pub nqn: CsiNqn,
+    pub hostnqn: Nqn,
+}
+
+impl TryFrom<pb::CsiHostRevoke> for CsiHostRevoke {
+    type Error = ConvertError;
+    fn try_from(r: pb::CsiHostRevoke) -> Result<Self, ConvertError> {
+        Ok(CsiHostRevoke {
+            nqn: CsiNqn::new(r.nqn)?,
+            hostnqn: Nqn::new(r.hostnqn)?,
+        })
+    }
+}
+impl From<CsiHostRevoke> for pb::CsiHostRevoke {
+    fn from(r: CsiHostRevoke) -> Self {
+        pb::CsiHostRevoke {
+            nqn: r.nqn.as_str().to_owned(),
+            hostnqn: r.hostnqn.as_str().to_owned(),
+        }
+    }
+}
+
+/// Target-side volume expansion as one intent: resize the zvol backing
+/// namespace 1 (the dataset is derived from the subsystem's own
+/// `device_path`, so the `CsiNqn` scopes what can be resized), then
+/// revalidate the namespace size so initiators see the new capacity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiVolumeExpand {
+    pub nqn: CsiNqn,
+    pub new_size: u64,
+}
+
+impl TryFrom<pb::CsiVolumeExpand> for CsiVolumeExpand {
+    type Error = ConvertError;
+    fn try_from(e: pb::CsiVolumeExpand) -> Result<Self, ConvertError> {
+        Ok(CsiVolumeExpand {
+            nqn: CsiNqn::new(e.nqn)?,
+            new_size: e.new_size,
+        })
+    }
+}
+impl From<CsiVolumeExpand> for pb::CsiVolumeExpand {
+    fn from(e: CsiVolumeExpand) -> Self {
+        pb::CsiVolumeExpand {
+            nqn: e.nqn.as_str().to_owned(),
+            new_size: e.new_size,
+        }
+    }
+}
+
 // ---- Fieldless ops ----
 
 unit_op!(
@@ -1146,6 +1358,42 @@ mod tests {
             username: Username::new("alice").unwrap(),
             password: Secret("hunter2".into()),
         } => pb::Authenticate);
+        roundtrip!(ZfsClone {
+            dataset: DatasetName::new("tank/csi/pvc-1").unwrap(),
+            snap: SnapName::new("csi-snap-1").unwrap(),
+            target: DatasetName::new("tank/csi/pvc-2").unwrap(),
+            new_size: Some(20 << 30),
+        } => pb::ZfsClone);
+        roundtrip!(ZfsClone {
+            dataset: DatasetName::new("tank/csi/pvc-1").unwrap(),
+            snap: SnapName::new("csi-snap-1").unwrap(),
+            target: DatasetName::new("tank/csi/pvc-2").unwrap(),
+            new_size: None,
+        } => pb::ZfsClone);
+        roundtrip!(ZvolInfo { dataset: DatasetName::new("tank/csi/pvc-1").unwrap() } => pb::ZvolInfo);
+        roundtrip!(CsiNvmeApply {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
+            device_path: DevicePath::new("/dev/zvol/tank/csi/pvc-1").unwrap(),
+            device_uuid: NsUuid::new("58668891-c3e4-45d0-b90e-824525c16080").unwrap(),
+            traddr: "10.0.0.5".parse().unwrap(),
+            trsvcid: 4421,
+            transport: Transport::Rdma,
+        } => pb::CsiNvmeApply);
+        roundtrip!(CsiNvmeDelete {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
+        } => pb::CsiNvmeDelete);
+        roundtrip!(CsiHostGrant {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
+            hostnqn: Nqn::new("nqn.2014-08.org.nvmexpress:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6").unwrap(),
+        } => pb::CsiHostGrant);
+        roundtrip!(CsiHostRevoke {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
+            hostnqn: Nqn::new("nqn.2014-08.org.nvmexpress:uuid:f81d4fae-7dec-11d0-a765-00a0c91e6bf6").unwrap(),
+        } => pb::CsiHostRevoke);
+        roundtrip!(CsiVolumeExpand {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
+            new_size: 30 << 30,
+        } => pb::CsiVolumeExpand);
     }
 
     /// Ingress `TryFrom` rejects invalid payloads built directly on the wire
@@ -1255,6 +1503,89 @@ mod tests {
             PoolDeviceDetach::try_from(pb::PoolDeviceDetach {
                 pool: "tank".into(),
                 device: "mirror-0".into(), // containers are not detachable
+            })
+            .is_err()
+        );
+        // The CSI ops must reject: a web-prefix NQN (the ownership boundary),
+        // a malformed uuid, a traversal device path, a bad host NQN, and a
+        // bad clone target — each through the same ingress choke point.
+        let csi_ok = "nqn.2026-06.io.greendot.csi:pvc-1";
+        let apply_ok = pb::CsiNvmeApply {
+            nqn: csi_ok.into(),
+            device_path: "/dev/zvol/tank/csi/pvc-1".into(),
+            device_uuid: "58668891-c3e4-45d0-b90e-824525c16080".into(),
+            traddr: "10.0.0.5".into(),
+            trsvcid: 4421,
+            transport: pb::Transport::Rdma as i32,
+        };
+        assert!(CsiNvmeApply::try_from(apply_ok.clone()).is_ok());
+        for bad in [
+            pb::CsiNvmeApply {
+                nqn: "nqn.2026-06.io.greendot:vm1".into(), // web-managed prefix
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                nqn: "nqn.2026-06.io.greendot.csi:".into(), // empty suffix
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                device_uuid: "58668891-C3E4-45D0-B90E-824525C16080".into(), // uppercase
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                device_path: "/dev/zvol/../sda".into(),
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                traddr: "not-an-ip".into(),
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                trsvcid: 70000, // out of u16 range
+                ..apply_ok.clone()
+            },
+            pb::CsiNvmeApply {
+                transport: 0, // TRANSPORT_UNSPECIFIED
+                ..apply_ok.clone()
+            },
+        ] {
+            assert!(CsiNvmeApply::try_from(bad.clone()).is_err(), "{bad:?}");
+        }
+        assert!(
+            CsiHostGrant::try_from(pb::CsiHostGrant {
+                nqn: csi_ok.into(),
+                hostnqn: "nqn.2014-08.org/evil".into(), // slash
+            })
+            .is_err()
+        );
+        assert!(
+            CsiHostRevoke::try_from(pb::CsiHostRevoke {
+                nqn: "nqn.2000-01.com.example:manual".into(), // foreign prefix
+                hostnqn: "nqn.2014-08.org.nvmexpress:host1".into(),
+            })
+            .is_err()
+        );
+        assert!(
+            ZfsClone::try_from(pb::ZfsClone {
+                dataset: "tank/csi/pvc-1".into(),
+                snap: "tank@daily".into(), // '@' is not part of a snap name
+                target: "tank/csi/pvc-2".into(),
+                new_size: None,
+            })
+            .is_err()
+        );
+        assert!(
+            ZfsClone::try_from(pb::ZfsClone {
+                dataset: "tank/csi/pvc-1".into(),
+                snap: "daily".into(),
+                target: "../../etc".into(),
+                new_size: None,
+            })
+            .is_err()
+        );
+        assert!(
+            ZvolInfo::try_from(pb::ZvolInfo {
+                dataset: "tank/$(reboot)".into(),
             })
             .is_err()
         );

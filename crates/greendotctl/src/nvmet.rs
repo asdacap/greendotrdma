@@ -6,12 +6,12 @@
 
 use crate::util::read_trim;
 use greendot_proto::{
-    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask,
-    Transport,
+    CSI_NQN_PREFIX, CSI_PORT_ID, CsiNqn, DatasetName, Nqn, NsUuid, NvmetDesired, NvmetNsSpec,
+    NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask, Task, Transport, ops,
 };
 use std::collections::BTreeSet;
 use std::io::{self, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub const NVMET_ROOT: &str = "/sys/kernel/config/nvmet";
 
@@ -72,7 +72,7 @@ fn reconcile(desired: &NvmetDesired, root: &Path) -> io::Result<String> {
 
     // D. Create / update desired ports, then bind their subsystems.
     for p in &desired.ports {
-        apply_port(root, p)?;
+        apply_port(root, p, OUR_NQN_PREFIX)?;
     }
 
     // E. Reap ports we emptied that are no longer desired (skip if a foreign
@@ -117,7 +117,7 @@ fn apply_subsystem(root: &Path, s: &NvmetSubsysSpec) -> io::Result<()> {
 
     let ns_dir = dir.join("namespaces");
     for ns in &s.namespaces {
-        apply_namespace(&ns_dir, ns)?;
+        apply_namespace(&ns_dir, ns, None)?;
     }
     let want_ns: BTreeSet<String> = s.namespaces.iter().map(|n| n.nsid.to_string()).collect();
     for ns in dir_entries(&ns_dir) {
@@ -154,23 +154,35 @@ fn apply_subsystem(root: &Path, s: &NvmetSubsysSpec) -> io::Result<()> {
     Ok(())
 }
 
-fn apply_namespace(ns_root: &Path, ns: &NvmetNsSpec) -> io::Result<()> {
+/// `uuid` pins the namespace's `device_uuid` (CSI: the initiator resolves the
+/// volume via `/dev/disk/by-id/nvme-uuid.<uuid>`, so it must not be
+/// kernel-generated); `None` (reconcile) leaves it to the kernel.
+fn apply_namespace(ns_root: &Path, ns: &NvmetNsSpec, uuid: Option<&NsUuid>) -> io::Result<()> {
     let dir = ns_root.join(ns.nsid.to_string());
     create_dir_all_ok(&dir)?;
     let device_path = dir.join("device_path");
     let enable = dir.join("enable");
-    if read_trim(&device_path) != ns.device_path.as_str() || read_trim(&enable) != "1" {
-        // device_path is read-only while enabled, so disable first if needed.
+    let uuid_drift = uuid.is_some_and(|u| read_trim(&dir.join("device_uuid")) != u.as_str());
+    if read_trim(&device_path) != ns.device_path.as_str() || uuid_drift || read_trim(&enable) != "1"
+    {
+        // device_path and device_uuid are read-only while enabled, so disable
+        // first if needed; the uuid must be written before enable.
         if read_trim(&enable) == "1" {
             write_attr(&enable, "0")?;
         }
         write_attr(&device_path, ns.device_path.as_str())?;
+        if let Some(u) = uuid {
+            write_attr(&dir.join("device_uuid"), u.as_str())?;
+        }
         write_attr(&enable, "1")?;
     }
     Ok(())
 }
 
-fn apply_port(root: &Path, p: &NvmetPortSpec) -> io::Result<()> {
+/// `managed_prefix` scopes which existing links may be dropped to free the
+/// port's `addr_*` on drift: the web prefix for reconcile, the CSI prefix for
+/// the CSI port. A link outside the prefix surfaces as EBUSY on the write.
+fn apply_port(root: &Path, p: &NvmetPortSpec, managed_prefix: &str) -> io::Result<()> {
     let dir = root.join("ports").join(p.id.to_string());
     let links = dir.join("subsystems");
     create_dir_all_ok(&dir)?;
@@ -192,7 +204,7 @@ fn apply_port(root: &Path, p: &NvmetPortSpec) -> io::Result<()> {
     // drift, dropping our links first to free them.
     if addr.iter().any(|(k, v)| read_trim(&dir.join(k)) != *v) {
         for link in dir_entries(&links) {
-            if link.starts_with(OUR_NQN_PREFIX) {
+            if link.starts_with(managed_prefix) {
                 remove_file_ok(&links.join(&link))?;
             }
         }
@@ -219,6 +231,222 @@ fn apply_port(root: &Path, p: &NvmetPortSpec) -> io::Result<()> {
             })?;
         }
     }
+    Ok(())
+}
+
+// ---- CSI exports ----
+//
+// Imperative ops for the Kubernetes CSI controller. CSI subsystems live under
+// CSI_NQN_PREFIX — a sibling of (not nested under) OUR_NQN_PREFIX — so the
+// reconcile above classifies them as foreign and never prunes or relinks them,
+// and they bind to the dedicated CSI port (never a render-managed one, whose
+// addr rewrites drop only web-prefix links and would EBUSY against a CSI
+// link). All ops run under the daemon's mutate lock like any other task, so
+// they can never interleave with a reconcile pass.
+
+/// `ports/<CSI_PORT_ID>/subsystems` under `root`.
+fn csi_port_links(root: &Path) -> PathBuf {
+    root.join("ports")
+        .join(CSI_PORT_ID.to_string())
+        .join("subsystems")
+}
+
+/// Runs one CSI step as a named subtask: the closure's status completes it,
+/// an `Err` records the message and fails it. `Err` from this fn is only a
+/// sink failure (the client is gone).
+fn step(
+    task: &mut Task,
+    name: String,
+    f: impl FnOnce() -> io::Result<SubStatus>,
+) -> io::Result<SubStatus> {
+    let mut sub = task.begin_subtask(name);
+    match f() {
+        Ok(status) => {
+            sub.complete(status);
+            Ok(status)
+        }
+        Err(e) => {
+            writeln!(sub.stderr(), "{e}")?;
+            sub.set_result(1, Some(e.to_string()));
+            sub.complete(SubStatus::Failed);
+            Ok(SubStatus::Failed)
+        }
+    }
+}
+
+/// The `CsiNvmeApply` op: idempotent upsert of one CSI export. The subsystem
+/// is created closed (`allow_any_host=0`, empty ACL — nobody can attach until
+/// a `CsiHostGrant`) with namespace 1 pinned to `device_uuid`; existing
+/// `allowed_hosts` are deliberately untouched, so grants survive re-apply
+/// (CSI controllers retry `CreateVolume`). The CSI port is then ensured and
+/// the subsystem linked — the link is the listener bind.
+pub fn csi_apply(root: &Path, op: &ops::CsiNvmeApply, task: &mut Task) -> io::Result<()> {
+    let done = step(task, format!("Ensure subsystem {}", op.nqn), || {
+        let dir = root.join("subsystems").join(op.nqn.as_str());
+        create_dir_all_ok(&dir)?;
+        write_attr(&dir.join("attr_allow_any_host"), "0")?;
+        create_dir_all_ok(&dir.join("allowed_hosts"))?;
+        apply_namespace(
+            &dir.join("namespaces"),
+            &NvmetNsSpec {
+                nsid: 1,
+                device_path: op.device_path.clone(),
+            },
+            Some(&op.device_uuid),
+        )?;
+        Ok(SubStatus::Success)
+    })?;
+    if done == SubStatus::Failed {
+        return Ok(());
+    }
+    step(task, format!("Bind to CSI port {CSI_PORT_ID}"), || {
+        let port = NvmetPortSpec {
+            id: CSI_PORT_ID,
+            trtype: op.transport,
+            traddr: op.traddr,
+            trsvcid: op.trsvcid,
+            subsystems: vec![Nqn::new(op.nqn.as_str()).expect("a CsiNqn is a valid Nqn")],
+        };
+        apply_port(root, &port, CSI_NQN_PREFIX)?;
+        Ok(SubStatus::Success)
+    })?;
+    Ok(())
+}
+
+/// The `CsiNvmeDelete` op: absent-tolerant teardown (unlink, delete, then reap
+/// the CSI port once its last link is gone — an empty port's id would
+/// otherwise be reclaimable by the web's renderer).
+pub fn csi_delete(root: &Path, nqn: &CsiNqn, task: &mut Task) -> io::Result<()> {
+    step(task, format!("Unbind {nqn} from CSI port"), || {
+        let link = csi_port_links(root).join(nqn.as_str());
+        if link.symlink_metadata().is_err() {
+            return Ok(SubStatus::Skipped);
+        }
+        remove_file_ok(&link)?;
+        Ok(SubStatus::Success)
+    })?;
+    step(task, format!("Delete subsystem {nqn}"), || {
+        let dir = root.join("subsystems").join(nqn.as_str());
+        if !dir.is_dir() {
+            return Ok(SubStatus::Skipped);
+        }
+        delete_subsystem(&dir)?;
+        Ok(SubStatus::Success)
+    })?;
+    step(task, "Reap empty CSI port".into(), || {
+        let port = root.join("ports").join(CSI_PORT_ID.to_string());
+        if !port.is_dir() || !dir_entries(&port.join("subsystems")).is_empty() {
+            return Ok(SubStatus::Skipped);
+        }
+        remove_object_dir(&port)?;
+        Ok(SubStatus::Success)
+    })?;
+    Ok(())
+}
+
+/// The `CsiHostGrant` op: add one initiator NQN to the subsystem's
+/// `allowed_hosts` — the per-node attach ACL `ControllerPublishVolume` drives.
+pub fn csi_host_grant(root: &Path, nqn: &CsiNqn, host: &Nqn, task: &mut Task) -> io::Result<()> {
+    step(task, format!("Grant {host}"), || {
+        let subsys = root.join("subsystems").join(nqn.as_str());
+        if !subsys.is_dir() {
+            return Err(io::Error::other(format!("subsystem {nqn} does not exist")));
+        }
+        let link = subsys.join("allowed_hosts").join(host.as_str());
+        if link.symlink_metadata().is_ok() {
+            return Ok(SubStatus::Skipped);
+        }
+        create_dir_all_ok(&root.join("hosts").join(host.as_str()))?;
+        symlink_ok(&root.join("hosts").join(host.as_str()), &link)?;
+        Ok(SubStatus::Success)
+    })?;
+    Ok(())
+}
+
+/// The `CsiHostRevoke` op — the fence, three steps in strict order:
+///
+/// 1. **Revoke ACL** — dropping the `allowed_hosts` link only stops new
+///    connects (the kernel checks `nvmet_host_allowed` at connect time, never
+///    in the I/O path), so on its own it would leave a live controller
+///    writing.
+/// 2. **Sever port** — unlinking the subsystem from the port is the one
+///    configfs operation that deletes live controllers
+///    (`nvmet_port_del_ctrls`). The fenced host's reconnect is then rejected
+///    with `CONNECT_INVALID_HOST | DNR`, on which its initiator deletes its
+///    own controller instead of retrying.
+/// 3. **Relink port** — reopen the listener for still-granted hosts (their
+///    controllers were severed too; they reconnect within their retry loop).
+///
+/// The ACL edit strictly precedes the relink so the fenced host cannot slip
+/// back in through the reopened port. An absent ACL entry still fences: the
+/// revoke may be a retry after a partial run.
+pub fn csi_host_revoke(root: &Path, nqn: &CsiNqn, host: &Nqn, task: &mut Task) -> io::Result<()> {
+    let subsys = root.join("subsystems").join(nqn.as_str());
+    step(task, "Revoke ACL".into(), || {
+        let link = subsys.join("allowed_hosts").join(host.as_str());
+        if link.symlink_metadata().is_err() {
+            return Ok(SubStatus::Skipped);
+        }
+        remove_file_ok(&link)?;
+        Ok(SubStatus::Success)
+    })?;
+    step(task, "Sever port".into(), || {
+        let link = csi_port_links(root).join(nqn.as_str());
+        if link.symlink_metadata().is_err() {
+            return Ok(SubStatus::Skipped);
+        }
+        remove_file_ok(&link)?;
+        Ok(SubStatus::Success)
+    })?;
+    step(task, "Relink port".into(), || {
+        let link = csi_port_links(root).join(nqn.as_str());
+        if !subsys.is_dir() || !link.parent().is_some_and(Path::is_dir) {
+            return Ok(SubStatus::Skipped);
+        }
+        symlink_ok(&subsys, &link)?;
+        Ok(SubStatus::Success)
+    })?;
+    Ok(())
+}
+
+/// The `CsiVolumeExpand` op: resolve the subsystem's backing zvol from its own
+/// namespace (the `CsiNqn` is the authorization scope — the rpc cannot name an
+/// arbitrary dataset), `zfs set volsize`, then tell nvmet to revalidate the
+/// namespace size so connected initiators see the new capacity.
+pub fn csi_expand(root: &Path, nqn: &CsiNqn, new_size: u64, task: &mut Task) -> io::Result<()> {
+    let ns = root
+        .join("subsystems")
+        .join(nqn.as_str())
+        .join("namespaces/1");
+    let dev = read_trim(&ns.join("device_path"));
+    let Some(dataset) = dev
+        .strip_prefix("/dev/zvol/")
+        .and_then(|d| DatasetName::new(d).ok())
+    else {
+        task.begin_subtask("Resolve backing zvol").fail(format!(
+            "subsystem {nqn} namespace 1 is not zvol-backed (device_path {dev:?})"
+        ));
+        return Ok(());
+    };
+    if crate::cmd::run(
+        task,
+        format!("Resize zvol {dataset}"),
+        &crate::zfs::zvol_resize(&dataset, new_size),
+    )? != SubStatus::Success
+    {
+        return Ok(());
+    }
+    step(task, "Revalidate namespace size".into(), || {
+        let attr = ns.join("revalidate_size");
+        if !attr.exists() {
+            return Err(io::Error::other(
+                "kernel lacks namespaces/<nsid>/revalidate_size (needs v5.15+); \
+                 disable and re-enable the export to pick up the new size",
+            ));
+        }
+        write_attr(&attr, "1")?;
+        Ok(SubStatus::Success)
+    })?;
     Ok(())
 }
 
@@ -421,6 +649,220 @@ mod tests {
             is_symlink(&tmp.join("ports/1/subsystems").join(foreign)),
             "foreign link preserved"
         );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    // ---- CSI ----
+
+    use greendot_proto::TaskEvent;
+
+    fn csi_op(name: &str, dev: &str) -> ops::CsiNvmeApply {
+        ops::CsiNvmeApply {
+            nqn: CsiNqn::new(format!("nqn.2026-06.io.greendot.csi:{name}")).unwrap(),
+            device_path: DevicePath::new(dev).unwrap(),
+            device_uuid: NsUuid::new("58668891-c3e4-45d0-b90e-824525c16080").unwrap(),
+            traddr: "10.0.0.5".parse().unwrap(),
+            trsvcid: 4421,
+            transport: Transport::Rdma,
+        }
+    }
+
+    /// Runs a CSI op through a fresh task, returning the collected events.
+    fn run_csi(root: &Path, f: impl FnOnce(&Path, &mut Task) -> io::Result<()>) -> Vec<TaskEvent> {
+        let mut c = Collector::default();
+        let mut task = Task::new(&mut c);
+        f(root, &mut task).unwrap();
+        task.complete().unwrap();
+        c.events
+    }
+
+    fn subtask_names(events: &[TaskEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                TaskEvent::SubtaskStarted { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn task_status(events: &[TaskEvent]) -> SubStatus {
+        match events.last().unwrap() {
+            TaskEvent::Finished { status, .. } => *status,
+            other => panic!("task did not finish: {other:?}"),
+        }
+    }
+
+    /// The whole CSI lifecycle against one tempdir tree: idempotent apply with
+    /// a pinned uuid, grant/regrant, the ordered fence, delete + port reap,
+    /// and absent-tolerant re-delete — one flow, as it runs in production.
+    #[test]
+    fn csi_lifecycle_applies_grants_fences_and_deletes() {
+        let tmp = std::env::temp_dir().join(format!("gd-nvmet-csi{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let op = csi_op("pvc-1", "/dev/zvol/tank/csi/pvc-1");
+        let nqn = op.nqn.clone();
+        let host = nqn_of("nqn.2014-08.org.nvmexpress:host1");
+        let subsys = tmp.join("subsystems/nqn.2026-06.io.greendot.csi:pvc-1");
+        let port_link = tmp.join(format!(
+            "ports/{CSI_PORT_ID}/subsystems/nqn.2026-06.io.greendot.csi:pvc-1"
+        ));
+
+        // Apply: closed subsystem, pinned uuid, CSI port bound.
+        assert_eq!(
+            task_status(&run_csi(&tmp, |r, t| csi_apply(r, &op, t))),
+            SubStatus::Success
+        );
+        assert_eq!(read_trim(&subsys.join("attr_allow_any_host")), "0");
+        assert_eq!(
+            read_trim(&subsys.join("namespaces/1/device_path")),
+            "/dev/zvol/tank/csi/pvc-1"
+        );
+        assert_eq!(
+            read_trim(&subsys.join("namespaces/1/device_uuid")),
+            "58668891-c3e4-45d0-b90e-824525c16080"
+        );
+        assert_eq!(read_trim(&subsys.join("namespaces/1/enable")), "1");
+        let port = tmp.join(format!("ports/{CSI_PORT_ID}"));
+        assert_eq!(read_trim(&port.join("addr_trtype")), "rdma");
+        assert_eq!(read_trim(&port.join("addr_traddr")), "10.0.0.5");
+        assert_eq!(read_trim(&port.join("addr_trsvcid")), "4421");
+        assert!(is_symlink(&port_link));
+
+        // Grant, then re-apply: the grant must survive (allowed_hosts is never
+        // touched by apply), the uuid stays pinned, and namespace 1 stays
+        // enabled (no disable/enable churn under a live initiator).
+        assert_eq!(
+            task_status(&run_csi(&tmp, |r, t| csi_host_grant(r, &nqn, &host, t))),
+            SubStatus::Success
+        );
+        assert!(is_symlink(
+            &subsys.join("allowed_hosts").join(host.as_str())
+        ));
+        assert_eq!(
+            task_status(&run_csi(&tmp, |r, t| csi_apply(r, &op, t))),
+            SubStatus::Success
+        );
+        assert!(is_symlink(
+            &subsys.join("allowed_hosts").join(host.as_str())
+        ));
+        assert_eq!(
+            read_trim(&subsys.join("namespaces/1/device_uuid")),
+            "58668891-c3e4-45d0-b90e-824525c16080"
+        );
+        assert_eq!(read_trim(&subsys.join("namespaces/1/enable")), "1");
+        // A repeated grant is a visible no-op, not an error.
+        let regrant = run_csi(&tmp, |r, t| csi_host_grant(r, &nqn, &host, t));
+        assert_eq!(task_status(&regrant), SubStatus::Skipped);
+
+        // The fence: exactly ACL → sever → relink, in that order; afterwards
+        // the ACL entry is gone but the port link is restored.
+        let fence = run_csi(&tmp, |r, t| csi_host_revoke(r, &nqn, &host, t));
+        assert_eq!(
+            subtask_names(&fence),
+            ["Revoke ACL", "Sever port", "Relink port"]
+        );
+        assert_eq!(task_status(&fence), SubStatus::Success);
+        assert!(!is_symlink(
+            &subsys.join("allowed_hosts").join(host.as_str())
+        ));
+        assert!(is_symlink(&port_link), "port relinked for remaining hosts");
+        // Revoking an already-absent host still severs + relinks (fence on
+        // retry after a partial run).
+        let refence = run_csi(&tmp, |r, t| csi_host_revoke(r, &nqn, &host, t));
+        assert_eq!(
+            subtask_names(&refence),
+            ["Revoke ACL", "Sever port", "Relink port"]
+        );
+        assert_eq!(task_status(&refence), SubStatus::Success);
+        assert!(is_symlink(&port_link));
+
+        // Delete: unlink, subsystem gone, empty CSI port reaped; a second
+        // delete is all-skipped, not an error.
+        assert_eq!(
+            task_status(&run_csi(&tmp, |r, t| csi_delete(r, &nqn, t))),
+            SubStatus::Success
+        );
+        assert!(!subsys.exists());
+        assert!(!port.exists(), "empty CSI port reaped");
+        assert_eq!(
+            task_status(&run_csi(&tmp, |r, t| csi_delete(r, &nqn, t))),
+            SubStatus::Skipped
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    fn nqn_of(s: &str) -> Nqn {
+        Nqn::new(s).unwrap()
+    }
+
+    /// Seeds a CSI subsystem + port, then runs the web's reconcile apply over
+    /// the same tree: the CSI objects must be untouched (they are foreign to
+    /// the web prefix), pinning the two-owner split the CSI design rests on.
+    #[test]
+    fn web_reconcile_ignores_csi_subsystems() {
+        let tmp = std::env::temp_dir().join(format!("gd-nvmet-csiweb{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let op = csi_op("pvc-9", "/dev/zvol/tank/csi/pvc-9");
+        run_csi(&tmp, |r, t| csi_apply(r, &op, t));
+        let host = nqn_of("nqn.2014-08.org.nvmexpress:host1");
+        run_csi(&tmp, |r, t| csi_host_grant(r, &op.nqn, &host, t));
+
+        // A web reconcile that wants its own export and (later) nothing at all.
+        let desired = NvmetDesired {
+            subsystems: vec![subsys("vm1", "/dev/zvol/tank/vm1", true, &[])],
+            ports: vec![port(1, Transport::Tcp, &["vm1"])],
+        };
+        assert!(run(&desired, &tmp));
+        assert!(run(&NvmetDesired::default(), &tmp));
+
+        // The CSI subsystem, its grant, and its port survived both passes.
+        let subsys = tmp.join("subsystems/nqn.2026-06.io.greendot.csi:pvc-9");
+        assert!(subsys.is_dir(), "CSI subsystem preserved");
+        assert!(is_symlink(
+            &subsys.join("allowed_hosts").join(host.as_str())
+        ));
+        assert_eq!(
+            read_trim(&tmp.join(format!("ports/{CSI_PORT_ID}/addr_trsvcid"))),
+            "4421"
+        );
+        assert!(is_symlink(&tmp.join(format!(
+            "ports/{CSI_PORT_ID}/subsystems/nqn.2026-06.io.greendot.csi:pvc-9"
+        ))));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// `csi_expand` refuses a non-zvol namespace, and stops after a failed
+    /// resize (the revalidate must not run against the unresized volume).
+    #[test]
+    fn csi_expand_resolves_and_gates_on_the_zvol() {
+        let tmp = std::env::temp_dir().join(format!("gd-nvmet-csiexp{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let nqn = CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap();
+
+        // No subsystem at all → not zvol-backed, one failed subtask.
+        let events = run_csi(&tmp, |r, t| csi_expand(r, &nqn, 1 << 30, t));
+        assert_eq!(subtask_names(&events), ["Resolve backing zvol"]);
+        assert_eq!(task_status(&events), SubStatus::Failed);
+
+        // A zvol-backed namespace resolves and reaches the resize step, which
+        // fails here (no zfs / no such dataset) — and the revalidate step must
+        // NOT run after a failed resize.
+        let op = csi_op("pvc-1", "/dev/zvol/tank/csi/pvc-1");
+        run_csi(&tmp, |r, t| csi_apply(r, &op, t));
+        let events = run_csi(&tmp, |r, t| csi_expand(r, &nqn, 1 << 30, t));
+        assert_eq!(
+            subtask_names(&events),
+            ["Resize zvol tank/csi/pvc-1"],
+            "stops after the failed resize"
+        );
+        assert_eq!(task_status(&events), SubStatus::Failed);
 
         std::fs::remove_dir_all(&tmp).unwrap();
     }

@@ -39,6 +39,29 @@ pub(crate) fn nqn(s: &str) -> bool {
         })
 }
 
+/// An NQN restricted to the CSI prefix (with a non-empty suffix). The prefix
+/// deliberately diverges from `OUR_NQN_PREFIX` (`.csi:` vs `:`), so reconcile
+/// classifies CSI subsystems as foreign and never touches them.
+pub(crate) fn csi_nqn(s: &str) -> bool {
+    nqn(s)
+        && s.strip_prefix(crate::CSI_NQN_PREFIX)
+            .is_some_and(|rest| !rest.is_empty())
+}
+
+/// Lowercase hyphenated UUID (8-4-4-4-12) — nvmet's `device_uuid` format.
+pub(crate) fn ns_uuid(s: &str) -> bool {
+    let lower_hex = |p: &str, len: usize| {
+        p.len() == len
+            && p.chars()
+                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    };
+    let mut parts = s.split('-');
+    [8, 4, 4, 4, 12]
+        .iter()
+        .all(|&len| parts.next().is_some_and(|p| lower_hex(p, len)))
+        && parts.next().is_none()
+}
+
 pub(crate) fn iqn(s: &str) -> bool {
     s.len() <= 223
         && s.strip_prefix("iqn.").is_some_and(|rest| {

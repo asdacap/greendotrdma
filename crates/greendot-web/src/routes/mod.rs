@@ -361,6 +361,12 @@ pub(crate) mod testutil {
             enable_roce, EnableRoceStream, pb::EnableRoce;
             install_packages, InstallPackagesStream, pb::InstallPackages;
             rdma_resources, RdmaResourcesStream, pb::Empty;
+            zfs_clone, ZfsCloneStream, pb::ZfsClone;
+            csi_nvme_apply, CsiNvmeApplyStream, pb::CsiNvmeApply;
+            csi_nvme_delete, CsiNvmeDeleteStream, pb::CsiNvmeDelete;
+            csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant;
+            csi_host_revoke, CsiHostRevokeStream, pb::CsiHostRevoke;
+            csi_volume_expand, CsiVolumeExpandStream, pb::CsiVolumeExpand;
         }
         reads {
             nfs_report, pb::Empty, pb::NfsReportReply;
@@ -372,6 +378,7 @@ pub(crate) mod testutil {
             nic_interfaces, pb::Empty, pb::NicInterfacesReply;
             nic_rdma_advice, pb::Empty, pb::NicRdmaAdviceReply;
             reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
+            zvol_info, pb::ZvolInfo, pb::ZvolInfoReply;
         }
     }
 

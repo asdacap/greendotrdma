@@ -139,7 +139,7 @@ The `.deb` deliberately does **not** depend on the storage/RDMA CLIs (`zfs`,
 one-click install. The test installs the package first (proving that), then
 provisions those CLIs. NVMe-oF needs no CLI at all: the helper writes its nvmet
 configfs tree directly, which is also why no `nvmetcli` package is required
-(handy, since Ubuntu 26.04 dropped it).
+(handy, since Ubuntu has never packaged it).
 
 ### Manual smoke test
 

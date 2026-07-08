@@ -20,3 +20,7 @@ tonic = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+# The pipe relay test drives gRPC through a spawned `greendotctl pipe` child.
+tokio = { workspace = true, features = ["process", "io-util"] }
+tower = { version = "0.5", features = ["util"] }
+hyper-util = { version = "0.1", features = ["tokio"] }

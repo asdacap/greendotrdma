@@ -589,6 +589,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "greendot-proto",
+ "hyper-util",
  "nix",
  "pam",
  "rstest",
@@ -597,6 +598,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tonic",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

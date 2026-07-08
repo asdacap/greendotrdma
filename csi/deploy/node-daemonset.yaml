@@ -1,0 +1,94 @@
+# The node half: privileged DaemonSet on every worker. Forked from
+# csi-driver-nvmf's manifest with the greendot fixes wired in:
+#   - /etc/nvme is hostPath-mounted and an initContainer generates
+#     /etc/nvme/hostnqn if missing, so every node has a stable host NQN;
+#   - --nodeid IS that hostnqn, so ControllerPublishVolume can grant it into
+#     the subsystem's allowed_hosts verbatim (the fencing identity).
+# Workers need the fabric modules: modprobe nvme-rdma (or nvme-tcp).
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: greendot-csi-node
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: greendot-csi-node
+  template:
+    metadata:
+      labels:
+        app: greendot-csi-node
+    spec:
+      hostNetwork: true
+      initContainers:
+        - name: hostnqn
+          image: greendot-csi:latest
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -s /etc/nvme/hostnqn ]; then
+                mkdir -p /etc/nvme
+                echo "nqn.2014-08.org.nvmexpress:uuid:$(cat /proc/sys/kernel/random/uuid)" > /etc/nvme/hostnqn
+              fi
+          volumeMounts:
+            - name: etc-nvme
+              mountPath: /etc/nvme
+      containers:
+        - name: node-registrar
+          image: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.12.0
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/csi.greendot.io/csi.sock
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+        - name: greendot-csi
+          image: greendot-csi:latest # replace with your registry
+          securityContext:
+            privileged: true
+          command:
+            - sh
+            - -c
+            - exec /greendot-csi --mode=node --endpoint=unix:///csi/csi.sock --nodeid="$(cat /etc/nvme/hostnqn)"
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: etc-nvme
+              mountPath: /etc/nvme
+            - name: pods-mount-dir
+              mountPath: /var/lib/kubelet/pods
+              mountPropagation: Bidirectional
+            - name: plugins-dir
+              mountPath: /var/lib/kubelet/plugins
+              mountPropagation: Bidirectional
+            - name: host-dev
+              mountPath: /dev
+            - name: host-sys
+              mountPath: /sys
+      volumes:
+        - name: socket-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/csi.greendot.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+        - name: etc-nvme
+          hostPath:
+            path: /etc/nvme
+            type: DirectoryOrCreate
+        - name: pods-mount-dir
+          hostPath:
+            path: /var/lib/kubelet/pods
+        - name: plugins-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins
+        - name: host-dev
+          hostPath:
+            path: /dev
+        - name: host-sys
+          hostPath:
+            path: /sys

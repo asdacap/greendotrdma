@@ -47,6 +47,16 @@
           buildInputs = [ pkgs.linux-pam ];
           doCheck = false; # unit tests run in the dev shell; this is just the binaries
         };
+
+        # The Go CSI driver (controller/node) + the csi-e2e test client.
+        greendot-csi = pkgs.buildGoModule {
+          pname = "greendot-csi";
+          version = "0.1.0";
+          src = ./csi;
+          vendorHash = "sha256-wW13lWSBCGiH5b2DsHpQb7X3wjtPx7MPsfMv6DvzvXc=";
+          subPackages = [ "cmd/greendot-csi" "cmd/csi-e2e" ];
+          doCheck = false; # unit tests run in the dev shell
+        };
       });
 
       # End-to-end tests in booted NixOS VMs against a real kernel: ZFS,
@@ -62,6 +72,13 @@
           vmTestTwoNode = import ./nix/vm-test-two-node.nix {
             inherit pkgs;
             greendot = self.packages.${system}.greendot;
+          };
+          # CSI end-to-end: controller over ssh-piped gRPC provisions and
+          # FENCES a volume; a separate initiator VM proves the fence.
+          vmTestCsi = import ./nix/vm-test-csi.nix {
+            inherit pkgs;
+            greendot = self.packages.${system}.greendot;
+            greendot-csi = self.packages.${system}.greendot-csi;
           };
         });
 

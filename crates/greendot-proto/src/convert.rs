@@ -44,7 +44,7 @@ impl From<ValidationError> for ConvertError {
 
 // ---- small helpers (shared with `ops`) ----
 
-fn to_u16(v: u32, what: &str) -> Result<u16, ConvertError> {
+pub(crate) fn to_u16(v: u32, what: &str) -> Result<u16, ConvertError> {
     u16::try_from(v).map_err(|_| ConvertError(format!("{what} out of u16 range: {v}")))
 }
 
@@ -52,7 +52,7 @@ pub(crate) fn to_u8(v: u32, what: &str) -> Result<u8, ConvertError> {
     u8::try_from(v).map_err(|_| ConvertError(format!("{what} out of u8 range: {v}")))
 }
 
-fn parse_ip(s: &str) -> Result<IpAddr, ConvertError> {
+pub(crate) fn parse_ip(s: &str) -> Result<IpAddr, ConvertError> {
     s.parse()
         .map_err(|_| ConvertError(format!("invalid IP address: {s:?}")))
 }
@@ -208,7 +208,7 @@ impl TryFrom<pb::ErrKind> for ErrKind {
 
 /// Decode a prost `i32` enumeration field into its domain enum, rejecting
 /// values outside the schema.
-fn dec_transport(i: i32) -> Result<Transport, ConvertError> {
+pub(crate) fn dec_transport(i: i32) -> Result<Transport, ConvertError> {
     let p =
         pb::Transport::try_from(i).map_err(|_| ConvertError(format!("unknown transport {i}")))?;
     Transport::try_from(p)

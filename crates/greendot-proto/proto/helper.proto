@@ -9,6 +9,10 @@ syntax = "proto3";
 // rpc middleware requires them by bound, so no method can skip them.
 package greendot.helper.v1;
 
+// Consumed by the Go CSI controller's stub generation (csi/Makefile);
+// tonic-build ignores it.
+option go_package = "github.com/asdacap/greendotrdma/csi/pkg/helperpb";
+
 // The privileged helper: one rpc per operation. Reply shapes:
 //
 //   - `stream TaskEvent` — every mutation, plus the reads whose payload is a
@@ -73,6 +77,17 @@ service Helper {
   // Desired-state reconcile pass (the only apply path for NVMe-oF/iSCSI/NFS).
   rpc Reconcile(.greendot.helper.v1.Reconcile) returns (stream TaskEvent);
 
+  // CSI exports: imperative, idempotent, and restricted by type to the CSI NQN
+  // prefix — a sibling of (not nested under) the web prefix, so reconcile
+  // treats CSI subsystems as foreign and the two owners never fight. They live
+  // on a dedicated CSI port, never a render-managed one.
+  rpc CsiNvmeApply(.greendot.helper.v1.CsiNvmeApply) returns (stream TaskEvent);
+  rpc CsiNvmeDelete(.greendot.helper.v1.CsiNvmeDelete) returns (stream TaskEvent);
+  rpc CsiHostGrant(.greendot.helper.v1.CsiHostGrant) returns (stream TaskEvent);
+  rpc CsiHostRevoke(.greendot.helper.v1.CsiHostRevoke) returns (stream TaskEvent);
+  rpc CsiVolumeExpand(.greendot.helper.v1.CsiVolumeExpand) returns (stream TaskEvent);
+  rpc ZfsClone(.greendot.helper.v1.ZfsClone) returns (stream TaskEvent);
+
   // System setup.
   rpc RxeAdd(.greendot.helper.v1.RxeAdd) returns (stream TaskEvent);
   rpc EnableRoce(.greendot.helper.v1.EnableRoce) returns (stream TaskEvent);
@@ -94,6 +109,7 @@ service Helper {
   rpc NicRdmaAdvice(Empty) returns (NicRdmaAdviceReply);
   rpc SmartHealth(.greendot.helper.v1.SmartHealth) returns (SmartHealthReply);
   rpc ReconcileDryRun(Empty) returns (ReconcileDryRunReply);
+  rpc ZvolInfo(.greendot.helper.v1.ZvolInfo) returns (ZvolInfoReply);
 }
 
 // Placeholder for unit request variants (Ping, NfsReport, ...). A oneof arm
@@ -296,6 +312,51 @@ message LvDelete { string vg = 1; string name = 2; }
 // Deliberately empty: the daemon reconciles against its own --config, so the
 // peer cannot name a file for root to read.
 message Reconcile { reserved 1; reserved "config"; }
+
+// ---- CSI export ops. `nqn` fields are CsiNqn (prefix-checked on ingress). ----
+
+// Idempotent upsert of one CSI export: subsystem with allow_any_host=0,
+// namespace 1 with the pinned device_uuid (written before enable, so the
+// initiator's /dev/disk/by-id path is deterministic and no read-back rpc is
+// needed), the dedicated CSI port ensured, and the subsystem linked to it.
+// Never touches allowed_hosts: grants survive re-apply.
+message CsiNvmeApply {
+  string nqn = 1;          // CsiNqn
+  string device_path = 2;  // DevicePath
+  string device_uuid = 3;  // NsUuid
+  string traddr = 4;       // IpAddr
+  uint32 trsvcid = 5;      // u16
+  Transport transport = 6;
+}
+// Absent-tolerant teardown; also reaps the CSI port once its last link is gone
+// (an empty port's id would otherwise be reclaimable by the web's renderer).
+message CsiNvmeDelete { string nqn = 1; }
+// Add one initiator NQN to the subsystem's allowed_hosts (the attach ACL).
+message CsiHostGrant { string nqn = 1; string hostnqn = 2; }
+// The fence, three steps in strict order: drop the host from allowed_hosts
+// (closes the door — connect is rejected with DNR so the initiator gives up),
+// unlink the subsystem from the CSI port (severs live controllers), relink.
+// The ACL edit precedes the relink so the fenced host cannot slip back in.
+message CsiHostRevoke { string nqn = 1; string hostnqn = 2; }
+// Target-side volume expansion as one intent: resize the zvol backing
+// namespace 1 (the dataset is derived from the subsystem's own device_path —
+// the CsiNqn scopes what can be resized), then revalidate the namespace size.
+message CsiVolumeExpand { string nqn = 1; uint64 new_size = 2; }
+
+// `zfs clone <dataset>@<snap> <target>`, optionally followed by a volsize bump
+// (a clone inherits the origin's volsize; creating a bigger volume from a
+// snapshot is one intent, so the resize rides along server-side).
+message ZfsClone {
+  string dataset = 1;      // DatasetName (the snapshot's dataset)
+  string snap = 2;         // SnapName
+  string target = 3;       // DatasetName
+  optional uint64 new_size = 4;
+}
+
+// Structural read: does the zvol exist, and how big is it? (CSI CreateVolume
+// idempotency and expand no-op detection.)
+message ZvolInfo { string dataset = 1; }
+message ZvolInfoReply { bool exists = 1; uint64 size_bytes = 2; }
 
 // Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
 // (skipped if already loaded), then add the rdma link.

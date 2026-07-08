@@ -2,12 +2,15 @@
 //!
 //! `greendotctl serve` (the default, no subcommand) runs the gRPC daemon that
 //! executes allowlisted privileged operations on behalf of greendot-web; only
-//! the configured uid may connect (SO_PEERCRED, enforced on each accepted Unix
-//! socket). `greendotctl reconcile` heals drift through a running daemon (any
-//! uid with socket access), or applies inline as root when given a config or
-//! when no daemon is up; the web reconciles through the daemon's `Reconcile`
-//! rpc, which reads the daemon's own `--config` — never a peer-supplied path
-//! (see [`reconcile`]).
+//! the configured uid, or a member of the allowed group, may connect
+//! (SO_PEERCRED + group lookup, enforced on each accepted Unix socket).
+//! `greendotctl reconcile` heals drift through a running daemon (any uid with
+//! socket access), or applies inline as root when given a config or when no
+//! daemon is up; the web reconciles through the daemon's `Reconcile` rpc,
+//! which reads the daemon's own `--config` — never a peer-supplied path (see
+//! [`reconcile`]). `greendotctl pipe` relays stdio to the daemon socket — the
+//! SSH forced command the Kubernetes CSI controller drives the daemon through
+//! (see [`pipe`]).
 //!
 //! Transport is gRPC (tonic), one rpc per operation. Every incoming protobuf
 //! request is converted to its validated domain op (`ops::X`) via `TryFrom` —
@@ -28,6 +31,7 @@ mod nfs;
 mod nvmet;
 mod pam;
 mod partition;
+mod pipe;
 mod reconcile;
 mod render;
 mod smart;
@@ -65,6 +69,9 @@ struct Opts {
     admin_group: String,
     /// Config TOML for the `Reconcile` rpc (`None` = built-in defaults).
     config: Option<String>,
+    /// nvmet configfs root for the CSI ops (test-only override, like
+    /// `--allow-uid`; production always uses the kernel path).
+    nvmet_root: Option<PathBuf>,
 }
 
 impl Opts {
@@ -76,6 +83,7 @@ impl Opts {
             pam_service: "greendotrdma".into(),
             admin_group: "greendot-admin".into(),
             config: None,
+            nvmet_root: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -86,6 +94,7 @@ impl Opts {
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
                 "--config" => opts.config = Some(value()?),
+                "--nvmet-root" => opts.nvmet_root = Some(value()?.into()),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -121,6 +130,10 @@ fn main() -> Result<()> {
         Some("reconcile") => {
             args.next();
             return reconcile::cli(args.next());
+        }
+        Some("pipe") => {
+            args.next();
+            return pipe::run(args.next().map(Into::into));
         }
         Some("serve") => {
             args.next();
@@ -162,14 +175,18 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         )),
         mutate_lock: std::sync::Mutex::new(()),
         reconcile_config: opts.config,
+        nvmet_root: opts.nvmet_root.unwrap_or_else(|| nvmet::NVMET_ROOT.into()),
     });
 
-    // SO_PEERCRED authorization: only the configured uid may connect. Rejected
-    // and errored connections are dropped so the daemon keeps serving (mirrors
-    // the old accept loop's `continue`).
+    // SO_PEERCRED authorization: the configured uid, or a member of the
+    // allowed group (see [`peer_allowed`]). Rejected and errored connections
+    // are dropped so the daemon keeps serving (mirrors the old accept loop's
+    // `continue`).
     let incoming = UnixListenerStream::new(listener).filter_map(move |conn| match conn {
         Ok(stream) => match peer_uid(&stream) {
-            Ok(uid) if uid == allowed_uid => Some(Ok::<_, io::Error>(stream)),
+            Ok(uid) if peer_allowed(uid, allowed_uid, socket_gid, user_groups) => {
+                Some(Ok::<_, io::Error>(stream))
+            }
             Ok(uid) => {
                 warn!(uid, "rejecting connection from unauthorized uid");
                 None
@@ -197,8 +214,8 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         .context("gRPC server terminated")
 }
 
-/// The connecting peer's uid, via SO_PEERCRED. This is the whole authorization
-/// model: only the configured uid may drive the root helper. Linux-only (the
+/// The connecting peer's uid, via SO_PEERCRED. Together with [`peer_allowed`]
+/// this is the whole authorization model for the root helper. Linux-only (the
 /// daemon only ever runs there); the fallback lets non-Linux dev hosts build.
 #[cfg(target_os = "linux")]
 fn peer_uid(stream: &UnixStream) -> nix::Result<u32> {
@@ -209,6 +226,32 @@ fn peer_uid(stream: &UnixStream) -> nix::Result<u32> {
 #[cfg(not(target_os = "linux"))]
 fn peer_uid(_stream: &UnixStream) -> nix::Result<u32> {
     Err(nix::errno::Errno::ENOSYS)
+}
+
+/// Whether a connecting peer may drive the helper: the allowed uid itself
+/// (greendot-web), or any user in the allowed group — supplementary groups
+/// included, since SO_PEERCRED carries only the uid and the CSI controller's
+/// SSH user is granted via `usermod -aG greendot`. `groups_of` resolves a
+/// uid's full group list (injected so the table test needs no real users);
+/// a failed resolution denies. `--allow-uid` test mode passes no group, so
+/// it stays uid-only.
+fn peer_allowed(
+    uid: u32,
+    allowed_uid: u32,
+    allowed_gid: Option<nix::unistd::Gid>,
+    groups_of: impl Fn(u32) -> Option<Vec<nix::unistd::Gid>>,
+) -> bool {
+    uid == allowed_uid
+        || allowed_gid.is_some_and(|gid| groups_of(uid).is_some_and(|groups| groups.contains(&gid)))
+}
+
+/// The production `groups_of`: NSS lookup of the uid's user, then its full
+/// group list (primary + supplementary). Local passwd/group lookups — the
+/// accept path can afford them.
+fn user_groups(uid: u32) -> Option<Vec<nix::unistd::Gid>> {
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+    let name = std::ffi::CString::new(user.name).ok()?;
+    nix::unistd::getgrouplist(&name, user.gid).ok()
 }
 
 /// The service. Every generated rpc method is one `task_rpc!`/`read_rpc!` line
@@ -439,6 +482,12 @@ helper_impl! {
             lv_shrink, LvShrinkStream, pb::LvShrink, ops::LvShrink;
             lv_rename, LvRenameStream, pb::LvRename, ops::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete, ops::LvDelete;
+            zfs_clone, ZfsCloneStream, pb::ZfsClone, ops::ZfsClone;
+            csi_nvme_apply, CsiNvmeApplyStream, pb::CsiNvmeApply, ops::CsiNvmeApply;
+            csi_nvme_delete, CsiNvmeDeleteStream, pb::CsiNvmeDelete, ops::CsiNvmeDelete;
+            csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant, ops::CsiHostGrant;
+            csi_host_revoke, CsiHostRevokeStream, pb::CsiHostRevoke, ops::CsiHostRevoke;
+            csi_volume_expand, CsiVolumeExpandStream, pb::CsiVolumeExpand, ops::CsiVolumeExpand;
             reconcile, ReconcileStream, pb::Reconcile, ops::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd, ops::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce, ops::EnableRoce;
@@ -458,5 +507,43 @@ helper_impl! {
             nic_rdma_advice, pb::Empty, ops::NicRdmaAdvice;
             smart_health, pb::SmartHealth, ops::SmartHealth;
             reconcile_dry_run, pb::Empty, ops::ReconcileDryRun;
+            zvol_info, pb::ZvolInfo, ops::ZvolInfo;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nix::unistd::Gid;
+    use rstest::rstest;
+
+    #[rstest]
+    // The allowed uid connects regardless of groups (greendot-web).
+    #[case::uid_match(1000, Some(2000), &[], true)]
+    // A group member connects — primary or supplementary is the same here:
+    // `groups_of` answers the full list (usermod -aG greendot).
+    #[case::group_member(1001, Some(2000), &[999, 2000], true)]
+    #[case::not_a_member(1001, Some(2000), &[999, 1001], false)]
+    // Group lookup failure denies.
+    #[case::lookup_failure(1001, Some(2000), &[u32::MAX], false)]
+    // `--allow-uid` test mode carries no group: strictly uid-only.
+    #[case::uid_only_mode(1001, None, &[2000], false)]
+    fn peer_allowed_by_uid_or_group(
+        #[case] uid: u32,
+        #[case] allowed_gid: Option<u32>,
+        #[case] peer_groups: &[u32],
+        #[case] allowed: bool,
+    ) {
+        let groups_of = |_uid: u32| {
+            if peer_groups.contains(&u32::MAX) {
+                None // simulated NSS failure
+            } else {
+                Some(peer_groups.iter().map(|g| Gid::from_raw(*g)).collect())
+            }
+        };
+        assert_eq!(
+            peer_allowed(uid, 1000, allowed_gid.map(Gid::from_raw), groups_of),
+            allowed
+        );
     }
 }

@@ -32,6 +32,9 @@ pub struct Ctx {
     /// built-in defaults). The request deliberately carries no path, so the
     /// peer cannot name a file for root to read.
     pub reconcile_config: Option<String>,
+    /// The nvmet configfs root the CSI ops and `NvmetReport` run against
+    /// (`--nvmet-root` overrides it in the integration tests).
+    pub nvmet_root: std::path::PathBuf,
 }
 
 /// A task rpc: executes as a recorded stream of subtasks. The
@@ -159,6 +162,66 @@ impl TaskOp for ops::EnableRoce {
     }
 }
 
+impl TaskOp for ops::ZfsClone {
+    type Wire = pb::ZfsClone;
+    fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        zfs::zfs_clone_and_resize(task, &self.dataset, &self.snap, &self.target, self.new_size)
+    }
+}
+
+impl TaskOp for ops::CsiNvmeApply {
+    type Wire = pb::CsiNvmeApply;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        // `zfs create` returns before udev materializes the zvol's device
+        // node, and enabling the nvmet namespace opens that node — so a fresh
+        // volume's first apply can race into an ENOENT. Wait briefly, as a
+        // visible subtask, only when the node isn't there yet.
+        if !Path::new(self.device_path.as_str()).exists() {
+            let mut sub = task.begin_subtask(format!("Wait for {}", self.device_path));
+            let appeared = (0..100).any(|_| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                Path::new(self.device_path.as_str()).exists()
+            });
+            if !appeared {
+                sub.fail(format!(
+                    "device node {} did not appear — does the backing volume exist?",
+                    self.device_path
+                ));
+                return Ok(());
+            }
+        }
+        nvmet::csi_apply(&ctx.nvmet_root, &self, task)
+    }
+}
+
+impl TaskOp for ops::CsiNvmeDelete {
+    type Wire = pb::CsiNvmeDelete;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        nvmet::csi_delete(&ctx.nvmet_root, &self.nqn, task)
+    }
+}
+
+impl TaskOp for ops::CsiHostGrant {
+    type Wire = pb::CsiHostGrant;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        nvmet::csi_host_grant(&ctx.nvmet_root, &self.nqn, &self.hostnqn, task)
+    }
+}
+
+impl TaskOp for ops::CsiHostRevoke {
+    type Wire = pb::CsiHostRevoke;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        nvmet::csi_host_revoke(&ctx.nvmet_root, &self.nqn, &self.hostnqn, task)
+    }
+}
+
+impl TaskOp for ops::CsiVolumeExpand {
+    type Wire = pb::CsiVolumeExpand;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        nvmet::csi_expand(&ctx.nvmet_root, &self.nqn, self.new_size, task)
+    }
+}
+
 impl TaskOp for ops::InstallPackages {
     type Wire = pb::InstallPackages;
     fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
@@ -196,8 +259,21 @@ impl ReadOp for ops::NfsReport {
 impl ReadOp for ops::NvmetReport {
     type Wire = pb::Empty;
     type Reply = pb::NvmetReportReply;
+    fn read(self, ctx: &Ctx) -> Self::Reply {
+        crate::actual::nvmet::read(&ctx.nvmet_root).into()
+    }
+}
+
+impl ReadOp for ops::ZvolInfo {
+    type Wire = pb::ZvolInfo;
+    type Reply = pb::ZvolInfoReply;
     fn read(self, _ctx: &Ctx) -> Self::Reply {
-        crate::actual::nvmet::read(Path::new(nvmet::NVMET_ROOT)).into()
+        let (exists, size_bytes) = zfs::zvol_info(
+            Path::new("/dev/zvol"),
+            Path::new("/sys/class/block"),
+            &self.dataset,
+        );
+        pb::ZvolInfoReply { exists, size_bytes }
     }
 }
 

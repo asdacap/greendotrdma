@@ -117,15 +117,20 @@ pub fn render_nvmet(
 /// Port ids held by foreign nvmet ports — ports whose subsystem links are all
 /// non-greendot. [`render_nvmet`] skips these ids so a foreign port at a
 /// colliding id is neither re-addressed by the apply nor read as perpetual
-/// drift. A port with no links at all is treated as reclaimable.
+/// drift. A port with no links at all is treated as reclaimable — except the
+/// dedicated CSI port, whose id is always reserved: it sits legitimately empty
+/// between CSI volumes and must never be claimed by the renderer.
 pub fn foreign_port_ids(a: &ActualNvmet) -> BTreeSet<u16> {
-    a.ports
+    let mut ids: BTreeSet<u16> = a
+        .ports
         .iter()
         .filter(|p| {
             !p.subsystems.is_empty() && !p.subsystems.iter().any(|n| n.starts_with(OUR_NQN_PREFIX))
         })
         .map(|p| p.id)
-        .collect()
+        .collect();
+    ids.insert(greendot_proto::CSI_PORT_ID);
+    ids
 }
 
 /// Every reason the renderers will skip (or partially skip) enabled desired
@@ -768,9 +773,10 @@ mod tests {
             subsystems: vec![],
             ports: vec![foreign_port.clone()],
         };
-        // The foreign port reserves id 1, so rendered ids start at 2…
+        // The foreign port reserves id 1 (and the CSI port id is always
+        // reserved), so rendered ids start at 2…
         let reserved = foreign_port_ids(&actual);
-        assert_eq!(reserved, BTreeSet::from([1]));
+        assert_eq!(reserved, BTreeSet::from([1, greendot_proto::CSI_PORT_ID]));
         let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &reserved);
         let ids: Vec<u16> = d.ports.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![2, 3]);
@@ -799,12 +805,12 @@ mod tests {
         }
         assert!(nvmet_satisfied(&d, &satisfied_actual));
         // A port linking one of ours is not foreign; an unlinked port is
-        // reclaimable, not reserved.
+        // reclaimable, not reserved (only the always-reserved CSI id remains).
         assert!(
             foreign_port_ids(&ActualNvmet {
                 subsystems: vec![],
                 ports: satisfied_actual.ports.clone(),
-            }) == BTreeSet::from([1])
+            }) == BTreeSet::from([1, greendot_proto::CSI_PORT_ID])
         );
         let unlinked = ActualNvmet {
             subsystems: vec![],
@@ -816,7 +822,10 @@ mod tests {
                 subsystems: vec![],
             }],
         };
-        assert!(foreign_port_ids(&unlinked).is_empty());
+        assert_eq!(
+            foreign_port_ids(&unlinked),
+            BTreeSet::from([greendot_proto::CSI_PORT_ID])
+        );
     }
 
     #[test]

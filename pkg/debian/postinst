@@ -30,3 +30,6 @@ fi
 
 echo "GreenDotRDMA installed. Add admins with: usermod -aG greendot-admin <user>"
 echo "Then browse to https://$(hostname):8443/"
+echo "Kubernetes CSI: install the controller's public key with"
+echo "  install -d -o greendot-csi -g greendot-csi -m 700 /var/lib/greendotrdma/csi/.ssh"
+echo "  echo 'command=\"/usr/libexec/greendotrdma/greendotctl pipe\",restrict <pubkey>' > /var/lib/greendotrdma/csi/.ssh/authorized_keys"

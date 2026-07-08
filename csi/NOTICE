@@ -1,0 +1,11 @@
+greendotrdma CSI driver
+
+The node service (pkg/node) and driver scaffolding (pkg/driver/server.go,
+identity.go, deploy/node-daemonset.yaml) are forked from
+kubernetes-csi/csi-driver-nvmf, Copyright 2021 The Kubernetes Authors,
+licensed under the Apache License, Version 2.0. Forked files carry their
+original headers plus a summary of the greendot modifications.
+
+The controller service (pkg/driver/controller.go), the greendotctl transport
+(pkg/helper), and pkg/helperpb are greendotrdma original work, also under
+Apache-2.0.

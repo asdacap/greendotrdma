@@ -1,0 +1,90 @@
+# The controller half: one replica, no host privileges — it is a pure
+# protocol translator (CSI in, greendotctl's typed rpcs over SSH out).
+#
+# Prerequisites:
+#   kubectl -n kube-system create secret generic greendot-csi-ssh \
+#     --from-file=id_ed25519=<controller private key>
+#   kubectl -n kube-system create configmap greendot-csi-known-hosts \
+#     --from-file=known_hosts=<ssh-keyscan output for the box>
+# and on the box: the greendot-csi user's authorized_keys carries
+#   command="/usr/libexec/greendotrdma/greendotctl pipe",restrict <pubkey>
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: greendot-csi-controller
+  namespace: kube-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: greendot-csi-controller
+  template:
+    metadata:
+      labels:
+        app: greendot-csi-controller
+    spec:
+      serviceAccountName: greendot-csi-controller-sa
+      containers:
+        - name: csi-provisioner
+          image: registry.k8s.io/sig-storage/csi-provisioner:v5.1.0
+          args: ["--csi-address=/csi/csi.sock", "--v=2"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-attacher
+          image: registry.k8s.io/sig-storage/csi-attacher:v4.7.0
+          args: ["--csi-address=/csi/csi.sock", "--v=2"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-resizer
+          image: registry.k8s.io/sig-storage/csi-resizer:v1.12.0
+          args: ["--csi-address=/csi/csi.sock", "--v=2"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: csi-snapshotter
+          image: registry.k8s.io/sig-storage/csi-snapshotter:v8.1.0
+          args: ["--csi-address=/csi/csi.sock", "--v=2"]
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+        - name: greendot-csi
+          image: greendot-csi:latest # replace with your registry
+          args:
+            - --mode=controller
+            - --endpoint=unix:///csi/csi.sock
+            - --ssh-addr=$(GREENDOT_SSH_ADDR)
+            - --ssh-user=greendot-csi
+            - --ssh-key=/etc/greendot-csi/ssh/id_ed25519
+            - --ssh-known-hosts=/etc/greendot-csi/known_hosts/known_hosts
+            - --dataset-parent=$(GREENDOT_DATASET_PARENT)
+            - --traddr=$(GREENDOT_TRADDR)
+            - --trsvcid=4421
+            - --transport=rdma
+          env:
+            - name: GREENDOT_SSH_ADDR
+              value: "192.168.101.62:22" # the greendot box
+            - name: GREENDOT_DATASET_PARENT
+              value: "tank/csi" # must exist: zfs create tank/csi
+            - name: GREENDOT_TRADDR
+              value: "192.168.101.62" # the RDMA/TCP data address
+          volumeMounts:
+            - name: socket-dir
+              mountPath: /csi
+            - name: ssh-key
+              mountPath: /etc/greendot-csi/ssh
+              readOnly: true
+            - name: known-hosts
+              mountPath: /etc/greendot-csi/known_hosts
+              readOnly: true
+      volumes:
+        - name: socket-dir
+          emptyDir: {}
+        - name: ssh-key
+          secret:
+            secretName: greendot-csi-ssh
+            defaultMode: 0400
+        - name: known-hosts
+          configMap:
+            name: greendot-csi-known-hosts
