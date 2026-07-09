@@ -6,6 +6,15 @@ use std::time::Duration;
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt().init();
+
+    // greendot-client (built in the same workspace) links rustls' `ring`
+    // provider, so rustls sees both `ring` and `aws-lc-rs` and can no longer
+    // pick a process default on its own — it would panic the moment we serve
+    // TLS. Select aws-lc-rs (axum-server's default) explicitly before any TLS.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install default rustls CryptoProvider");
+
     let config = config::Config::load(std::env::args().nth(1))?;
 
     let tls = match (&config.tls_cert, &config.tls_key) {

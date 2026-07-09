@@ -647,6 +647,7 @@ dependencies = [
  "rand",
  "rstest",
  "rusqlite",
+ "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
