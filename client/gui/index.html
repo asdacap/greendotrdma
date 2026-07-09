@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'">
+  <title>GreenDot Client</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header>
+    <h1><span class="dot green"></span> GreenDot Client</h1>
+    <div class="header-right">
+      <span id="hostnqn" class="muted"></span>
+      <button id="diagnose-local">Diagnose</button>
+      <button id="add-target" class="primary">Add target</button>
+    </div>
+  </header>
+
+  <p id="banner" class="banner" hidden></p>
+  <main id="targets"><p class="muted">Loading…</p></main>
+
+  <dialog id="add-dialog">
+    <h2>Add target</h2>
+    <p class="muted">Paste the connection string from the target web UI's
+    <strong>Client access</strong> page.</p>
+    <textarea id="add-string" rows="3" placeholder="greendot://gdt_…@host:8443/?fp=…"></textarea>
+    <label>Alias (optional) <input id="add-name" placeholder="nas1"></label>
+    <footer>
+      <button data-close>Cancel</button>
+      <button id="add-confirm" class="primary">Add</button>
+    </footer>
+  </dialog>
+
+  <dialog id="diag-dialog">
+    <h2 id="diag-title">Diagnose</h2>
+    <ul id="diag-checks" class="checks"></ul>
+    <footer><button data-close>Close</button></footer>
+  </dialog>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
