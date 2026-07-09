@@ -1,0 +1,24 @@
+[package]
+name = "greendot-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Linux client for GreenDotRDMA targets: connect NVMe-oF block exports, mount NFS shares"
+
+[dependencies]
+anyhow = { workspace = true }
+# The pure domain model only (validated newtypes, constants) — no tonic/protoc
+# on an initiator machine.
+greendot-proto = { path = "../greendot-proto", default-features = false }
+nix = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+# Pinned-fingerprint TLS: ureq takes our rustls ClientConfig directly and stays
+# synchronous (no tokio). ureq 2.x is coupled to rustls 0.23 — bump together.
+rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
+sha2 = "0.10"
+ureq = { version = "2", default-features = false, features = ["tls", "json"] }
+
+[dev-dependencies]
+rstest = { workspace = true }

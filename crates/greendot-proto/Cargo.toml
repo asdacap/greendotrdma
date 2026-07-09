@@ -9,18 +9,23 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
-prost = { workspace = true }
-tonic = { workspace = true }
+prost = { workspace = true, optional = true }
+tonic = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 
 [features]
+default = ["grpc"]
+# The gRPC transport: pb codegen, ops, and the validating conversions. Off,
+# the crate is the pure domain model (types/desired/actual/config) — what
+# greendot-client needs without dragging tonic onto an initiator machine.
+grpc = ["dep:prost", "dep:tonic", "dep:tonic-build"]
 # The lazy unix-socket gRPC client (greendot-web, the reconcile CLI proxy).
-client = ["dep:tokio", "dep:tower", "dep:hyper-util"]
+client = ["grpc", "dep:tokio", "dep:tower", "dep:hyper-util"]
 
 [build-dependencies]
-tonic-build = { workspace = true }
+tonic-build = { workspace = true, optional = true }
 
 [dev-dependencies]
 rstest = { workspace = true }

@@ -24,11 +24,13 @@ pub mod actual;
 pub mod client;
 /// The shared `config.toml` subset both the daemon and the web read.
 pub mod config;
+#[cfg(feature = "grpc")]
 mod convert;
 /// Desired-state config model and the read-only TOML loader (the write half).
 pub mod desired;
 /// The validated domain ops — one struct per rpc, with the ingress-validating
 /// `TryFrom` conversions that are the security choke point.
+#[cfg(feature = "grpc")]
 pub mod ops;
 /// OS / package-manager knowledge shared by the daemon and the web dep panel.
 pub mod os;
@@ -38,11 +40,13 @@ mod validate;
 /// Generated protobuf/gRPC transport types. Kept separate from the validated
 /// domain model (`ops`, `actual`, `TaskEvent`); see `ops`/`convert` for the
 /// validating conversions between the two.
+#[cfg(feature = "grpc")]
 pub mod pb {
     #![allow(clippy::all, clippy::pedantic, clippy::nursery, missing_docs)]
     tonic::include_proto!("greendot.helper.v1");
 }
 
+#[cfg(feature = "grpc")]
 pub use convert::ConvertError;
 pub use types::*;
 
