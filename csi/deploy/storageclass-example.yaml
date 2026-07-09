@@ -10,6 +10,41 @@ parameters:
   volblocksize: "16384"
   sparse: "true"
 ---
+# Custom zvol name: pick the backing zvol's leaf under the driver's
+# --dataset-parent instead of the default pvc-<uuid>. Template it per PVC so
+# names stay unique — a *literal* zvolName shared across PVCs would make two
+# PVs silently share one zvol. (The ${...} substitution is done by the
+# external-provisioner and needs no extra sidecar flag.)
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: greendot-rdma-named
+provisioner: csi.greendot.io
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  zvolName: "${pvc.namespace}-${pvc.name}"
+  volblocksize: "16384"
+  sparse: "true"
+---
+# Import a preexisting zvol: the driver exports it over NVMe-oF but NEVER
+# destroys it — DeleteVolume tears down only the export. importDataset is the
+# full zfs path; it may live anywhere, not just under --dataset-parent. Also
+# set reclaimPolicy: Retain (defence in depth) and note that imported volumes
+# are not snapshottable or expandable in v1. One class imports one zvol; use a
+# per-PVC value (e.g. an annotation, which needs --extra-create-metadata) to
+# import different zvols from a single class.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: greendot-rdma-import
+provisioner: csi.greendot.io
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  importDataset: "tank/legacy/mydb"
+---
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass
 metadata:

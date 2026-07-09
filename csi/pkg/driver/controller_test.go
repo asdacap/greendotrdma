@@ -143,15 +143,22 @@ func wantCode(t *testing.T, err error, code codes.Code) {
 
 // The CreateVolume decision table: fresh create, idempotent retry (zvol
 // exists, same size — export still re-applied), size conflict, clone from
-// snapshot, and a failed export.
+// snapshot, a failed export, a custom zvolName, and importing a preexisting
+// zvol (adopt, never create). Blank want* fields default to the pvc-1 case.
 func TestCreateVolumeDecisions(t *testing.T) {
+	imported := encodeImportID("tank/legacy/db")
 	cases := []struct {
-		name      string
-		zvol      *helperpb.ZvolInfoReply
-		source    *csi.VolumeContentSource
-		failOp    string
-		wantCode  codes.Code
-		wantCalls []string
+		name        string
+		params      map[string]string
+		zvol        *helperpb.ZvolInfoReply
+		source      *csi.VolumeContentSource
+		failOp      string
+		wantCode    codes.Code
+		wantCalls   []string
+		wantVolID   string // response VolumeId, default "pvc-1"
+		wantDataset string // backing dataset, default "tank/csi/pvc-1"
+		wantToken   string // nqn suffix, default "pvc-1"
+		wantBytes   int64  // response CapacityBytes, default 10<<30
 	}{
 		{
 			name:      "fresh volume: create + apply",
@@ -187,6 +194,41 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			wantCode:  codes.Internal,
 			wantCalls: []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
 		},
+		{
+			name:        "zvolName overrides the leaf",
+			params:      map[string]string{"zvolName": "myvol"},
+			zvol:        &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:    codes.OK,
+			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
+			wantVolID:   "myvol",
+			wantDataset: "tank/csi/myvol",
+			wantToken:   "myvol",
+		},
+		{
+			name:        "importDataset adopts an existing zvol (no create), size adopted",
+			params:      map[string]string{"importDataset": "tank/legacy/db"},
+			zvol:        &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30},
+			wantCode:    codes.OK,
+			wantCalls:   []string{"ZvolInfo", "CsiNvmeApply"},
+			wantVolID:   imported,
+			wantDataset: "tank/legacy/db",
+			wantToken:   imported,
+			wantBytes:   20 << 30,
+		},
+		{
+			name:      "importDataset with a missing target is NotFound",
+			params:    map[string]string{"importDataset": "tank/legacy/db"},
+			zvol:      &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:  codes.NotFound,
+			wantCalls: []string{"ZvolInfo"},
+		},
+		{
+			name:      "importDataset smaller than the request is OutOfRange",
+			params:    map[string]string{"importDataset": "tank/legacy/db"},
+			zvol:      &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 5 << 30},
+			wantCode:  codes.OutOfRange,
+			wantCalls: []string{"ZvolInfo"},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -198,6 +240,7 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			cs := testController(t, f)
 			resp, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 				Name:                "pvc-1",
+				Parameters:          tc.params,
 				CapacityRange:       &csi.CapacityRange{RequiredBytes: 10 << 30},
 				VolumeCapabilities:  rwoCaps(),
 				VolumeContentSource: tc.source,
@@ -209,9 +252,17 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			if tc.wantCode != codes.OK {
 				return
 			}
+			wantVolID, wantDataset := orDefault(tc.wantVolID, "pvc-1"), orDefault(tc.wantDataset, "tank/csi/pvc-1")
+			wantToken, wantBytes := orDefault(tc.wantToken, "pvc-1"), tc.wantBytes
+			if wantBytes == 0 {
+				wantBytes = 10 << 30
+			}
+			if resp.Volume.VolumeId != wantVolID || resp.Volume.CapacityBytes != wantBytes {
+				t.Fatalf("bad volume: id=%q cap=%d", resp.Volume.VolumeId, resp.Volume.CapacityBytes)
+			}
 			apply := f.reqs["CsiNvmeApply"].(*helperpb.CsiNvmeApply)
-			if apply.Nqn != CSINQNPrefix+"pvc-1" ||
-				apply.DevicePath != "/dev/zvol/tank/csi/pvc-1" ||
+			if apply.Nqn != CSINQNPrefix+wantToken ||
+				apply.DevicePath != "/dev/zvol/"+wantDataset ||
 				apply.DeviceUuid != DeviceUUID(apply.Nqn) ||
 				apply.Trsvcid != 4421 {
 				t.Fatalf("bad apply request: %+v", apply)
@@ -229,6 +280,64 @@ func TestCreateVolumeDecisions(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func orDefault(v, def string) string {
+	if v == "" {
+		return def
+	}
+	return v
+}
+
+// resolveVolumeID inverts CreateVolume's ids: bare names map under DatasetParent,
+// imp1- ids decode to an adopted path, and corrupt/empty ids error.
+func TestResolveVolumeID(t *testing.T) {
+	cs := testController(t, newFake())
+	imp := encodeImportID("tank/legacy/db")
+	cases := []struct {
+		id           string
+		wantErr      bool
+		wantDataset  string
+		wantToken    string
+		wantImported bool
+	}{
+		{id: "pvc-abc", wantDataset: "tank/csi/pvc-abc", wantToken: "pvc-abc"},
+		{id: imp, wantDataset: "tank/legacy/db", wantToken: imp, wantImported: true},
+		{id: "", wantErr: true},
+		{id: "../etc", wantErr: true},
+		{id: "imp1-!!!", wantErr: true}, // undecodable suffix
+	}
+	for _, tc := range cases {
+		ref, err := cs.resolveVolumeID(tc.id)
+		if tc.wantErr {
+			if err == nil {
+				t.Fatalf("resolveVolumeID(%q) = %+v, want error", tc.id, ref)
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("resolveVolumeID(%q): %v", tc.id, err)
+		}
+		if ref.dataset != tc.wantDataset || ref.nqnToken != tc.wantToken || ref.imported != tc.wantImported {
+			t.Fatalf("resolveVolumeID(%q) = %+v", tc.id, ref)
+		}
+	}
+}
+
+// The safety invariant: deleting an imported volume tears down the export but
+// never runs ZvolDelete against the adopted zvol.
+func TestDeleteImportedNeverDestroysZvol(t *testing.T) {
+	f := newFake()
+	cs := testController(t, f)
+	imp := encodeImportID("tank/legacy/db")
+	_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: imp})
+	wantCode(t, err, codes.OK)
+	if !slices.Equal(f.calls, []string{"CsiNvmeDelete"}) {
+		t.Fatalf("imported delete must tear down only the export, got %v", f.calls)
+	}
+	if del := f.reqs["CsiNvmeDelete"].(*helperpb.CsiNvmeDelete); del.Nqn != CSINQNPrefix+imp {
+		t.Fatalf("bad delete nqn %q", del.Nqn)
 	}
 }
 
@@ -251,6 +360,16 @@ func TestPublishUnpublishFencing(t *testing.T) {
 	grant := f.reqs["CsiHostGrant"].(*helperpb.CsiHostGrant)
 	if grant.Nqn != CSINQNPrefix+"pvc-1" || grant.Hostnqn != hostnqn {
 		t.Fatalf("bad grant: %+v", grant)
+	}
+
+	// An imported id grants against its encoded nqn token, unchanged fencing.
+	imp := encodeImportID("tank/legacy/db")
+	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
+		VolumeId: imp, NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
+	})
+	wantCode(t, err, codes.OK)
+	if grant = f.reqs["CsiHostGrant"].(*helperpb.CsiHostGrant); grant.Nqn != CSINQNPrefix+imp {
+		t.Fatalf("imported grant nqn = %q", grant.Nqn)
 	}
 
 	f.fail["CsiHostGrant"] = "subsystem nqn.2026-06.io.greendot.csi:pvc-9 does not exist"
@@ -368,7 +487,7 @@ func TestSnapshotLifecycle(t *testing.T) {
 func TestNameValidationGatesEveryRPC(t *testing.T) {
 	f := newFake()
 	cs := testController(t, f)
-	for _, bad := range []string{"", "../etc", "a/b", "a b", ".hidden"} {
+	for _, bad := range []string{"", "../etc", "a/b", "a b", ".hidden", "imp1-!!!"} {
 		if _, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 			Name: bad, VolumeCapabilities: rwoCaps(),
 		}); status.Code(err) != codes.InvalidArgument {
@@ -397,5 +516,16 @@ func TestNameValidationGatesEveryRPC(t *testing.T) {
 	})
 	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "single-node") {
 		t.Fatalf("RWX must be refused, got %v", err)
+	}
+
+	// The imp1- namespace is reserved for imported ids; a managed create may
+	// not claim it, whether via the CSI name or zvolName.
+	for _, req := range []*csi.CreateVolumeRequest{
+		{Name: "imp1-abc", VolumeCapabilities: rwoCaps()},
+		{Name: "pvc-1", Parameters: map[string]string{"zvolName": "imp1-abc"}, VolumeCapabilities: rwoCaps()},
+	} {
+		if _, err := cs.CreateVolume(context.Background(), req); status.Code(err) != codes.InvalidArgument {
+			t.Fatalf("reserved imp1- name must be refused, got %v", err)
+		}
 	}
 }

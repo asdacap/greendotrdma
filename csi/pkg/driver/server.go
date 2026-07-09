@@ -40,6 +40,13 @@ const (
 	// CSINQNPrefix mirrors greendot-proto's CSI_NQN_PREFIX: the ownership
 	// boundary. The daemon re-validates it; this constant only derives names.
 	CSINQNPrefix = "nqn.2026-06.io.greendot.csi:"
+
+	// importedPrefix marks a volume id that adopts a preexisting zvol at an
+	// arbitrary dataset path rather than one the driver created. The full path
+	// is base32hex-encoded after the prefix, so the imported flag and the path
+	// both ride the volume id (the only per-volume state Kubernetes replays).
+	// DeleteVolume tears down the export but never destroys such a zvol.
+	importedPrefix = "imp1-"
 )
 
 // Serve runs the given CSI services on `endpoint` (unix:///… or tcp://…)
