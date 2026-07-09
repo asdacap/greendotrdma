@@ -13,16 +13,27 @@ import (
 
 	"github.com/asdacap/greendotrdma/csi/pkg/driver"
 	"github.com/asdacap/greendotrdma/csi/pkg/helper"
+	"github.com/asdacap/greendotrdma/csi/pkg/node"
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"k8s.io/klog/v2"
 )
 
 func main() {
 	var (
-		action  = flag.String("action", "", "create|publish|unpublish|delete|expand")
+		action  = flag.String("action", "", "create|publish|unpublish|delete|expand|node-stage")
 		volume  = flag.String("volume", "", "volume id")
 		size    = flag.Int64("size", 64<<20, "capacity bytes (create/expand)")
-		hostnqn = flag.String("hostnqn", "", "node host NQN (publish/unpublish)")
+		hostnqn = flag.String("hostnqn", "", "node host NQN (publish/unpublish/node-stage)")
+
+		// node-stage: exercise the real node plugin (transport prep + fabric
+		// connect) instead of a raw nvme connect, so the test proves the driver
+		// configures RDMA itself.
+		nqn        = flag.String("nqn", "", "target subsystem nqn (node-stage)")
+		hostid     = flag.String("hostid", "", "node host id, cat /etc/nvme/hostid (node-stage)")
+		deviceUUID = flag.String("device-uuid", "", "pinned namespace uuid (node-stage)")
+		softRoce   = flag.String("soft-roce-netdev", "", "Soft-RoCE netdev for the node plugin (node-stage)")
+		staging    = flag.String("staging-path", "/tmp/csi-e2e-staging", "node staging target path (node-stage)")
+		volmap     = flag.String("volume-map-dir", "/tmp/csi-e2e-volumes", "node connector map dir (node-stage)")
 
 		sshAddr   = flag.String("ssh-addr", "", "storage box sshd, host:port")
 		sshUser   = flag.String("ssh-user", "greendot-csi", "SSH login user")
@@ -35,6 +46,32 @@ func main() {
 		transport = flag.String("transport", "rdma", "rdma or tcp")
 	)
 	flag.Parse()
+
+	// node-stage runs entirely on the initiator (no controller/ssh): it drives
+	// the real NodeServer, so transport prep (modprobe + Soft-RoCE) and the
+	// fabric connect are the ones under test.
+	if *action == "node-stage" {
+		ns := node.NewNodeServer(*hostnqn, *hostid, *volmap, *softRoce)
+		if _, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
+			VolumeId:          *volume,
+			StagingTargetPath: *staging,
+			VolumeContext: map[string]string{
+				"nqn":          *nqn,
+				"targetTrAddr": *traddr,
+				"targetTrPort": fmt.Sprintf("%d", *trsvcid),
+				"targetTrType": *transport,
+				"deviceUUID":   *deviceUUID,
+			},
+			VolumeCapability: &csi.VolumeCapability{
+				AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+			},
+		}); err != nil {
+			klog.Fatal(err)
+		}
+		fmt.Println("ok")
+		return
+	}
 
 	tunnel, err := helper.NewTunnel(helper.SSHConfig{
 		Addr: *sshAddr, User: *sshUser, KeyPath: *sshKey,

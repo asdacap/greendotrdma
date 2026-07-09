@@ -45,6 +45,7 @@ type Connector struct {
 	TargetPort string
 	Transport  string
 	HostNqn    string
+	HostID     string
 	DeviceUUID string
 }
 
@@ -65,6 +66,12 @@ func (c *Connector) Connect() (string, error) {
 		c.TargetNqn, c.Transport, c.TargetAddr, c.TargetPort)
 	if c.HostNqn != "" {
 		fmt.Fprintf(&b, ",hostnqn=%s", c.HostNqn)
+	}
+	// Pair the host NQN with its host id: without one the kernel falls back to
+	// its default hostid, which is already bound to a different (default) NQN —
+	// the connect is then rejected with "same hostid but different hostnqn".
+	if c.HostID != "" {
+		fmt.Fprintf(&b, ",hostid=%s", c.HostID)
 	}
 
 	f, err := os.OpenFile("/dev/nvme-fabrics", os.O_RDWR, 0o666)

@@ -21,8 +21,11 @@ func main() {
 
 		// node
 		nodeID = flag.String("nodeid", "", "this node's host NQN (cat /etc/nvme/hostnqn)")
+		hostID = flag.String("hostid", "", "this node's host id (cat /etc/nvme/hostid); pairs with --nodeid")
 		volDir = flag.String("volume-map-dir", "/var/lib/kubelet/plugins/"+driver.DriverName+"/volumes",
 			"where staged volumes' connector files persist")
+		softRoce = flag.String("soft-roce-netdev", "",
+			"if set and no RDMA device exists, create a Soft-RoCE (rxe) link on this netdev before rdma connects")
 
 		// controller
 		sshAddr    = flag.String("ssh-addr", "", "storage box sshd, host:port")
@@ -43,7 +46,7 @@ func main() {
 		if *nodeID == "" {
 			klog.Fatal("--mode=node requires --nodeid (the host NQN)")
 		}
-		ns := node.NewNodeServer(*nodeID, *volDir)
+		ns := node.NewNodeServer(*nodeID, *hostID, *volDir, *softRoce)
 		if err := driver.Serve(*endpoint, &driver.IdentityServer{}, nil, ns); err != nil {
 			klog.Fatal(err)
 		}

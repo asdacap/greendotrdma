@@ -4,7 +4,9 @@
 #     /etc/nvme/hostnqn if missing, so every node has a stable host NQN;
 #   - --nodeid IS that hostnqn, so ControllerPublishVolume can grant it into
 #     the subsystem's allowed_hosts verbatim (the fencing identity).
-# Workers need the fabric modules: modprobe nvme-rdma (or nvme-tcp).
+# The node plugin loads the fabric modules (nvme-rdma / nvme-tcp) itself at
+# stage time, so /lib/modules is hostPath-mounted below. Nodes without a
+# hardware RDMA NIC can pass --soft-roce-netdev <dev> to bring up Soft-RoCE.
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -27,9 +29,13 @@ spec:
             - sh
             - -c
             - |
+              mkdir -p /etc/nvme
               if [ ! -s /etc/nvme/hostnqn ]; then
-                mkdir -p /etc/nvme
                 echo "nqn.2014-08.org.nvmexpress:uuid:$(cat /proc/sys/kernel/random/uuid)" > /etc/nvme/hostnqn
+              fi
+              # hostid pairs with hostnqn in the fabric connect (see fabrics.go).
+              if [ ! -s /etc/nvme/hostid ]; then
+                cat /proc/sys/kernel/random/uuid > /etc/nvme/hostid
               fi
           volumeMounts:
             - name: etc-nvme
@@ -52,12 +58,16 @@ spec:
           command:
             - sh
             - -c
-            - exec /greendot-csi --mode=node --endpoint=unix:///csi/csi.sock --nodeid="$(cat /etc/nvme/hostnqn)"
+            # add --soft-roce-netdev <dev> on nodes without a hardware RDMA NIC
+            - exec /greendot-csi --mode=node --endpoint=unix:///csi/csi.sock --nodeid="$(cat /etc/nvme/hostnqn)" --hostid="$(cat /etc/nvme/hostid)"
           volumeMounts:
             - name: socket-dir
               mountPath: /csi
             - name: etc-nvme
               mountPath: /etc/nvme
+            - name: lib-modules
+              mountPath: /lib/modules
+              readOnly: true
             - name: pods-mount-dir
               mountPath: /var/lib/kubelet/pods
               mountPropagation: Bidirectional
@@ -80,6 +90,9 @@ spec:
           hostPath:
             path: /etc/nvme
             type: DirectoryOrCreate
+        - name: lib-modules
+          hostPath:
+            path: /lib/modules
         - name: pods-mount-dir
           hostPath:
             path: /var/lib/kubelet/pods

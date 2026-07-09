@@ -52,9 +52,12 @@ error, and the connector path is traversal-guarded. The controller is original
    ssh-keyscan -H <box> | kubectl -n kube-system create configmap greendot-csi-known-hosts --from-file=known_hosts=/dev/stdin
    kubectl apply -f deploy/
    ```
-3. Workers need the fabric module: `modprobe nvme-rdma` (or `nvme-tcp`), e.g.
-   via /etc/modules-load.d. No nvme-cli required — the node plugin writes
-   /dev/nvme-fabrics directly.
+3. Nothing else on the workers: the node plugin loads the fabric module
+   (`nvme-rdma`/`nvme-tcp`) itself at stage time — the DaemonSet mounts
+   `/lib/modules` for that — and writes /dev/nvme-fabrics directly (no nvme-cli).
+   Workers *without* a hardware RDMA NIC pass `--soft-roce-netdev <dev>` to the
+   node plugin, which stands up a Soft-RoCE (`rxe`) link on that netdev when no
+   RDMA device is present.
 
 ## Testing
 

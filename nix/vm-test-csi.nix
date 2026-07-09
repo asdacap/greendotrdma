@@ -42,13 +42,13 @@ pkgs.testers.runNixOSTest {
     virtualisation.memorySize = 2048;
     virtualisation.cores = 2;
     networking.firewall.enable = false;
-    boot.kernelModules = [ "rdma_rxe" "nvme_rdma" "nvme_fabrics" ];
+    # No boot.kernelModules and no manual rxe setup: the node plugin loads
+    # nvme-rdma / rdma_rxe and stands up Soft-RoCE itself (that is what we prove).
     environment.systemPackages = with pkgs; [ greendot-csi nvme-cli rdma-core kmod openssh ];
   };
 
   testScript = ''
     netdev = "eth1"
-    hostnqn = "nqn.2014-08.org.nvmexpress:uuid:11111111-2222-3333-4444-555555555555"
 
     start_all()
     target.wait_for_unit("greendotctl.service")
@@ -63,9 +63,22 @@ pkgs.testers.runNixOSTest {
     target_ip = target.succeed(f"ip -o -4 addr show dev {netdev} | awk '{{print $4}}' | cut -d/ -f1 | head -1").strip()
     print(f"target_ip={target_ip}")
 
-    client.succeed("modprobe rdma_rxe nvme_rdma nvme_fabrics")
+    # The client's fabric/RDMA setup is left to the node plugin (node-stage,
+    # below); we only wait for the netdev the driver will hang Soft-RoCE off.
     client.wait_until_succeeds(f"ip -o -4 addr show dev {netdev} | grep -q 'inet '")
-    client.succeed(f"rdma link add rxe0 type rxe netdev {netdev}")
+
+    # The node's identity is its /etc/nvme/hostnqn, generated exactly as the
+    # DaemonSet's initContainer does and passed verbatim as --nodeid; deriving
+    # the test's hostnqn from it keeps the initiator identity consistent (the
+    # kernel's default hostid binds to this nqn on the driver's autoconnect).
+    client.succeed("mkdir -p /etc/nvme")
+    client.succeed(
+        "test -s /etc/nvme/hostnqn || "
+        "echo nqn.2014-08.org.nvmexpress:uuid:$(cat /proc/sys/kernel/random/uuid) > /etc/nvme/hostnqn"
+    )
+    client.succeed("test -s /etc/nvme/hostid || cat /proc/sys/kernel/random/uuid > /etc/nvme/hostid")
+    hostnqn = client.succeed("cat /etc/nvme/hostnqn").strip()
+    hostid = client.succeed("cat /etc/nvme/hostid").strip()
 
     # --- pool + parent dataset on the target ---
     target.succeed("truncate -s 1G /var/tmp/pool.img")
@@ -88,18 +101,26 @@ pkgs.testers.runNixOSTest {
     print(out)
     ctxvals = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
     nqn, uuid = ctxvals["nqn"], ctxvals["deviceUUID"]
+    # The initiator side driven through the real node plugin: transport prep
+    # (modprobe nvme-rdma + Soft-RoCE on {netdev}) then the fabric connect.
+    node_stage = (
+        f"csi-e2e -action node-stage -volume pvc-1 -nqn {nqn} -device-uuid {uuid}"
+        f" -traddr {target_ip} -trsvcid 4421 -transport rdma"
+        f" -hostnqn {hostnqn} -hostid {hostid} -soft-roce-netdev {netdev}"
+    )
     subsys = f"/sys/kernel/config/nvmet/subsystems/{nqn}"
     target.succeed(f"test -d {subsys}")
     assert target.succeed(f"cat {subsys}/attr_allow_any_host").strip() == "0", "export must be born closed"
     assert target.succeed(f"cat {subsys}/namespaces/1/device_uuid").strip() == uuid, "uuid must be pinned"
     assert target.succeed("cat /sys/kernel/config/nvmet/ports/61000/addr_trsvcid").strip() == "4421"
 
-    # Closed means closed: the initiator is rejected before any grant.
-    client.fail(f"nvme connect -t rdma -a {target_ip} -s 4421 -n {nqn} --hostnqn={hostnqn}")
+    # Closed means closed: the node plugin readies RDMA (modprobe + Soft-RoCE)
+    # and its fabric connect is still rejected before any grant.
+    client.fail(node_stage)
 
-    # --- publish: grant exactly this host, then the connect succeeds ---
+    # --- publish: grant exactly this host, then the node connect succeeds ---
     client.succeed(f"{e2e} -action publish -volume pvc-1 -hostnqn {hostnqn}")
-    client.succeed(f"nvme connect -t rdma -a {target_ip} -s 4421 -n {nqn} --hostnqn={hostnqn}")
+    client.succeed(node_stage)
     dev = f"/dev/disk/by-id/nvme-uuid.{uuid}"
     client.wait_until_succeeds(f"test -e {dev}", timeout=30)
     client.succeed(f"dd if=/dev/urandom of={dev} bs=1M count=4 oflag=direct")

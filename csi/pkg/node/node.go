@@ -48,17 +48,25 @@ type NodeServer struct {
 	csi.UnimplementedNodeServer
 	// NodeID is this node's host NQN (the DaemonSet reads /etc/nvme/hostnqn).
 	NodeID string
+	// HostID is this node's host id (the DaemonSet reads /etc/nvme/hostid); it
+	// pairs with NodeID in the fabric connect so the kernel accepts the NQN.
+	HostID string
 	// VolumeMapDir persists one connector JSON per staged volume, so unstage
 	// (which only receives the volume id) can disconnect the right subsystem.
 	VolumeMapDir string
-	mounter      *mount.SafeFormatAndMount
+	// SoftRoceNetdev, when set, is the netdev an rxe (Soft-RoCE) link is created
+	// on if an rdma stage finds no RDMA device (nodes without a hardware NIC).
+	SoftRoceNetdev string
+	mounter        *mount.SafeFormatAndMount
 }
 
-func NewNodeServer(nodeID, volumeMapDir string) *NodeServer {
+func NewNodeServer(nodeID, hostID, volumeMapDir, softRoceNetdev string) *NodeServer {
 	return &NodeServer{
-		NodeID:       nodeID,
-		VolumeMapDir: volumeMapDir,
-		mounter:      &mount.SafeFormatAndMount{Interface: mount.New(""), Exec: utilexec.New()},
+		NodeID:         nodeID,
+		HostID:         hostID,
+		VolumeMapDir:   volumeMapDir,
+		SoftRoceNetdev: softRoceNetdev,
+		mounter:        &mount.SafeFormatAndMount{Interface: mount.New(""), Exec: utilexec.New()},
 	}
 }
 
@@ -92,6 +100,7 @@ func (ns *NodeServer) connectorFromContext(volID string, volCtx map[string]strin
 		Transport:  volCtx["targetTrType"],
 		DeviceUUID: volCtx["deviceUUID"],
 		HostNqn:    ns.NodeID,
+		HostID:     ns.HostID,
 	}
 	if c.TargetNqn == "" || c.TargetAddr == "" || c.TargetPort == "" ||
 		c.Transport == "" || c.DeviceUUID == "" {
@@ -113,6 +122,10 @@ func (ns *NodeServer) NodeStageVolume(ctx context.Context, req *csi.NodeStageVol
 	connector, err := ns.connectorFromContext(volID, req.GetVolumeContext())
 	if err != nil {
 		return nil, err
+	}
+
+	if err := connector.prepareTransport(ns.SoftRoceNetdev); err != nil {
+		return nil, status.Errorf(codes.FailedPrecondition, "preparing %s transport: %v", connector.Transport, err)
 	}
 
 	devicePath, err := connector.Connect()
