@@ -123,7 +123,7 @@ pub struct NvmeExport {
     pub name: String,
     pub nqn: String,
     pub enabled: bool,
-    pub allow_any_host: bool,
+    /// Includes `allow_any_host` — the server folds it in.
     pub authorized: bool,
     pub listeners: Vec<Listener>,
 }
@@ -146,7 +146,7 @@ pub struct Exports {
 
 #[derive(Debug, Deserialize)]
 pub struct RegisterReply {
-    pub status: String,
+    /// The reconcile task to poll before connecting; `None` = nothing changed.
     pub task_id: Option<i64>,
 }
 

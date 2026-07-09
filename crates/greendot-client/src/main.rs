@@ -12,6 +12,7 @@
 mod agent;
 mod api;
 mod config;
+mod diagnose;
 mod pairing;
 mod privops;
 mod status;
@@ -60,6 +61,7 @@ commands:
   mount <target> <export> [<mountpoint>] [--tcp]
                                                register + mount an NFS export
   unmount <target> <export>                    unmount an NFS export
+  diagnose [<target> [<export>]]               why isn't my dot green?
   agent [--group <name>] [--allow-uid <uid>]   run the root agent (systemd)
 ";
 
@@ -113,6 +115,7 @@ fn main() {
         "disconnect" => cmd_disconnect(&global, &mut args),
         "mount" => cmd_mount(&global, &mut args),
         "unmount" => cmd_unmount(&global, &mut args),
+        "diagnose" => cmd_diagnose(&global, &mut args),
         "agent" => cmd_agent(&global, &mut args),
         _ => {
             eprintln!("unknown command {cmd:?}\n{USAGE}");
@@ -522,11 +525,6 @@ fn cmd_mount(global: &Global, args: &mut impl Iterator<Item = String>) -> Result
         mountpoint.unwrap_or_else(|| format!("/mnt/greendot/{}/{}", t.name, path_slug(&e.path)));
     // RDMA when the target listener is up (and not forced off); a failed RDMA
     // mount falls back to TCP with the reason kept.
-    let mut fallback_reason = None;
-    let mut rdma = e.rdma && !force_tcp;
-    if !e.rdma {
-        fallback_reason = Some("target has no NFS RDMA listener".to_owned());
-    }
     let op = |rdma: bool| AgentOp::MountNfs {
         host: host.clone(),
         path: e.path.clone(),
@@ -534,21 +532,22 @@ fn cmd_mount(global: &Global, args: &mut impl Iterator<Item = String>) -> Result
         rdma,
         port: e.port,
     };
-    if rdma && let Err(err) = broker.call(&op(true)) {
-        fallback_reason = Some(format!("{err:#}"));
-        rdma = false;
-    } else if rdma {
-        // RDMA mount succeeded.
-        print_mounted(global, "rdma", &mountpoint, None);
-        return Ok(());
+    let mut fallback_reason = None;
+    if !force_tcp {
+        if !e.rdma {
+            fallback_reason = Some("target has no NFS RDMA listener".to_owned());
+        } else {
+            match broker.call(&op(true)) {
+                Ok(_) => {
+                    print_mounted(global, "rdma", &mountpoint, None);
+                    return Ok(());
+                }
+                Err(err) => fallback_reason = Some(format!("{err:#}")),
+            }
+        }
     }
     broker.call(&op(false))?;
-    print_mounted(
-        global,
-        "tcp",
-        &mountpoint,
-        fallback_reason.filter(|_| !force_tcp),
-    );
+    print_mounted(global, "tcp", &mountpoint, fallback_reason);
     Ok(())
 }
 
@@ -582,6 +581,186 @@ fn cmd_unmount(global: &Global, args: &mut impl Iterator<Item = String>) -> Resu
         println!("{}", json!({ "ok": true, "mountpoint": m.mountpoint }));
     } else {
         println!("unmounted {}", m.mountpoint);
+    }
+    Ok(())
+}
+
+/// The diagnose checklist. With no argument: local plumbing only. With a
+/// target: plus reachability/token. With an export: plus the export's own
+/// registration and live-connection state.
+fn cmd_diagnose(global: &Global, args: &mut impl Iterator<Item = String>) -> Result<()> {
+    let target = args.next();
+    let export = args.next();
+    if let Some(extra) = args.next() {
+        bail!("unknown argument {extra:?}");
+    }
+    let sys = global.sys();
+    let mut checks = Vec::new();
+
+    // Privilege broker: agent socket answering ping, or already root.
+    let broker_probe = global.broker().and_then(|b| {
+        let direct = matches!(b, Broker::Direct { .. });
+        b.call(&AgentOp::Ping).map(|_| direct)
+    });
+    checks.push(match broker_probe {
+        Ok(true) => diagnose::check("privileged ops available", true, "running as root"),
+        Ok(false) => diagnose::check("privileged ops available", true, "agent socket answers"),
+        Err(e) => diagnose::check("privileged ops available", false, format!("{e:#}")),
+    });
+
+    checks.push(diagnose::check(
+        "host NQN present",
+        read_hostnqn(global).is_some(),
+        match read_hostnqn(global) {
+            Some(nqn) => nqn,
+            None => "no /etc/nvme/hostnqn — `connect` creates it on first use".to_owned(),
+        },
+    ));
+
+    // Which export kind are we diagnosing? Unknown → check both paths.
+    let (t, found) = match &target {
+        None => (None, None),
+        Some(key) => {
+            let targets = Targets::load(&global.config_dir)?;
+            let t = targets.find(key)?.clone();
+            checks.push(diagnose::dial_check(
+                "target web port reachable",
+                &t.host,
+                if t.cert_sha256.is_some() { 443 } else { 80 },
+            ));
+            let api = api::TargetApi::connect(&t.pairing())?;
+            let exports = match api.target() {
+                Ok(info) => {
+                    checks.push(diagnose::check(
+                        "token accepted",
+                        true,
+                        format!("target {} (api v{})", info.name, info.api),
+                    ));
+                    Some(api.exports(read_hostnqn(global).as_deref())?)
+                }
+                Err(e) => {
+                    checks.push(diagnose::check("token accepted", false, format!("{e:#}")));
+                    None
+                }
+            };
+            let found = match (&export, exports) {
+                (Some(name), Some(exports)) => {
+                    let nvme = exports
+                        .nvme
+                        .into_iter()
+                        .find(|e| &e.name == name || &e.nqn == name);
+                    let nfs = exports
+                        .nfs
+                        .into_iter()
+                        .find(|e| &e.path == name || &path_slug(&e.path) == name);
+                    if nvme.is_none() && nfs.is_none() {
+                        bail!("target has no export {name:?}");
+                    }
+                    nvme.map(Ok).or(nfs.map(Err))
+                }
+                _ => None,
+            };
+            (Some(t), found)
+        }
+    };
+
+    match &found {
+        // NVMe export: plumbing, listener, registration, live state.
+        Some(Ok(e)) => {
+            checks.extend(diagnose::nvme_path_checks(&global.sys_root, &sys));
+            checks.push(diagnose::check("export enabled on target", e.enabled, ""));
+            let rdma_listener = e.listeners.iter().any(|l| l.trtype == "rdma");
+            checks.push(diagnose::check(
+                "export offers an RDMA listener",
+                rdma_listener,
+                if rdma_listener {
+                    ""
+                } else {
+                    "target exports TCP only — enable RDMA on the export"
+                },
+            ));
+            checks.push(diagnose::check(
+                "this host registered",
+                e.authorized,
+                if e.authorized {
+                    ""
+                } else {
+                    "run `greendot-client connect` — it registers this host's NQN first"
+                },
+            ));
+            let ctrls = status::nvme_controllers(&sys.sys_class_nvme);
+            let (_, reason, ctrl) = status::nvme_dot(&e.nqn, &ctrls);
+            checks.push(diagnose::check(
+                "controller live",
+                ctrl.is_some_and(|c| c.state == "live"),
+                match ctrl {
+                    Some(c) if c.state == "connecting" => format!(
+                        "stuck connecting — usually an ACL rejection (register first) or \
+                         an unreachable traddr ({})",
+                        c.address
+                    ),
+                    Some(c) => format!("{reason} ({})", c.address),
+                    None => reason,
+                },
+            ));
+        }
+        // NFS export: plumbing, server RDMA listener, registration, mount.
+        Some(Err(e)) => {
+            checks.extend(diagnose::nfs_path_checks(&global.sys_root, &sys));
+            checks.push(diagnose::check("export enabled on target", e.enabled, ""));
+            checks.push(diagnose::check(
+                "target NFS RDMA listener up",
+                e.rdma,
+                if e.rdma {
+                    format!("port {}", e.port)
+                } else {
+                    "the target's nfsd has no RDMA listener — see its NFS diagnose page".into()
+                },
+            ));
+            checks.push(diagnose::check(
+                "this host's IP registered",
+                e.authorized,
+                if e.authorized {
+                    ""
+                } else {
+                    "run `greendot-client mount` — it whitelists this host's IP first"
+                },
+            ));
+            if let Some(t) = &t {
+                let mounts = status::nfs_mounts(&sys.proc_mounts);
+                let (_, reason, m) = status::nfs_dot(host_only(&t.host), &e.path, &mounts);
+                checks.push(diagnose::check(
+                    "mounted over RDMA",
+                    m.is_some_and(|m| m.rdma),
+                    match m {
+                        Some(m) => format!("{reason} at {}", m.mountpoint),
+                        None => reason,
+                    },
+                ));
+            }
+        }
+        // No specific export: both local paths.
+        None => {
+            checks.extend(diagnose::nvme_path_checks(&global.sys_root, &sys));
+            checks.extend(diagnose::nfs_path_checks(&global.sys_root, &sys));
+        }
+    }
+
+    let all_ok = checks.iter().all(|c| c.ok);
+    if global.json {
+        println!(
+            "{}",
+            json!({ "ok": true, "all_ok": all_ok, "checks": checks })
+        );
+    } else {
+        for c in &checks {
+            let mark = if c.ok { "✓" } else { "✗" };
+            if c.detail.is_empty() {
+                println!("{mark} {}", c.label);
+            } else {
+                println!("{mark} {} — {}", c.label, c.detail);
+            }
+        }
     }
     Ok(())
 }

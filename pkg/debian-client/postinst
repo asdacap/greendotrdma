@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+# Create the greendot-client group before the unit starts.
+systemd-sysusers
+
+#DEBHELPER#
+
+echo "greendot-client installed. Let users drive it with: usermod -aG greendot-client <user>"
+echo "Pair with a target: greendot-client add '<connection string from its Client access page>'"

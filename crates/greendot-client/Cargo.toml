@@ -5,6 +5,38 @@ edition.workspace = true
 license.workspace = true
 description = "Linux client for GreenDotRDMA targets: connect NVMe-oF block exports, mount NFS shares"
 
+# Build: cargo build --release -p greendot-client && cargo deb -p greendot-client --no-build
+# (scripts/build-deb.sh does both packages, with the NixOS patchelf step.)
+[package.metadata.deb]
+name = "greendot-client"
+maintainer = "Amirul Ashraf <asdacap@gmail.com>"
+copyright = "2026, Amirul Ashraf"
+license-file = ["../../LICENSE", "0"]
+section = "admin"
+priority = "optional"
+extended-description = """
+The initiator-side companion of a GreenDotRDMA storage target. Paste a
+connection string from the target's web UI to pair, then connect NVMe-oF
+block exports and mount NFS shares — over RDMA when available, with an
+explained TCP fallback — and diagnose why a connection isn't green. A small
+root agent performs the privileged steps so regular users (group
+greendot-client) can drive it."""
+# nfs-common (mount.nfs) and rdma-core are Recommends, not Depends: the
+# client detects what's missing and `diagnose` says what to install.
+depends = "libc6, libgcc-s1"
+recommends = "nfs-common, rdma-core"
+assets = [
+    ["target/release/greendot-client", "usr/bin/", "755"],
+    ["../../pkg/client-sysusers.conf", "usr/lib/sysusers.d/greendot-client.conf", "644"],
+]
+maintainer-scripts = "../../pkg/debian-client"
+
+[[package.metadata.deb.systemd-units]]
+unit-name = "greendot-client-agent"
+unit-scripts = "../../pkg"
+enable = true
+start = true
+
 [dependencies]
 anyhow = { workspace = true }
 # The pure domain model only (validated newtypes, constants) — no tonic/protoc

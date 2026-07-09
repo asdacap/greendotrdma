@@ -1,0 +1,24 @@
+[Unit]
+Description=GreenDotRDMA client agent (privileged connect/mount ops)
+Documentation=https://github.com/asdacap/greendotrdma
+
+[Service]
+Type=simple
+# Root (fabrics writes, mounts), with group greendot-client so the
+# RuntimeDirectory is root:greendot-client and group members can traverse it
+# to reach the socket (same pattern as greendotctl.service).
+Group=greendot-client
+ExecStart=/usr/bin/greendot-client agent
+Restart=on-failure
+RestartSec=2
+# Must run in the HOST mount namespace: the agent mounts NFS filesystems the
+# rest of the system has to see. Any mount-namespace sandbox option —
+# PrivateTmp=, ProtectHome=, ProtectSystem=, ReadOnlyPaths= — gives the unit
+# slave propagation, so its mounts never reach the host (the same trap
+# documented in greendotctl.service). So do NOT add them.
+RuntimeDirectory=greendot-client
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+[Install]
+WantedBy=multi-user.target
