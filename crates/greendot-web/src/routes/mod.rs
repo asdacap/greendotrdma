@@ -1,6 +1,7 @@
 pub mod block_export;
 pub mod charts;
 pub mod client_access;
+pub mod client_api;
 pub mod connections;
 pub mod disks;
 pub mod docs;
@@ -78,6 +79,10 @@ pub fn app(state: Arc<AppState>) -> Router {
         ));
     Router::new()
         .merge(protected)
+        // Token-authenticated JSON API for the greendot-client app — outside
+        // the cookie/CSRF middleware like /metrics; it carries its own bearer
+        // check.
+        .nest("/api/client/v1", client_api::router(Arc::clone(&state)))
         .route("/login", get(auth::login_page).post(auth::login_post))
         .route("/healthz", get(async || "ok"))
         // Deliberately unauthenticated, like /healthz: Prometheus scrapers
