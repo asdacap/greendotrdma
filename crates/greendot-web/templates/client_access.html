@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block title %}Client access — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Client access</h1>
+<p class="muted small">Tokens for the <strong>greendot-client</strong> app (CLI or desktop).
+Create a token, copy its connection string, and paste it into the client's
+"Add target" — the client can then list exports and register itself
+(its NVMe host NQN, or its IP for NFS) without further setup here.</p>
+{% include "_client_access.html" %}
+{% endblock %}

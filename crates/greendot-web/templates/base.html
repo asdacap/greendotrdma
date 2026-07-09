@@ -27,6 +27,7 @@
     <a href="/tasks">Tasks</a>
     <span class="nav-label">System</span>
     <a href="/settings">Settings</a>
+    <a href="/client-access">Client access</a>
     <span class="nav-label">Help</span>
     <a href="/docs/kubernetes-csi">Kubernetes CSI</a>
     <div class="sidebar-footer">
@@ -70,6 +71,34 @@
       document.body.addEventListener("htmx:afterSwap", scan);
       scan();
     })();
+  </script>
+
+  <script>
+    // [data-copy="#sel"] buttons copy the target's text. navigator.clipboard
+    // needs a secure context; the execCommand path covers plain-HTTP dev.
+    document.body.addEventListener("click", function (e) {
+      var b = e.target.closest("[data-copy]");
+      if (!b) return;
+      var el = document.querySelector(b.getAttribute("data-copy"));
+      if (!el) return;
+      var text = el.textContent.trim();
+      var done = function () {
+        var old = b.textContent;
+        b.textContent = "Copied";
+        setTimeout(function () { b.textContent = old; }, 1200);
+      };
+      if (navigator.clipboard) {
+        navigator.clipboard.writeText(text).then(done);
+      } else {
+        var range = document.createRange();
+        range.selectNodeContents(el);
+        var sel = getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+        if (document.execCommand("copy")) done();
+        sel.removeAllRanges();
+      }
+    });
   </script>
 
   <!-- Shared confirm modal — every hx-confirm is upgraded to this styled dialog,

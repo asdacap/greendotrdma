@@ -30,7 +30,8 @@
   <h2>Client instructions</h2>
   {% for c in row.client %}
   <p class="muted small">Connect over {{ c.label }}:</p>
-  <pre class="log">{{ c.cmd }}</pre>
+  <pre class="log" id="client-cmd-{{ loop.index }}">{{ c.cmd }}</pre>
+  <button type="button" class="secondary" data-copy="#client-cmd-{{ loop.index }}">Copy</button>
   {% endfor %}
   <p class="muted small">Run as root, on a client with a matching transport (an RDMA NIC for iSER). Not persistent across reboot — set <code>node.startup=automatic</code> for the target.</p>
   {% endif %}

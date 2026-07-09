@@ -71,7 +71,9 @@ impl Sessions {
     }
 }
 
-fn random_token() -> String {
+/// 32 random bytes, hex-encoded — session tokens, CSRF tokens, and the client
+/// access tokens all use this shape.
+pub(crate) fn random_token() -> String {
     let bytes: [u8; 32] = rand::random();
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }

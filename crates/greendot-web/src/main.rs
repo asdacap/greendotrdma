@@ -24,6 +24,14 @@ async fn main() -> Result<()> {
         _ => anyhow::bail!("tls_cert and tls_key must be set together"),
     };
 
+    // The TLS cert's fingerprint rides in client connection strings so the
+    // client app can pin the self-signed cert. None on plain HTTP.
+    let tls_fingerprint = config
+        .tls_cert
+        .as_deref()
+        .map(config::cert_fingerprint)
+        .transpose()?;
+
     let state = Arc::new(routes::AppState {
         helper: helper_client::HelperClient::new(config.reconcile.helper_socket.clone()),
         sessions: auth::Sessions::new(Duration::from_secs(24 * 3600)),
@@ -32,6 +40,8 @@ async fn main() -> Result<()> {
         metrics: metrics::Metrics::open(&config.metrics_db_path)?,
         reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
         tasks: task_runner::TaskHub::default(),
+        tls_fingerprint,
+        listen: config.listen,
     });
     let app = routes::app(Arc::clone(&state));
 
@@ -50,11 +60,13 @@ async fn main() -> Result<()> {
     tokio::spawn(snapshots::scheduler(Arc::clone(&state)));
     tokio::spawn(metrics::collect::collector(state));
 
+    // ConnectInfo carries the peer address; the client API's NFS register
+    // whitelists the observed peer IP.
     match tls {
         Some(tls) => {
             tracing::info!(listen = %config.listen, "serving HTTPS");
             axum_server::bind_rustls(config.listen, tls)
-                .serve(app.into_make_service())
+                .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
                 .await?;
         }
         None => {
@@ -62,7 +74,11 @@ async fn main() -> Result<()> {
             let listener = tokio::net::TcpListener::bind(config.listen)
                 .await
                 .with_context(|| format!("binding {}", config.listen))?;
-            axum::serve(listener, app).await?;
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            )
+            .await?;
         }
     }
     Ok(())
