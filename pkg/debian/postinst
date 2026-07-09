@@ -21,7 +21,8 @@ fi
 # Upgrade migration: the privileged daemon was renamed greendot-helper ->
 # greendotctl (now also the standalone reconcile tool). Stop and disable the
 # obsolete unit so it doesn't linger or contend for the helper socket; dpkg
-# removes its now-unpackaged unit file, and #DEBHELPER# enables/starts greendotctl.
+# removes its now-unpackaged unit file, and the debhelper block below
+# enables/starts greendotctl.
 if systemctl list-unit-files greendot-helper.service >/dev/null 2>&1; then
     systemctl disable --now greendot-helper.service >/dev/null 2>&1 || true
 fi
