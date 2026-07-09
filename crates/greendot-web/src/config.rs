@@ -5,7 +5,7 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Every key the config file may contain (ours + the flattened reconcile
 /// subset). serde's `deny_unknown_fields` cannot be combined with `flatten`,
@@ -71,6 +71,20 @@ impl Config {
     }
 }
 
+/// Lowercase-hex sha256 of the first CERTIFICATE block's DER in `path` — the
+/// TLS identity embedded in client connection strings for pinning the
+/// self-signed cert.
+pub fn cert_fingerprint(path: &Path) -> Result<String> {
+    use sha2::Digest;
+    let pem = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let cert = rustls_pemfile::certs(&mut pem.as_slice())
+        .next()
+        .with_context(|| format!("no certificate in {}", path.display()))?
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let digest = sha2::Sha256::digest(cert.as_ref());
+    Ok(digest.iter().map(|b| format!("{b:02x}")).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -118,5 +132,29 @@ mod tests {
                 .contains("unknown config key"),
         );
         std::fs::remove_file(&typo).ok();
+    }
+
+    #[test]
+    fn cert_fingerprint_of_fixed_pem() {
+        // A throwaway self-signed ed25519 cert; the expected value is the
+        // sha256 of its DER encoding (openssl x509 -outform DER | sha256sum).
+        let pem = "-----BEGIN CERTIFICATE-----\n\
+MIIBMjCB5aADAgECAhRw0VP+ps8s3QcY9U9bVJHJJ0tlwDAFBgMrZXAwDzENMAsG\n\
+A1UEAwwEdGVzdDAeFw0yNjA3MDkwNDAyMzJaFw0zNjA3MDYwNDAyMzJaMA8xDTAL\n\
+BgNVBAMMBHRlc3QwKjAFBgMrZXADIQDmDosLL8djhLmhBKjMbJzBm+6+guyHpxIE\n\
+wrnheviHdKNTMFEwHQYDVR0OBBYEFDH6AidUbGCuAcfv6VM4h6vo7KH8MB8GA1Ud\n\
+IwQYMBaAFDH6AidUbGCuAcfv6VM4h6vo7KH8MA8GA1UdEwEB/wQFMAMBAf8wBQYD\n\
+K2VwA0EA8v634ftlA0Zy8H4jqxsjBQltntO9zl+CxTYudw2fsumXpdYCAOhGFk9f\n\
+IWTnzhhZnR+mDKpiQ3Ug//43cteSCA==\n\
+-----END CERTIFICATE-----\n";
+        let path = std::env::temp_dir().join(format!("gd-fp-{}.pem", std::process::id()));
+        std::fs::write(&path, pem).unwrap();
+        assert_eq!(
+            cert_fingerprint(&path).unwrap(),
+            "6c178bea8ea554308d870428fa5e845d70d5fe387350bffba2c98bab131c723b"
+        );
+        std::fs::write(&path, "not a pem").unwrap();
+        assert!(cert_fingerprint(&path).is_err());
+        std::fs::remove_file(&path).ok();
     }
 }

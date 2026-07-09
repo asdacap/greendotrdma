@@ -69,6 +69,8 @@ chrono = "0.4"
 croner = "3"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
+rustls-pemfile = "2"
+sha2 = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "process", "signal", "time", "sync"] }
 tokio-stream = { version = "0.1", features = ["sync", "net"] }
 tonic = { workspace = true }

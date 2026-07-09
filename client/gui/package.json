@@ -1,0 +1,13 @@
+{
+  "name": "greendot-client-gui",
+  "version": "0.1.1",
+  "description": "Desktop GUI for greendot-client (GreenDotRDMA initiator)",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^33.0.0"
+  }
+}

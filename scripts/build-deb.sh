@@ -20,17 +20,19 @@ echo "== building release workspace"
 cargo build --release --workspace
 
 echo "== retargeting binaries onto Ubuntu's loader ($LOADER)"
-for bin in greendot-web greendotctl; do
+for bin in greendot-web greendotctl greendot-client; do
     patchelf --set-interpreter "$LOADER" --remove-rpath "target/release/$bin"
     echo "   $bin -> $(patchelf --print-interpreter "target/release/$bin"), needs: $(patchelf --print-needed "target/release/$bin" | tr '\n' ' ')"
 done
 
 echo "== packaging (cargo deb --no-build)"
-if [ -n "${DEB_VERSION:-}" ]; then
-    cargo deb -p greendot-web --no-build --deb-version "$DEB_VERSION"
-else
-    cargo deb -p greendot-web --no-build
-fi
+for pkg in greendot-web greendot-client; do
+    if [ -n "${DEB_VERSION:-}" ]; then
+        cargo deb -p "$pkg" --no-build --deb-version "$DEB_VERSION"
+    else
+        cargo deb -p "$pkg" --no-build
+    fi
+done
 
 echo "== done"
 ls -1 target/debian/*.deb

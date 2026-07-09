@@ -46,6 +46,19 @@ pub struct NewNfsExport {
     pub clients: Vec<NfsClientEntry>,
 }
 
+/// A named client-access token for the `/api/client/v1` JSON API. Only the
+/// sha256 of the raw token is stored; the raw value is shown once at creation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientToken {
+    pub id: i64,
+    /// Admin-chosen label, unique.
+    pub name: String,
+    /// Lowercase hex sha256 of the whole raw token string.
+    pub token_hash: String,
+    /// Unix seconds.
+    pub created_at: i64,
+}
+
 pub struct Db {
     /// Task run-history — the one table that stays in SQLite.
     conn: Mutex<Connection>,
@@ -65,11 +78,13 @@ struct ConfigDoc {
     next_iscsi_export_id: i64,
     next_policy_id: i64,
     next_nfs_export_id: i64,
+    next_client_token_id: i64,
     settings: BTreeMap<String, String>,
     nvme_export: Vec<NvmeExport>,
     iscsi_export: Vec<IscsiExport>,
     policy: Vec<SnapshotPolicy>,
     nfs_export: Vec<NfsExport>,
+    client_token: Vec<ClientToken>,
     /// Pre-split configs stored a single unified `export = [...]` table tagged
     /// with `kind`, plus `next_export_id`. These read-only fields capture those
     /// on load; [`migrate_legacy_exports`] splits them into the typed tables.
@@ -435,6 +450,75 @@ impl Db {
         let mut doc = self.config.lock().unwrap();
         doc.nfs_export.retain(|e| e.id != id);
         self.persist(&doc)
+    }
+
+    pub fn insert_client_token(
+        &self,
+        name: &str,
+        token_hash: &str,
+        created_at: i64,
+    ) -> Result<i64> {
+        let mut doc = self.config.lock().unwrap();
+        if doc.client_token.iter().any(|t| t.name == name) {
+            anyhow::bail!("a token named {name:?} already exists");
+        }
+        doc.next_client_token_id += 1;
+        let id = doc.next_client_token_id;
+        doc.client_token.push(ClientToken {
+            id,
+            name: name.to_owned(),
+            token_hash: token_hash.to_owned(),
+            created_at,
+        });
+        self.persist(&doc)?;
+        Ok(id)
+    }
+
+    pub fn list_client_tokens(&self) -> Result<Vec<ClientToken>> {
+        let mut tokens = self.config.lock().unwrap().client_token.clone();
+        tokens.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(tokens)
+    }
+
+    pub fn delete_client_token(&self, id: i64) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        doc.client_token.retain(|t| t.id != id);
+        self.persist(&doc)
+    }
+
+    /// Appends `initiator` to the export's allowed-host list. Returns whether
+    /// anything changed — already listed (or unknown id: error) is a no-op, so
+    /// callers can skip the reconcile.
+    pub fn add_nvme_export_initiator(&self, id: i64, initiator: &str) -> Result<bool> {
+        let mut doc = self.config.lock().unwrap();
+        let e = doc
+            .nvme_export
+            .iter_mut()
+            .find(|e| e.id == id)
+            .with_context(|| format!("no NVMe export with id {id}"))?;
+        if e.initiators.iter().any(|i| i == initiator) {
+            return Ok(false);
+        }
+        e.initiators.push(initiator.to_owned());
+        self.persist(&doc)?;
+        Ok(true)
+    }
+
+    /// Appends `entry` to the export's client list. "Present" = same client
+    /// spec (any rw) → no-op, mirroring [`Db::add_nvme_export_initiator`].
+    pub fn add_nfs_export_client(&self, id: i64, entry: NfsClientEntry) -> Result<bool> {
+        let mut doc = self.config.lock().unwrap();
+        let e = doc
+            .nfs_export
+            .iter_mut()
+            .find(|e| e.id == id)
+            .with_context(|| format!("no NFS export with id {id}"))?;
+        if e.clients.iter().any(|c| c.client == entry.client) {
+            return Ok(false);
+        }
+        e.clients.push(entry);
+        self.persist(&doc)?;
+        Ok(true)
     }
 
     pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
@@ -954,6 +1038,105 @@ mod tests {
 
         db.delete_nfs_export(id).unwrap();
         assert_eq!(db.list_nfs_exports().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn client_tokens_and_acl_appends() {
+        let db = Db::in_memory().unwrap();
+
+        // Token CRUD: insert, duplicate name rejected, sorted list, delete.
+        let a = db
+            .insert_client_token("laptop", "aa".repeat(32).as_str(), 100)
+            .unwrap();
+        let b = db
+            .insert_client_token("cluster", "bb".repeat(32).as_str(), 200)
+            .unwrap();
+        assert!(db.insert_client_token("laptop", "cc", 300).is_err());
+        let tokens = db.list_client_tokens().unwrap();
+        assert_eq!(
+            tokens
+                .iter()
+                .map(|t| (t.id, t.name.as_str()))
+                .collect::<Vec<_>>(),
+            [(b, "cluster"), (a, "laptop")],
+            "sorted by name"
+        );
+        assert_eq!(tokens[1].token_hash, "aa".repeat(32));
+        assert_eq!(tokens[1].created_at, 100);
+        db.delete_client_token(a).unwrap();
+        assert_eq!(db.list_client_tokens().unwrap().len(), 1);
+        let c = db.insert_client_token("again", "dd", 400).unwrap();
+        assert_eq!(c, 3, "ids never reused");
+
+        // NVMe ACL append: idempotent, unknown id errors.
+        let id = db.insert_nvme_export(&new("vm1")).unwrap();
+        assert!(
+            db.add_nvme_export_initiator(id, "nqn.2014-08.org.nvmexpress:host2")
+                .unwrap()
+        );
+        assert!(
+            !db.add_nvme_export_initiator(id, "nqn.2014-08.org.nvmexpress:host2")
+                .unwrap()
+        );
+        assert!(db.add_nvme_export_initiator(999, "nqn.x").is_err());
+        let e = db
+            .list_nvme_exports()
+            .unwrap()
+            .into_iter()
+            .find(|e| e.id == id)
+            .unwrap();
+        assert_eq!(
+            e.initiators,
+            [
+                "nqn.2014-08.org.nvmexpress:host1",
+                "nqn.2014-08.org.nvmexpress:host2"
+            ]
+        );
+
+        // NFS client append: idempotent on the client spec regardless of rw.
+        let nid = db
+            .insert_nfs_export(&NewNfsExport {
+                path: "/tank/share".into(),
+                clients: vec![],
+            })
+            .unwrap();
+        let entry = |rw| NfsClientEntry {
+            client: "10.0.0.7".into(),
+            rw,
+        };
+        assert!(db.add_nfs_export_client(nid, entry(true)).unwrap());
+        assert!(!db.add_nfs_export_client(nid, entry(false)).unwrap());
+        assert!(db.add_nfs_export_client(999, entry(true)).is_err());
+        assert_eq!(db.list_nfs_exports().unwrap()[0].clients, [entry(true)]);
+    }
+
+    /// The daemon's `read_desired` must keep parsing a state TOML that now also
+    /// carries `[[client_token]]` tables (it ignores unknown keys).
+    #[test]
+    fn read_desired_ignores_client_tokens() {
+        let dir = std::env::temp_dir();
+        let tag = rand::random::<u32>();
+        let tasks_db = dir.join(format!("gd-tok-tasks{tag}.db"));
+        let state = dir.join(format!("gd-tok-state{tag}.toml"));
+
+        let db = Db::open(&tasks_db, &state).unwrap();
+        db.insert_nvme_export(&new("vm1")).unwrap();
+        db.insert_client_token("laptop", "aa", 100).unwrap();
+        let text = std::fs::read_to_string(&state).unwrap();
+        assert!(text.contains("[[client_token]]"), "{text}");
+
+        let desired = greendot_proto::desired::read_desired(&state).unwrap();
+        assert_eq!(desired.nvme_exports, db.list_nvme_exports().unwrap());
+
+        // And the tokens survive a reopen.
+        drop(db);
+        let db = Db::open(&tasks_db, &state).unwrap();
+        assert_eq!(db.list_client_tokens().unwrap()[0].name, "laptop");
+
+        for ext in ["db", "db-wal", "db-shm"] {
+            std::fs::remove_file(dir.join(format!("gd-tok-tasks{tag}.{ext}"))).ok();
+        }
+        std::fs::remove_file(&state).ok();
     }
 
     #[test]

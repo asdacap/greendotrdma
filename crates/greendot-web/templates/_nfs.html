@@ -19,7 +19,8 @@
         <td>
           <details class="clientinst">
           <summary>Mount instruction</summary>
-          <pre class="log">{{ r.mount_cmd }}</pre>
+          <pre class="log" id="nfs-cmd-{{ loop.index }}">{{ r.mount_cmd }}</pre>
+          <button type="button" class="secondary" data-copy="#nfs-cmd-{{ loop.index }}">Copy</button>
           <p class="muted small">Run as root on a client with an RDMA NIC. Not persistent — add an <code>_netdev,rdma,port=20049</code> entry to <code>/etc/fstab</code> to mount at boot.</p>
           </details>
           {% if !r.external %}

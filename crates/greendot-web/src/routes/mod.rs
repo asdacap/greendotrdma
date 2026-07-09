@@ -1,5 +1,7 @@
 pub mod block_export;
 pub mod charts;
+pub mod client_access;
+pub mod client_api;
 pub mod connections;
 pub mod disks;
 pub mod docs;
@@ -46,6 +48,12 @@ pub struct AppState {
     pub reconcile_lock: Arc<tokio::sync::Mutex<()>>,
     /// Live state of running tasks (for SSE streaming).
     pub tasks: crate::task_runner::TaskHub,
+    /// sha256 hex of the TLS leaf cert, embedded in client connection strings
+    /// for pinning. `None` when serving plain HTTP.
+    pub tls_fingerprint: Option<String>,
+    /// The configured listen address — the connection-string host fallback
+    /// when a create request carries no Host header.
+    pub listen: std::net::SocketAddr,
 }
 
 pub fn app(state: Arc<AppState>) -> Router {
@@ -64,12 +72,17 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(connections::router())
         .merge(tasks::router())
         .merge(docs::router())
+        .merge(client_access::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
         ));
     Router::new()
         .merge(protected)
+        // Token-authenticated JSON API for the greendot-client app — outside
+        // the cookie/CSRF middleware like /metrics; it carries its own bearer
+        // check.
+        .nest("/api/client/v1", client_api::router(Arc::clone(&state)))
         .route("/login", get(auth::login_page).post(auth::login_post))
         .route("/healthz", get(async || "ok"))
         // Deliberately unauthenticated, like /healthz: Prometheus scrapers
@@ -409,6 +422,8 @@ pub(crate) mod testutil {
             metrics: crate::metrics::Metrics::in_memory().unwrap(),
             reconcile_lock: Arc::new(tokio::sync::Mutex::new(())),
             tasks: crate::task_runner::TaskHub::default(),
+            tls_fingerprint: Some("aa".repeat(32)),
+            listen: "127.0.0.1:8443".parse().unwrap(),
         })
     }
 

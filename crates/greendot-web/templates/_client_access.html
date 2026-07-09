@@ -1,0 +1,55 @@
+<div id="client-access-content">
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if view.no_tls %}<p class="error">This server runs plain HTTP — connection strings carry no
+  certificate fingerprint, and clients must opt into an insecure connection.</p>{% endif %}
+
+  {% if let Some(t) = view.new_token %}
+  <article class="card">
+    <header>Token <strong>{{ t.name }}</strong> created</header>
+    <p class="muted small">Copy this connection string into the client now — it
+    <strong>will not be shown again</strong>.</p>
+    <pre class="log" id="conn-string">{{ t.connection_string }}</pre>
+    <button type="button" data-copy="#conn-string">Copy</button>
+  </article>
+  {% endif %}
+
+  {% if view.rows.is_empty() %}
+  <p class="empty">No client tokens yet — create one below.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Name</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr>
+        <td>{{ r.name }}</td>
+        <td>{{ r.created }}</td>
+        <td>
+          <form class="inline" hx-post="/client-access/revoke" hx-target="#client-access-content" hx-swap="outerHTML"
+                hx-confirm="Revoke token {{ r.name }}? Clients using it lose API access. Already-registered initiators and NFS clients keep their access — remove those on the export pages."
+                data-confirm-path="{{ r.name }}">
+            <input type="hidden" name="id" value="{{ r.id }}">
+            <button class="danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <button type="button" class="dialog-trigger" data-dialog-open>New client token</button>
+  <dialog>
+  <article>
+  <header>New client token</header>
+  <form class="card" hx-post="/client-access/create" hx-target="#client-access-content" hx-swap="outerHTML">
+    <label>Name (which machine or team is this for?)
+      <input name="name" placeholder="build-server" required maxlength="64">
+    </label>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Create token</button>
+    </footer>
+  </form>
+  </article>
+  </dialog>
+</div>
