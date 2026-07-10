@@ -1,3 +1,7 @@
+# Every class names its own pool: datasetParent is the ZFS dataset volumes are
+# created under (it must exist: `zfs create tank/csi`). One driver serves any
+# number of pools — a second class with a different datasetParent is all it
+# takes to split, say, a mirrored pool from a big stripe.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
@@ -7,6 +11,7 @@ reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: Immediate
 parameters:
+  datasetParent: "tank/csi"
   volblocksize: "16384"
   sparse: "true"
 ---
@@ -25,6 +30,7 @@ reclaimPolicy: Delete
 allowVolumeExpansion: true
 volumeBindingMode: Immediate
 parameters:
+  datasetParent: "tank/csi"
   zvolName: "${pvc.namespace}-${pvc.name}"
   volblocksize: "16384"
   sparse: "true"

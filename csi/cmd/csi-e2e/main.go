@@ -10,6 +10,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"strings"
 
 	"github.com/asdacap/greendotrdma/csi/pkg/driver"
 	"github.com/asdacap/greendotrdma/csi/pkg/helper"
@@ -85,11 +86,19 @@ func main() {
 		klog.Fatal(err)
 	}
 	cs, err := driver.NewControllerServer(driver.ControllerConfig{
-		DatasetParent: *dataset, TrAddr: *traddr,
+		TrAddr:  *traddr,
 		TrSvcID: uint32(*trsvcid), Transport: *transport,
 	}, client.Helper)
 	if err != nil {
 		klog.Fatal(err)
+	}
+
+	// The test script addresses volumes by bare leaf name; managed ids are
+	// dataset paths with ':' separators, so qualify with -dataset-parent
+	// (which in a real deployment is the StorageClass's datasetParent).
+	volID := *volume
+	if *volume != "" && !strings.Contains(*volume, ":") {
+		volID = strings.ReplaceAll(*dataset, "/", ":") + ":" + *volume
 	}
 
 	caps := []*csi.VolumeCapability{{
@@ -103,36 +112,38 @@ func main() {
 	case "create":
 		resp, err := cs.CreateVolume(ctx, &csi.CreateVolumeRequest{
 			Name:               *volume,
+			Parameters:         map[string]string{"datasetParent": *dataset},
 			CapacityRange:      &csi.CapacityRange{RequiredBytes: *size},
 			VolumeCapabilities: caps,
 		})
 		if err != nil {
 			klog.Fatal(err)
 		}
+		fmt.Printf("volumeId=%s\n", resp.Volume.VolumeId)
 		for _, k := range []string{"nqn", "deviceUUID", "targetTrAddr", "targetTrPort"} {
 			fmt.Printf("%s=%s\n", k, resp.Volume.VolumeContext[k])
 		}
 	case "publish":
 		if _, err := cs.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{
-			VolumeId: *volume, NodeId: *hostnqn, VolumeCapability: caps[0],
+			VolumeId: volID, NodeId: *hostnqn, VolumeCapability: caps[0],
 		}); err != nil {
 			klog.Fatal(err)
 		}
 	case "unpublish":
 		if _, err := cs.ControllerUnpublishVolume(ctx, &csi.ControllerUnpublishVolumeRequest{
-			VolumeId: *volume, NodeId: *hostnqn,
+			VolumeId: volID, NodeId: *hostnqn,
 		}); err != nil {
 			klog.Fatal(err)
 		}
 	case "expand":
 		if _, err := cs.ControllerExpandVolume(ctx, &csi.ControllerExpandVolumeRequest{
-			VolumeId:      *volume,
+			VolumeId:      volID,
 			CapacityRange: &csi.CapacityRange{RequiredBytes: *size},
 		}); err != nil {
 			klog.Fatal(err)
 		}
 	case "delete":
-		if _, err := cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: *volume}); err != nil {
+		if _, err := cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: volID}); err != nil {
 			klog.Fatal(err)
 		}
 	default:

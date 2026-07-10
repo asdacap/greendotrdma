@@ -138,8 +138,9 @@ func readTrim(path string) string {
 }
 
 // Volume ids become file names under the connector dir; anything else is a
-// path traversal attempt (upstream fabrics.go:355's unfixed todo).
-var volumeIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+// path traversal attempt (upstream fabrics.go:355's unfixed todo). ':' is the
+// managed ids' dataset-path separator — never a traversal character.
+var volumeIDRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._:-]*$`)
 
 func connectorPath(dir, volumeID string) (string, error) {
 	if !volumeIDRe.MatchString(volumeID) {

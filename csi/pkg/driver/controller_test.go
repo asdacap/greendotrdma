@@ -111,7 +111,7 @@ func (f *fakeHelper) SnapshotDestroy(ctx context.Context, in *helperpb.SnapshotD
 func testController(t *testing.T, f *fakeHelper) *ControllerServer {
 	t.Helper()
 	cs, err := NewControllerServer(ControllerConfig{
-		DatasetParent: "tank/csi", TrAddr: "10.0.0.5", Transport: "rdma",
+		TrAddr: "10.0.0.5", Transport: "rdma",
 	}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -143,21 +143,24 @@ func wantCode(t *testing.T, err error, code codes.Code) {
 
 // The CreateVolume decision table: fresh create, idempotent retry (zvol
 // exists, same size — export still re-applied), size conflict, clone from
-// snapshot, a failed export, a custom zvolName, and importing a preexisting
-// zvol (adopt, never create). Blank want* fields default to the pvc-1 case.
+// snapshot, a failed export, a custom zvolName, per-class pool selection, and
+// importing a preexisting zvol (adopt, never create). Unless omitParent is
+// set, the runner injects datasetParent=tank/csi; blank want* fields default
+// to the pvc-1-on-tank/csi case.
 func TestCreateVolumeDecisions(t *testing.T) {
 	imported := encodeImportID("tank/legacy/db")
 	cases := []struct {
 		name        string
 		params      map[string]string
+		omitParent  bool
 		zvol        *helperpb.ZvolInfoReply
 		source      *csi.VolumeContentSource
 		failOp      string
 		wantCode    codes.Code
 		wantCalls   []string
-		wantVolID   string // response VolumeId, default "pvc-1"
+		wantVolID   string // response VolumeId, default "tank:csi:pvc-1"
 		wantDataset string // backing dataset, default "tank/csi/pvc-1"
-		wantToken   string // nqn suffix, default "pvc-1"
+		wantToken   string // nqn suffix, default "tank:csi:pvc-1"
 		wantBytes   int64  // response CapacityBytes, default 10<<30
 	}{
 		{
@@ -182,7 +185,7 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			name: "from snapshot clones instead of creating",
 			zvol: &helperpb.ZvolInfoReply{Exists: false},
 			source: &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{
-				Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: "pvc-src@snap1"},
+				Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: "tank:csi:pvc-src@snap1"},
 			}},
 			wantCode:  codes.OK,
 			wantCalls: []string{"ZvolInfo", "ZfsClone", "CsiNvmeApply"},
@@ -200,9 +203,9 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			zvol:        &helperpb.ZvolInfoReply{Exists: false},
 			wantCode:    codes.OK,
 			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
-			wantVolID:   "myvol",
+			wantVolID:   "tank:csi:myvol",
 			wantDataset: "tank/csi/myvol",
-			wantToken:   "myvol",
+			wantToken:   "tank:csi:myvol",
 		},
 		{
 			name: "zvolName ${pvc.*} tokens expand from --extra-create-metadata params",
@@ -214,15 +217,31 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			zvol:        &helperpb.ZvolInfoReply{Exists: false},
 			wantCode:    codes.OK,
 			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
-			wantVolID:   "db-data",
+			wantVolID:   "tank:csi:db-data",
 			wantDataset: "tank/csi/db-data",
-			wantToken:   "db-data",
+			wantToken:   "tank:csi:db-data",
 		},
 		{
 			name:     "zvolName template without provisioner metadata is InvalidArgument",
 			params:   map[string]string{"zvolName": "${pvc.namespace}-${pvc.name}"},
 			zvol:     &helperpb.ZvolInfoReply{Exists: false},
 			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:        "datasetParent routes the volume to the class's pool",
+			params:      map[string]string{"datasetParent": "bulk/csi"},
+			zvol:        &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:    codes.OK,
+			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
+			wantVolID:   "bulk:csi:pvc-1",
+			wantDataset: "bulk/csi/pvc-1",
+			wantToken:   "bulk:csi:pvc-1",
+		},
+		{
+			name:       "missing datasetParent is InvalidArgument",
+			omitParent: true,
+			zvol:       &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:   codes.InvalidArgument,
 		},
 		{
 			name:        "importDataset adopts an existing zvol (no create), size adopted",
@@ -257,10 +276,19 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			if tc.failOp != "" {
 				f.fail[tc.failOp] = "boom"
 			}
+			params := tc.params
+			if !tc.omitParent {
+				if params == nil {
+					params = map[string]string{}
+				}
+				if _, ok := params["datasetParent"]; !ok {
+					params["datasetParent"] = "tank/csi"
+				}
+			}
 			cs := testController(t, f)
 			resp, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
 				Name:                "pvc-1",
-				Parameters:          tc.params,
+				Parameters:          params,
 				CapacityRange:       &csi.CapacityRange{RequiredBytes: 10 << 30},
 				VolumeCapabilities:  rwoCaps(),
 				VolumeContentSource: tc.source,
@@ -272,8 +300,8 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			if tc.wantCode != codes.OK {
 				return
 			}
-			wantVolID, wantDataset := orDefault(tc.wantVolID, "pvc-1"), orDefault(tc.wantDataset, "tank/csi/pvc-1")
-			wantToken, wantBytes := orDefault(tc.wantToken, "pvc-1"), tc.wantBytes
+			wantVolID, wantDataset := orDefault(tc.wantVolID, "tank:csi:pvc-1"), orDefault(tc.wantDataset, "tank/csi/pvc-1")
+			wantToken, wantBytes := orDefault(tc.wantToken, "tank:csi:pvc-1"), tc.wantBytes
 			if wantBytes == 0 {
 				wantBytes = 10 << 30
 			}
@@ -310,8 +338,9 @@ func orDefault(v, def string) string {
 	return v
 }
 
-// resolveVolumeID inverts CreateVolume's ids: bare names map under DatasetParent,
-// imp1- ids decode to an adopted path, and corrupt/empty ids error.
+// resolveVolumeID inverts CreateVolume's ids: managed ids are dataset paths
+// with ':' separators, imp1- ids decode to an adopted path, and corrupt/empty/
+// parentless ids error.
 func TestResolveVolumeID(t *testing.T) {
 	cs := testController(t, newFake())
 	imp := encodeImportID("tank/legacy/db")
@@ -322,11 +351,14 @@ func TestResolveVolumeID(t *testing.T) {
 		wantToken    string
 		wantImported bool
 	}{
-		{id: "pvc-abc", wantDataset: "tank/csi/pvc-abc", wantToken: "pvc-abc"},
+		{id: "tank:csi:pvc-abc", wantDataset: "tank/csi/pvc-abc", wantToken: "tank:csi:pvc-abc"},
 		{id: imp, wantDataset: "tank/legacy/db", wantToken: imp, wantImported: true},
 		{id: "", wantErr: true},
 		{id: "../etc", wantErr: true},
-		{id: "imp1-!!!", wantErr: true}, // undecodable suffix
+		{id: "pvc-abc", wantErr: true},   // no pool component
+		{id: "tank:", wantErr: true},     // empty component
+		{id: "tank:.hid", wantErr: true}, // leading-dot component
+		{id: "imp1-!!!", wantErr: true},  // undecodable suffix
 	}
 	for _, tc := range cases {
 		ref, err := cs.resolveVolumeID(tc.id)
@@ -369,16 +401,16 @@ func TestPublishUnpublishFencing(t *testing.T) {
 	cs := testController(t, f)
 
 	_, err := cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "pvc-1", NodeId: "worker-1", VolumeCapability: rwoCaps()[0],
+		VolumeId: "tank:csi:pvc-1", NodeId: "worker-1", VolumeCapability: rwoCaps()[0],
 	})
 	wantCode(t, err, codes.InvalidArgument) // not an NQN: fencing impossible
 
 	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "pvc-1", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
+		VolumeId: "tank:csi:pvc-1", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
 	})
 	wantCode(t, err, codes.OK)
 	grant := f.reqs["CsiHostGrant"].(*helperpb.CsiHostGrant)
-	if grant.Nqn != CSINQNPrefix+"pvc-1" || grant.Hostnqn != hostnqn {
+	if grant.Nqn != CSINQNPrefix+"tank:csi:pvc-1" || grant.Hostnqn != hostnqn {
 		t.Fatalf("bad grant: %+v", grant)
 	}
 
@@ -392,14 +424,14 @@ func TestPublishUnpublishFencing(t *testing.T) {
 		t.Fatalf("imported grant nqn = %q", grant.Nqn)
 	}
 
-	f.fail["CsiHostGrant"] = "subsystem nqn.2026-06.io.greendot.csi:pvc-9 does not exist"
+	f.fail["CsiHostGrant"] = "subsystem nqn.2026-06.io.greendot.csi:tank:csi:pvc-9 does not exist"
 	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "pvc-9", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
+		VolumeId: "tank:csi:pvc-9", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
 	})
 	wantCode(t, err, codes.NotFound)
 
 	_, err = cs.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{
-		VolumeId: "pvc-1", NodeId: hostnqn,
+		VolumeId: "tank:csi:pvc-1", NodeId: hostnqn,
 	})
 	wantCode(t, err, codes.OK)
 	revoke := f.reqs["CsiHostRevoke"].(*helperpb.CsiHostRevoke)
@@ -415,7 +447,7 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 		f := newFake()
 		f.fail["ZvolDelete"] = "cannot open 'tank/csi/pvc-1': dataset does not exist"
 		cs := testController(t, f)
-		_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "pvc-1"})
+		_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "tank:csi:pvc-1"})
 		wantCode(t, err, codes.OK)
 		if !slices.Equal(f.calls, []string{"CsiNvmeDelete", "ZvolDelete"}) {
 			t.Fatalf("calls = %v", f.calls)
@@ -425,7 +457,7 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 		f := newFake()
 		f.fail["ZvolDelete"] = "cannot destroy 'tank/csi/pvc-1': volume has children\nuse '-r' to destroy the following datasets:\ntank/csi/pvc-1@snap1"
 		cs := testController(t, f)
-		_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "pvc-1"})
+		_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "tank:csi:pvc-1"})
 		wantCode(t, err, codes.FailedPrecondition)
 	})
 	t.Run("expand: no-op when already big enough", func(t *testing.T) {
@@ -433,7 +465,7 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 		f.zvol = &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30}
 		cs := testController(t, f)
 		resp, err := cs.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
-			VolumeId:      "pvc-1",
+			VolumeId:      "tank:csi:pvc-1",
 			CapacityRange: &csi.CapacityRange{RequiredBytes: 10 << 30},
 		})
 		wantCode(t, err, codes.OK)
@@ -449,7 +481,7 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 		f.zvol = &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 10 << 30}
 		cs := testController(t, f)
 		_, err := cs.ControllerExpandVolume(context.Background(), &csi.ControllerExpandVolumeRequest{
-			VolumeId:      "pvc-1",
+			VolumeId:      "tank:csi:pvc-1",
 			CapacityRange: &csi.CapacityRange{RequiredBytes: 20 << 30},
 		})
 		wantCode(t, err, codes.OK)
@@ -466,28 +498,34 @@ func TestSnapshotLifecycle(t *testing.T) {
 	f := newFake()
 	cs := testController(t, f)
 	resp, err := cs.CreateSnapshot(context.Background(), &csi.CreateSnapshotRequest{
-		SourceVolumeId: "pvc-1", Name: "snapshot-abc",
+		SourceVolumeId: "tank:csi:pvc-1", Name: "snapshot-abc",
 	})
 	wantCode(t, err, codes.OK)
-	if resp.Snapshot.SnapshotId != "pvc-1@snapshot-abc" {
+	if resp.Snapshot.SnapshotId != "tank:csi:pvc-1@snapshot-abc" {
 		t.Fatalf("bad snapshot id %q", resp.Snapshot.SnapshotId)
 	}
 
 	f.fail["SnapshotCreate"] = "cannot create snapshot: dataset already exists"
 	_, err = cs.CreateSnapshot(context.Background(), &csi.CreateSnapshotRequest{
-		SourceVolumeId: "pvc-1", Name: "snapshot-abc",
+		SourceVolumeId: "tank:csi:pvc-1", Name: "snapshot-abc",
 	})
 	wantCode(t, err, codes.OK)
 
+	// Imported volumes are not snapshottable (documented v1 gap).
+	_, err = cs.CreateSnapshot(context.Background(), &csi.CreateSnapshotRequest{
+		SourceVolumeId: encodeImportID("tank/legacy/db"), Name: "snapshot-abc",
+	})
+	wantCode(t, err, codes.FailedPrecondition)
+
 	f.fail["SnapshotDestroy"] = "could not find any snapshots to destroy"
 	_, err = cs.DeleteSnapshot(context.Background(), &csi.DeleteSnapshotRequest{
-		SnapshotId: "pvc-1@snapshot-abc",
+		SnapshotId: "tank:csi:pvc-1@snapshot-abc",
 	})
 	wantCode(t, err, codes.OK)
 
 	f.fail["SnapshotDestroy"] = "snapshot has dependent clones"
 	_, err = cs.DeleteSnapshot(context.Background(), &csi.DeleteSnapshotRequest{
-		SnapshotId: "pvc-1@snapshot-abc",
+		SnapshotId: "tank:csi:pvc-1@snapshot-abc",
 	})
 	wantCode(t, err, codes.FailedPrecondition)
 
@@ -507,9 +545,10 @@ func TestSnapshotLifecycle(t *testing.T) {
 func TestNameValidationGatesEveryRPC(t *testing.T) {
 	f := newFake()
 	cs := testController(t, f)
+	parent := map[string]string{"datasetParent": "tank/csi"}
 	for _, bad := range []string{"", "../etc", "a/b", "a b", ".hidden", "imp1-!!!"} {
 		if _, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
-			Name: bad, VolumeCapabilities: rwoCaps(),
+			Name: bad, Parameters: parent, VolumeCapabilities: rwoCaps(),
 		}); status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("CreateVolume(%q) = %v, want InvalidArgument", bad, err)
 		}
@@ -532,17 +571,19 @@ func TestNameValidationGatesEveryRPC(t *testing.T) {
 	caps := rwoCaps()
 	caps[0].AccessMode.Mode = csi.VolumeCapability_AccessMode_MULTI_NODE_MULTI_WRITER
 	_, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
-		Name: "pvc-1", VolumeCapabilities: caps,
+		Name: "pvc-1", Parameters: parent, VolumeCapabilities: caps,
 	})
 	if status.Code(err) != codes.InvalidArgument || !strings.Contains(err.Error(), "single-node") {
 		t.Fatalf("RWX must be refused, got %v", err)
 	}
 
 	// The imp1- namespace is reserved for imported ids; a managed create may
-	// not claim it, whether via the CSI name or zvolName.
+	// not claim it — via the CSI name, zvolName, or a datasetParent whose
+	// pool component would make the whole id decode as imported.
 	for _, req := range []*csi.CreateVolumeRequest{
-		{Name: "imp1-abc", VolumeCapabilities: rwoCaps()},
-		{Name: "pvc-1", Parameters: map[string]string{"zvolName": "imp1-abc"}, VolumeCapabilities: rwoCaps()},
+		{Name: "imp1-abc", Parameters: parent, VolumeCapabilities: rwoCaps()},
+		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "tank/csi", "zvolName": "imp1-abc"}, VolumeCapabilities: rwoCaps()},
+		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "imp1-pool/csi"}, VolumeCapabilities: rwoCaps()},
 	} {
 		if _, err := cs.CreateVolume(context.Background(), req); status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("reserved imp1- name must be refused, got %v", err)

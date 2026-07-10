@@ -171,7 +171,8 @@ func (h *statefulHelper) CsiHostRevoke(ctx context.Context, in *helperpb.CsiHost
 func (h *statefulHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVolumeExpand, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	dataset := "tank/csi/" + strings.TrimPrefix(in.Nqn, driver.CSINQNPrefix)
+	// A managed NQN token is the dataset path with ':' separators.
+	dataset := strings.ReplaceAll(strings.TrimPrefix(in.Nqn, driver.CSINQNPrefix), ":", "/")
 	if _, ok := h.zvols[dataset]; !ok {
 		return taskResult("subsystem has no zvol-backed namespace")
 	}
@@ -183,7 +184,7 @@ func (h *statefulHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVo
 // refuses anything else — fencing needs a real identity).
 type nqnIDs struct{}
 
-func (nqnIDs) GenerateUniqueValidVolumeID() string { return "sanity-" + uuid.NewString() }
+func (nqnIDs) GenerateUniqueValidVolumeID() string { return "tank:csi:sanity-" + uuid.NewString() }
 func (nqnIDs) GenerateInvalidVolumeID() string     { return "../invalid" }
 func (nqnIDs) GenerateUniqueValidNodeID() string {
 	return "nqn.2014-08.org.nvmexpress:uuid:" + uuid.NewString()
@@ -193,7 +194,7 @@ func (nqnIDs) GenerateInvalidNodeID() string { return "not-an-nqn" }
 func TestSanity(t *testing.T) {
 	endpoint := "unix://" + filepath.Join(t.TempDir(), "csi.sock")
 	cs, err := driver.NewControllerServer(driver.ControllerConfig{
-		DatasetParent: "tank/csi", TrAddr: "10.0.0.5", Transport: "rdma",
+		TrAddr: "10.0.0.5", Transport: "rdma",
 	}, newStateful())
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +202,7 @@ func TestSanity(t *testing.T) {
 	// The node service is registered for NodeGetInfo/NodeGetCapabilities
 	// (several controller specs resolve the node id through it); its
 	// hardware-touching specs are under the 'Node Service' skip.
-	ns := node.NewNodeServer("nqn.2014-08.org.nvmexpress:uuid:"+uuid.NewString(), t.TempDir())
+	ns := node.NewNodeServer("nqn.2014-08.org.nvmexpress:uuid:"+uuid.NewString(), "", t.TempDir(), "")
 	go func() {
 		if err := driver.Serve(endpoint, &driver.IdentityServer{}, cs, ns); err != nil {
 			t.Errorf("serve: %v", err)
@@ -211,5 +212,8 @@ func TestSanity(t *testing.T) {
 	cfg := sanity.NewTestConfig()
 	cfg.Address = endpoint
 	cfg.IDGen = nqnIDs{}
+	// The pool is a StorageClass choice; sanity's CreateVolume calls carry it
+	// the same way a real class would.
+	cfg.TestVolumeParameters = map[string]string{"datasetParent": "tank/csi"}
 	sanity.Test(t, cfg)
 }

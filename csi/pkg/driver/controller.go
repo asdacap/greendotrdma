@@ -33,11 +33,10 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// ControllerConfig wires the controller to one greendot box.
+// ControllerConfig wires the controller to one greendot box. Where volumes
+// live is not part of it: every StorageClass names its own pool via the
+// datasetParent parameter, so one controller serves any number of pools.
 type ControllerConfig struct {
-	// DatasetParent is the ZFS dataset volumes are created under, e.g.
-	// tank/csi. It must already exist.
-	DatasetParent string
 	// TrAddr is the address initiators connect to (the box's RDMA/TCP IP).
 	TrAddr string
 	// TrSvcID is the CSI port's service id (default 4421 — deliberately not
@@ -89,8 +88,8 @@ type ControllerServer struct {
 }
 
 func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*ControllerServer, error) {
-	if cfg.DatasetParent == "" || cfg.TrAddr == "" {
-		return nil, fmt.Errorf("controller needs --dataset-parent and --traddr")
+	if cfg.TrAddr == "" {
+		return nil, fmt.Errorf("controller needs --traddr")
 	}
 	if cfg.Transport != "rdma" && cfg.Transport != "tcp" {
 		return nil, fmt.Errorf("transport must be rdma or tcp, got %q", cfg.Transport)
@@ -101,8 +100,25 @@ func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*Contro
 	return &ControllerServer{cfg: cfg, helper: h}, nil
 }
 
-func (cs *ControllerServer) dataset(volID string) string {
-	return cs.cfg.DatasetParent + "/" + volID
+// A managed volume id IS its dataset path with '/' replaced by ':' — readable,
+// bijective (':' cannot appear inside a path component), and valid both as an
+// NQN suffix and as a connector file name. The id must carry the full path
+// because the pool comes from the StorageClass, and CSI hands DeleteVolume
+// (and expand/publish/snapshot) only the id — never the class.
+func idFromDataset(dataset string) string {
+	return strings.ReplaceAll(dataset, "/", ":")
+}
+
+func datasetFromID(volID string) (string, error) {
+	// A zvol always lives below a pool, so a valid id has ≥2 components.
+	if !strings.Contains(volID, ":") {
+		return "", status.Errorf(codes.InvalidArgument, "invalid volume id %q", volID)
+	}
+	dataset := strings.ReplaceAll(volID, ":", "/")
+	if err := validDatasetPath(dataset); err != nil {
+		return "", err
+	}
+	return dataset, nil
 }
 
 func (cs *ControllerServer) nqn(volID string) string {
@@ -152,11 +168,11 @@ func (cs *ControllerServer) nqnOf(ref *volumeRef) string {
 	return CSINQNPrefix + ref.nqnToken
 }
 
-// resolveVolumeID inverts the ids CreateVolume hands out: a bare name (every
-// existing pvc-<uuid>) is a driver-managed zvol under DatasetParent; an
-// imp1-<base32hex> id decodes to an adopted zvol at an arbitrary path. The
-// prefix is matched before the managed grammar, so a corrupt imported id can
-// never be misread as managed.
+// resolveVolumeID inverts the ids CreateVolume hands out: a managed id is its
+// dataset path with ':' separators (created under the StorageClass's
+// datasetParent); an imp1-<base32hex> id decodes to an adopted zvol at an
+// arbitrary path. The prefix is matched before the managed grammar, so a
+// corrupt imported id can never be misread as managed.
 func (cs *ControllerServer) resolveVolumeID(volID string) (*volumeRef, error) {
 	if volID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume id is required")
@@ -172,10 +188,11 @@ func (cs *ControllerServer) resolveVolumeID(volID string) (*volumeRef, error) {
 		}
 		return &volumeRef{dataset: dataset, nqnToken: volID, imported: true}, nil
 	}
-	if err := checkVolumeName(volID); err != nil {
+	dataset, err := datasetFromID(volID)
+	if err != nil {
 		return nil, err
 	}
-	return &volumeRef{dataset: cs.dataset(volID), nqnToken: volID, imported: false}, nil
+	return &volumeRef{dataset: dataset, nqnToken: volID, imported: false}, nil
 }
 
 // validDatasetPath is the multi-component twin of volumeNameRe: every
@@ -238,12 +255,26 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if strings.HasPrefix(name, importedPrefix) {
 		return nil, status.Errorf(codes.InvalidArgument, "volume name may not start with %q", importedPrefix)
 	}
+	// The pool is the StorageClass's choice, not the driver's.
+	parent := req.GetParameters()["datasetParent"]
+	if parent == "" {
+		return nil, status.Error(codes.InvalidArgument,
+			"StorageClass parameter datasetParent is required (the ZFS dataset volumes live under, e.g. tank/csi)")
+	}
+	if err := validDatasetPath(parent); err != nil {
+		return nil, err
+	}
 	capacity := req.GetCapacityRange().GetRequiredBytes()
 	if capacity == 0 {
 		capacity = 1 << 30
 	}
-	dataset := cs.dataset(name)
-	nqn := cs.nqn(name)
+	dataset := parent + "/" + name
+	volID := idFromDataset(dataset)
+	if strings.HasPrefix(volID, importedPrefix) {
+		// A pool component named imp1-* would make the id decode as imported.
+		return nil, status.Errorf(codes.InvalidArgument, "datasetParent may not start with %q", importedPrefix)
+	}
+	nqn := cs.nqn(volID)
 
 	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: dataset})
 	if err != nil {
@@ -254,7 +285,7 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		// The name exists with a different size: a genuinely different
 		// request, per CSI's idempotency contract.
 		return nil, status.Errorf(codes.AlreadyExists,
-			"volume %s exists with size %d (requested %d)", name, info.SizeBytes, capacity)
+			"volume %s exists with size %d (requested %d)", dataset, info.SizeBytes, capacity)
 	case info.Exists:
 		// Retry after a partial create: the zvol is there; fall through to
 		// re-apply the export (heals a failed CsiNvmeApply).
@@ -302,7 +333,7 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, err
 	}
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
-		VolumeId:      name,
+		VolumeId:      volID,
 		CapacityBytes: capacity,
 		ContentSource: req.GetVolumeContentSource(),
 		VolumeContext: cs.volumeContext(nqn),
@@ -512,25 +543,34 @@ func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	}, nil
 }
 
-// Snapshot ids are "<volume_id>@<snap>", directly the zfs name.
+// Snapshot ids are "<volume_id>@<snap>" — with the id's ':' separators turned
+// back into '/', directly the zfs name.
 func (cs *ControllerServer) parseSnapshotID(id string) (dataset, snap string, err error) {
 	vol, snap, ok := strings.Cut(id, "@")
-	if !ok || checkVolumeName(vol) != nil || checkVolumeName(snap) != nil {
+	if !ok || checkVolumeName(snap) != nil {
 		return "", "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
 	}
-	return cs.dataset(vol), snap, nil
+	dataset, err = datasetFromID(vol)
+	if err != nil {
+		return "", "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
+	}
+	return dataset, snap, nil
 }
 
 func (cs *ControllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
 	vol, name := req.GetSourceVolumeId(), req.GetName()
-	if err := checkVolumeName(vol); err != nil {
+	ref, err := cs.resolveVolumeID(vol)
+	if err != nil {
 		return nil, err
+	}
+	if ref.imported {
+		return nil, status.Error(codes.FailedPrecondition, "imported volumes are not snapshottable")
 	}
 	if err := checkVolumeName(name); err != nil {
 		return nil, err
 	}
 	stream, err := cs.helper.SnapshotCreate(ctx, &helperpb.SnapshotCreate{
-		Dataset: cs.dataset(vol), Snap: name,
+		Dataset: ref.dataset, Snap: name,
 	})
 	res, err := helper.RunTask("SnapshotCreate", stream, err)
 	if err != nil {

@@ -33,7 +33,6 @@ func main() {
 		sshKey     = flag.String("ssh-key", "", "SSH private key path")
 		sshKnown   = flag.String("ssh-known-hosts", "", "pinned known_hosts path (required; never auto-accepted)")
 		sshCommand = flag.String("ssh-command", "", "remote pipe command (default: the packaged greendotctl pipe)")
-		dataset    = flag.String("dataset-parent", "", "ZFS dataset volumes live under, e.g. tank/csi")
 		traddr     = flag.String("traddr", "", "target address initiators connect to")
 		trsvcid    = flag.Uint("trsvcid", 4421, "CSI nvmet port service id")
 		transport  = flag.String("transport", "rdma", "rdma or tcp")
@@ -66,10 +65,9 @@ func main() {
 			klog.Fatal(err)
 		}
 		cs, err := driver.NewControllerServer(driver.ControllerConfig{
-			DatasetParent: *dataset,
-			TrAddr:        *traddr,
-			TrSvcID:       uint32(*trsvcid),
-			Transport:     *transport,
+			TrAddr:    *traddr,
+			TrSvcID:   uint32(*trsvcid),
+			Transport: *transport,
 		}, client.Helper)
 		if err != nil {
 			klog.Fatal(err)

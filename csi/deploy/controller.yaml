@@ -60,15 +60,12 @@ spec:
             - --ssh-user=greendot-csi
             - --ssh-key=/etc/greendot-csi/ssh/id_ed25519
             - --ssh-known-hosts=/etc/greendot-csi/known_hosts/known_hosts
-            - --dataset-parent=$(GREENDOT_DATASET_PARENT)
             - --traddr=$(GREENDOT_TRADDR)
             - --trsvcid=4421
             - --transport=rdma
           env:
             - name: GREENDOT_SSH_ADDR
               value: "192.168.101.62:22" # the greendot box
-            - name: GREENDOT_DATASET_PARENT
-              value: "tank/csi" # must exist: zfs create tank/csi
             - name: GREENDOT_TRADDR
               value: "192.168.101.62" # the RDMA/TCP data address
           volumeMounts:

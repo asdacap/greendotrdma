@@ -38,11 +38,13 @@ error, and the connector path is traversal-guarded. The controller is original
 
 ## Deploy
 
-1. On the box: `zfs create tank/csi`, then paste the controller's **public** key
-   into greendot-web's **SSH access** page (`/ssh-access`). The daemon writes
-   the `command="…greendotctl pipe",restrict` options itself — the web never
-   supplies them — and the page renders the box's `known_hosts` block for the
-   next step, so there is no `ssh-keyscan` TOFU.
+1. On the box: `zfs create tank/csi` (each StorageClass names its pool via the
+   `datasetParent` parameter — create one dataset per class), then paste the
+   controller's **public** key into greendot-web's **SSH access** page
+   (`/ssh-access`). The daemon writes the `command="…greendotctl pipe",restrict`
+   options itself — the web never supplies them — and the page renders the
+   box's `known_hosts` block for the next step, so there is no `ssh-keyscan`
+   TOFU.
 2. In the cluster:
    ```sh
    kubectl -n kube-system create secret generic greendot-csi-ssh --from-file=id_ed25519=…
