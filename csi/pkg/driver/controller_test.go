@@ -205,6 +205,26 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			wantToken:   "myvol",
 		},
 		{
+			name: "zvolName ${pvc.*} tokens expand from --extra-create-metadata params",
+			params: map[string]string{
+				"zvolName":                         "${pvc.namespace}-${pvc.name}",
+				"csi.storage.k8s.io/pvc/namespace": "db",
+				"csi.storage.k8s.io/pvc/name":      "data",
+			},
+			zvol:        &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:    codes.OK,
+			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
+			wantVolID:   "db-data",
+			wantDataset: "tank/csi/db-data",
+			wantToken:   "db-data",
+		},
+		{
+			name:     "zvolName template without provisioner metadata is InvalidArgument",
+			params:   map[string]string{"zvolName": "${pvc.namespace}-${pvc.name}"},
+			zvol:     &helperpb.ZvolInfoReply{Exists: false},
+			wantCode: codes.InvalidArgument,
+		},
+		{
 			name:        "importDataset adopts an existing zvol (no create), size adopted",
 			params:      map[string]string{"importDataset": "tank/legacy/db"},
 			zvol:        &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30},

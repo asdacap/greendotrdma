@@ -13,8 +13,9 @@ parameters:
 # Custom zvol name: pick the backing zvol's leaf under the driver's
 # --dataset-parent instead of the default pvc-<uuid>. Template it per PVC so
 # names stay unique — a *literal* zvolName shared across PVCs would make two
-# PVs silently share one zvol. (The ${...} substitution is done by the
-# external-provisioner and needs no extra sidecar flag.)
+# PVs silently share one zvol. (The ${...} tokens are expanded by the driver
+# from the PVC/PV metadata the external-provisioner passes; the provisioner
+# must run with --extra-create-metadata, as deploy/controller.yaml does.)
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:

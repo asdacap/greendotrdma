@@ -55,6 +55,31 @@ var uuidNamespace = uuid.NewSHA1(uuid.NameSpaceURL, []byte("greendotrdma-csi"))
 // names; this is the client-side twin of the daemon's newtype validators.
 var volumeNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
+// zvolName template variables. The external-provisioner does not expand
+// arbitrary StorageClass parameters, so ${...} tokens are resolved here from
+// the PVC/PV metadata it passes when run with --extra-create-metadata.
+var zvolNameVars = map[string]string{
+	"${pvc.namespace}": "csi.storage.k8s.io/pvc/namespace",
+	"${pvc.name}":      "csi.storage.k8s.io/pvc/name",
+	"${pv.name}":       "csi.storage.k8s.io/pv/name",
+}
+
+func expandZvolName(tmpl string, params map[string]string) (string, error) {
+	name := tmpl
+	for token, key := range zvolNameVars {
+		if !strings.Contains(name, token) {
+			continue
+		}
+		v := params[key]
+		if v == "" {
+			return "", status.Errorf(codes.InvalidArgument,
+				"zvolName %q references %s but %s was not passed — run csi-provisioner with --extra-create-metadata", tmpl, token, key)
+		}
+		name = strings.ReplaceAll(name, token, v)
+	}
+	return name, nil
+}
+
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
 	cfg ControllerConfig
@@ -201,7 +226,11 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	// pvc-<uuid>. The imp1- namespace is reserved for imported ids.
 	name := req.GetName()
 	if v := req.GetParameters()["zvolName"]; v != "" {
-		name = v
+		expanded, err := expandZvolName(v, req.GetParameters())
+		if err != nil {
+			return nil, err
+		}
+		name = expanded
 	}
 	if err := checkVolumeName(name); err != nil {
 		return nil, err
