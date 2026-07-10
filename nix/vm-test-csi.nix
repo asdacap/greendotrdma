@@ -22,8 +22,11 @@ pkgs.testers.runNixOSTest {
   nodes.target = { config, lib, ... }: {
     imports = [ (common.mkGreendotNode { inherit greendot; }) ];
     services.openssh.enable = true;
-    # The CSI controller's login: forced command + group greendot, exactly the
-    # shape the deb's sysusers/postinst set up.
+    # The CSI controller's login exactly as the deb's sysusers/tmpfiles leave
+    # it: the user, its group membership, an empty home — and *no* authorized
+    # key. The test installs the key through greendot-web's SSH access page,
+    # so what sshd ends up parsing is the forced command the daemon
+    # synthesized, not one this file wrote.
     users.groups.greendot-csi = { };
     users.users.greendot-csi = {
       isSystemUser = true;
@@ -32,10 +35,16 @@ pkgs.testers.runNixOSTest {
       home = "/var/lib/greendotrdma/csi";
       createHome = true;
       useDefaultShell = true; # sshd runs the forced command via the shell
-      openssh.authorizedKeys.keys = [
-        ''command="${greendot}/bin/greendotctl pipe",restrict ${snakeOil.snakeOilPublicKey}''
-      ];
     };
+    # Exactly what pkg/tmpfiles.conf gives the deb, and for the same reason:
+    # sshd refuses an authorized_keys whose home directory belongs to another
+    # user. The parent is listed too — without it greendot-web's
+    # `StateDirectory=` adopts /var/lib/greendotrdma and chowns the tree,
+    # taking the CSI home with it.
+    systemd.tmpfiles.rules = [
+      "d /var/lib/greendotrdma 0750 greendot greendot -"
+      "d /var/lib/greendotrdma/csi 0750 greendot-csi greendot-csi -"
+    ];
   };
 
   nodes.client = { config, lib, ... }: {
@@ -84,6 +93,47 @@ pkgs.testers.runNixOSTest {
     target.succeed("truncate -s 1G /var/tmp/pool.img")
     target.succeed("zpool create tank /var/tmp/pool.img")
     target.succeed("zfs create tank/csi")
+
+    # --- authorize the controller's key through the web UI ---
+    # This is the whole trust path under test: an admin pastes a public key,
+    # greendot-web hands it to the daemon, and the daemon — not the web —
+    # writes the command="…greendotctl pipe",restrict line that sshd enforces.
+    target.succeed(
+        "curl -s -o /dev/null -w '%{http_code}' -c /tmp/jar.txt "
+        "--data 'username=gdadmin&password=test' http://127.0.0.1:8080/login"
+    )
+    dash = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/")
+    csrf = dash.split('X-Greendot-Csrf":"')[1].split('"')[0]
+    # snakeOilPublicKey is a literal string, not a store path: materialize it so
+    # curl can form-encode the file and ssh-keygen can fingerprint it.
+    target.succeed("printf '%s\\n' '${snakeOil.snakeOilPublicKey}' > /tmp/csi-key.pub")
+    add = target.succeed(
+        "curl -sf -b /tmp/jar.txt -H 'X-Greendot-Csrf: " + csrf + "' "
+        "--data-urlencode public_key@/tmp/csi-key.pub "
+        "--data 'label=vm-test' "
+        "http://127.0.0.1:8080/ssh-access/add"
+    )
+    assert "view task" in add, f"the add must dispatch a task: {add}"
+    # The task is dispatched asynchronously; wait for the file the daemon writes.
+    authk = "/var/lib/greendotrdma/csi/.ssh/authorized_keys"
+    target.wait_until_succeeds(f"test -s {authk}", timeout=30)
+    line = target.succeed(f"cat {authk}").strip()
+    print(f"authorized_keys={line}")
+    # The daemon writes its own resolved executable, whatever the store path is.
+    assert line.startswith('command="/nix/store/'), f"no forced command: {line}"
+    assert '/bin/greendotctl pipe",restrict ' in line, f"no forced command: {line}"
+    # The pasted key was re-serialized with the label as its comment.
+    assert line.endswith(" vm-test"), f"label not applied: {line}"
+    assert target.succeed(f"stat -c '%a %U' {authk}").strip() == "600 greendot-csi"
+    assert target.succeed("stat -c '%a %U' /var/lib/greendotrdma/csi/.ssh").strip() == "700 greendot-csi"
+    # The page now lists it, restricted to the pipe.
+    page = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/ssh-access")
+    assert "vm-test" in page, "the key is listed under its label"
+    assert "Full shell" not in page, "a key we wrote is never flagged as a shell"
+    # Every criterion green — including sshd's StrictModes on the home dir,
+    # which is what silently refuses a key when the packaging gets it wrong.
+    diag = target.succeed("curl -s -b /tmp/jar.txt http://127.0.0.1:8080/ssh-access/diagnose")
+    assert "dot-red" not in diag, f"the trust path must diagnose clean:\n{diag}"
 
     # --- the controller's credentials on the client ---
     client.succeed("install -m 600 ${snakeOil.snakeOilPrivateKey} /root/csi-key")
@@ -148,5 +198,16 @@ pkgs.testers.runNixOSTest {
 
     # Idempotent re-delete over the same channel.
     client.succeed(f"{e2e} -action delete -volume pvc-1")
+
+    # --- revoke: the controller loses the box at once ---
+    # The fingerprint carries `+` and `/`, so it must be form-encoded, not
+    # pasted into a query string.
+    target.succeed(
+        "curl -sf -b /tmp/jar.txt -H 'X-Greendot-Csrf: " + csrf + "' "
+        "--data-urlencode \"fingerprint=$(ssh-keygen -lf /tmp/csi-key.pub | awk '{print $2}')\" "
+        "http://127.0.0.1:8080/ssh-access/revoke > /dev/null"
+    )
+    target.wait_until_succeeds(f"test ! -s {authk}", timeout=30)
+    client.fail(f"{e2e} -action delete -volume pvc-1")
   '';
 }

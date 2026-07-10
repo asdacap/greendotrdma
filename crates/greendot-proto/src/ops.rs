@@ -17,7 +17,7 @@ use crate::pb;
 use crate::{
     BlockDev, ConvertError, CsiNqn, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
     MountPoint, NetdevName, Nqn, NsUuid, PackageName, PartLabel, PoolName, Secret, SnapName,
-    Transport, Username, VdevLayout, VdevTarget, VgName,
+    SshFingerprint, Transport, Username, ValidationError, VdevLayout, VdevTarget, VgName,
 };
 use std::net::IpAddr;
 
@@ -1162,8 +1162,158 @@ impl From<CsiVolumeExpand> for pb::CsiVolumeExpand {
     }
 }
 
+// ---- SSH pipe keys ----
+
+/// The longest paste accepted before parsing. An RSA-4096 public key line is
+/// under 800 bytes; the ceiling exists so a hostile paste cannot make the
+/// parser chew megabytes.
+const MAX_PUBLIC_KEY_LEN: usize = 16 * 1024;
+/// Comment (label) ceiling — it is echoed back on the page and written to
+/// `authorized_keys`.
+const MAX_COMMENT_LEN: usize = 200;
+
+/// An OpenSSH public key, parsed and re-serialized into its canonical
+/// one-line form. Constructing this is the ingress choke point for
+/// [`PipeKeyAdd`]: nothing the admin pasted reaches `authorized_keys`
+/// verbatim, so a newline, a quote, a CRLF, a NUL, or an options prefix
+/// cannot smuggle a second entry — or a shell — into the file.
+///
+/// The daemon, never the caller, prepends the `command="…",restrict` options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshPublicKeyLine {
+    canonical: String,
+    algorithm: String,
+    comment: String,
+    fingerprint: SshFingerprint,
+}
+
+impl SshPublicKeyLine {
+    pub fn new(input: impl Into<String>) -> Result<Self, ValidationError> {
+        let input = input.into();
+        // The raw paste is never echoed back: a rejected value may be a
+        // private key someone pasted into the wrong box.
+        let invalid = || ValidationError {
+            what: "SSH public key",
+            value: String::new(),
+        };
+        if input.len() > MAX_PUBLIC_KEY_LEN {
+            return Err(invalid());
+        }
+        // Surrounding whitespace is what a copy-paste carries; a line break
+        // *inside* the key is an attempt at a second authorized_keys entry.
+        let input = input.trim();
+        if input.contains(['\n', '\r', '\0']) {
+            return Err(invalid());
+        }
+        let mut key = ssh_key::PublicKey::from_openssh(input).map_err(|_| invalid())?;
+        // The comment is the only attacker-controlled text that survives into
+        // the file; keep it to printable ASCII, and drop the characters that
+        // delimit an authorized_keys options field.
+        let comment: String = key
+            .comment()
+            .chars()
+            .filter(|c| (c.is_ascii_graphic() || *c == ' ') && !"\"\\".contains(*c))
+            .take(MAX_COMMENT_LEN)
+            .collect();
+        key.set_comment(comment.trim());
+        let canonical = key.to_openssh().map_err(|_| invalid())?;
+        if canonical.contains(['\n', '\r', '\0']) {
+            return Err(invalid());
+        }
+        let fingerprint =
+            SshFingerprint::new(key.fingerprint(ssh_key::HashAlg::Sha256).to_string())
+                .map_err(|_| invalid())?;
+        Ok(Self {
+            canonical,
+            algorithm: key.algorithm().as_str().to_owned(),
+            comment: key.comment().to_owned(),
+            fingerprint,
+        })
+    }
+
+    /// The `<algorithm> <base64> [comment]` line, safe to write verbatim.
+    pub fn canonical(&self) -> &str {
+        &self.canonical
+    }
+
+    /// Just `<algorithm> <base64>` — a `known_hosts` entry carries no comment.
+    pub fn key_only(&self) -> &str {
+        let mut spaces = self.canonical.match_indices(' ').map(|(i, _)| i);
+        match (spaces.next(), spaces.next()) {
+            (Some(_), Some(second)) => &self.canonical[..second],
+            _ => &self.canonical,
+        }
+    }
+
+    pub fn algorithm(&self) -> &str {
+        &self.algorithm
+    }
+
+    /// The sanitized comment — the key's human label.
+    pub fn comment(&self) -> &str {
+        &self.comment
+    }
+
+    pub fn fingerprint(&self) -> &SshFingerprint {
+        &self.fingerprint
+    }
+}
+
+/// Authorize a public key to open a `greendotctl pipe` session as the
+/// packaged SSH user. The request carries only the key: the daemon
+/// synthesizes the forced command, so a compromised web cannot widen the
+/// grant to a shell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeKeyAdd {
+    pub public_key: SshPublicKeyLine,
+}
+
+impl TryFrom<pb::PipeKeyAdd> for PipeKeyAdd {
+    type Error = ConvertError;
+    fn try_from(a: pb::PipeKeyAdd) -> Result<Self, ConvertError> {
+        Ok(PipeKeyAdd {
+            public_key: SshPublicKeyLine::new(a.public_key)?,
+        })
+    }
+}
+impl From<PipeKeyAdd> for pb::PipeKeyAdd {
+    fn from(a: PipeKeyAdd) -> Self {
+        pb::PipeKeyAdd {
+            public_key: a.public_key.canonical,
+        }
+    }
+}
+
+/// Revoke a key by fingerprint — the stable id, so a line this UI never wrote
+/// can still be removed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeKeyRevoke {
+    pub fingerprint: SshFingerprint,
+}
+
+impl TryFrom<pb::PipeKeyRevoke> for PipeKeyRevoke {
+    type Error = ConvertError;
+    fn try_from(r: pb::PipeKeyRevoke) -> Result<Self, ConvertError> {
+        Ok(PipeKeyRevoke {
+            fingerprint: SshFingerprint::new(r.fingerprint)?,
+        })
+    }
+}
+impl From<PipeKeyRevoke> for pb::PipeKeyRevoke {
+    fn from(r: PipeKeyRevoke) -> Self {
+        pb::PipeKeyRevoke {
+            fingerprint: r.fingerprint.as_str().to_owned(),
+        }
+    }
+}
+
 // ---- Fieldless ops ----
 
+unit_op!(
+    /// Every fact the SSH-access page and its diagnostic need: the packaged
+    /// user, its `.ssh` permissions, the authorized keys, and the box's own
+    /// host keys. Typed reply.
+    PipeAccessReport, pb::Empty);
 unit_op!(
     /// The full desired-state reconcile pass, one subtask per area. Carries
     /// nothing: the daemon reconciles against its own `--config`, so the peer
@@ -1394,6 +1544,77 @@ mod tests {
             nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap(),
             new_size: 30 << 30,
         } => pb::CsiVolumeExpand);
+        roundtrip!(PipeKeyAdd {
+            public_key: SshPublicKeyLine::new(ED25519_KEY).unwrap(),
+        } => pb::PipeKeyAdd);
+        roundtrip!(PipeKeyRevoke {
+            fingerprint: SshFingerprint::new(ED25519_FP).unwrap(),
+        } => pb::PipeKeyRevoke);
+    }
+
+    const ED25519_KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 admin@laptop";
+    const ED25519_FP: &str = "SHA256:NEU/y0JmR4RY7ck8XRGElQSKmEzy2SirhXgqbFWxZ00";
+
+    /// A pasted key is parsed, fingerprinted, and re-serialized canonically —
+    /// what lands in `authorized_keys` is our bytes, never the admin's.
+    #[test]
+    fn public_key_is_canonicalized_and_fingerprinted() {
+        let key = SshPublicKeyLine::new(format!("  {ED25519_KEY}  \n")).unwrap();
+        assert_eq!(key.canonical(), ED25519_KEY);
+        assert_eq!(key.fingerprint().as_str(), ED25519_FP);
+        assert_eq!(key.algorithm(), "ssh-ed25519");
+        // The comment is the only free text that survives; quotes and
+        // backslashes — the authorized_keys options delimiters — are dropped.
+        let base = ED25519_KEY.rsplit_once(' ').unwrap().0;
+        let key = SshPublicKeyLine::new(format!(r#"{base} we"ird\ label"#)).unwrap();
+        assert_eq!(key.canonical(), format!("{base} weird label"));
+    }
+
+    /// Every way a paste could smuggle a second `authorized_keys` line — or a
+    /// shell — past the daemon. All must fail before the key is ever written.
+    #[rstest::rstest]
+    #[case::empty("")]
+    #[case::not_a_key("hello")]
+    #[case::newline_second_line(concat!(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 a\n",
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 b"))]
+    #[case::crlf(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26\r\nx"
+    )]
+    #[case::nul(
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26\0"
+    )]
+    // An options prefix is not an algorithm id: options can only come from the daemon.
+    #[case::options_prefix(concat!(
+        r#"command="/bin/sh" "#,
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26"))]
+    // The algorithm id must match the algorithm inside the base64 blob.
+    #[case::algorithm_mismatch(
+        "ssh-rsa AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26"
+    )]
+    #[case::not_base64("ssh-ed25519 not-base64 admin@laptop")]
+    #[case::private_key("-----BEGIN OPENSSH PRIVATE KEY-----")]
+    fn hostile_pastes_are_rejected(#[case] paste: &str) {
+        assert!(SshPublicKeyLine::new(paste).is_err());
+        assert!(
+            PipeKeyAdd::try_from(pb::PipeKeyAdd {
+                public_key: paste.into()
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn oversized_paste_is_rejected_before_parsing() {
+        assert!(SshPublicKeyLine::new("A".repeat(MAX_PUBLIC_KEY_LEN + 1)).is_err());
+    }
+
+    /// A rejected paste may be a private key someone put in the wrong box; the
+    /// error must not carry it.
+    #[test]
+    fn rejection_does_not_echo_the_paste() {
+        let err = SshPublicKeyLine::new("super-secret").unwrap_err();
+        assert_eq!(err.value, "");
     }
 
     /// Ingress `TryFrom` rejects invalid payloads built directly on the wire

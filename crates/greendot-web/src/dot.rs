@@ -637,6 +637,90 @@ pub fn nic_diagnostics(nic: &NicStatus, advice: Option<&NicAdvice>) -> Vec<Crite
     crits
 }
 
+/// Ordered checklist for the SSH pipe trust path, following one login from the
+/// outside in: sshd must find the user and a private `.ssh`, the forced
+/// command must exist to be run, and the helper socket must then admit the
+/// user's group — a key that logs in and is hung up on at the socket is the
+/// confusing failure this exists to name. The last two rows are about what is
+/// *in* the file: a line without the forced command is a shell, not a pipe.
+pub fn pipe_access_criteria(r: &greendot_proto::pb::PipeAccessReportReply) -> Vec<Criterion> {
+    let shells: Vec<&str> = r
+        .keys
+        .iter()
+        .filter(|k| !k.forced_command_ok)
+        .map(|k| k.fingerprint.as_str())
+        .collect();
+    vec![
+        crit(
+            &format!("The {} user exists", r.user),
+            r.user_exists,
+            match r.user_exists {
+                true => format!("{} is a system user", r.user),
+                false => format!("no such user — reinstall the package to create {}", r.user),
+            },
+        ),
+        crit(
+            &format!("{} is in the {} group", r.user, r.socket_group),
+            r.in_socket_group,
+            match r.in_socket_group {
+                true => format!("the helper socket admits {}", r.socket_group),
+                false => format!(
+                    "sshd would run the forced command, then the helper socket would reject it — \
+                     add {} to {}",
+                    r.user, r.socket_group
+                ),
+            },
+        ),
+        // sshd walks the home dir, then .ssh, then the file, and refuses the
+        // key — silently, from the client's point of view — if any one of them
+        // is owned by the wrong user or writable by its group.
+        crit(
+            "Its home directory passes sshd's checks",
+            r.home_ok,
+            r.home_detail.clone(),
+        ),
+        crit(
+            "~/.ssh passes sshd's checks",
+            r.ssh_dir_ok,
+            r.ssh_dir_detail.clone(),
+        ),
+        crit(
+            "authorized_keys passes sshd's checks",
+            r.authorized_keys_ok,
+            r.authorized_keys_detail.clone(),
+        ),
+        crit(
+            "The forced command exists",
+            r.forced_command_bin_ok,
+            match r.forced_command_bin_ok {
+                true => r.forced_command.clone(),
+                false => format!("{} is not an executable file", r.forced_command),
+            },
+        ),
+        crit(
+            "Every authorized key is restricted to the pipe",
+            shells.is_empty(),
+            match shells.as_slice() {
+                [] if r.keys.is_empty() => "no keys authorized yet".to_owned(),
+                [] => format!("all {} keys carry the forced command", r.keys.len()),
+                fps => format!(
+                    "these keys get a full shell, not the pipe: {}",
+                    fps.join(", ")
+                ),
+            },
+        ),
+        crit(
+            "Every line in authorized_keys is readable",
+            r.unparsable_lines == 0,
+            match r.unparsable_lines {
+                0 => "no unrecognized lines".to_owned(),
+                // We preserve what we cannot parse — and cannot vouch for it.
+                n => format!("{n} line(s) could not be parsed; their options are unverified"),
+            },
+        ),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

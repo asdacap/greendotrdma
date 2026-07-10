@@ -8,8 +8,10 @@
 //! impl (see [`ops::PartitionShrink`] / `fs::shrink`).
 
 use crate::cmd::TaskSpec;
+use crate::pipe_keys::PipeKeyConfig;
 use crate::{
-    cmd, fs, hardware, install, lvm, modules, nfs, nvmet, partition, reconcile, smart, zfs,
+    cmd, fs, hardware, install, lvm, modules, nfs, nvmet, partition, pipe_keys, reconcile, smart,
+    zfs,
 };
 use greendot_proto::actual::nic::NicAdvice;
 use greendot_proto::{ConvertError, SubStatus, Task, ops, pb};
@@ -35,6 +37,9 @@ pub struct Ctx {
     /// The nvmet configfs root the CSI ops and `NvmetReport` run against
     /// (`--nvmet-root` overrides it in the integration tests).
     pub nvmet_root: std::path::PathBuf,
+    /// Where the pipe keys live, and the forced command they are granted —
+    /// resolved once at startup, never taken from a request.
+    pub pipe_keys: PipeKeyConfig,
 }
 
 /// A task rpc: executes as a recorded stream of subtasks. The
@@ -222,6 +227,20 @@ impl TaskOp for ops::CsiVolumeExpand {
     }
 }
 
+impl TaskOp for ops::PipeKeyAdd {
+    type Wire = pb::PipeKeyAdd;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        pipe_keys::add(&ctx.pipe_keys, &self, task)
+    }
+}
+
+impl TaskOp for ops::PipeKeyRevoke {
+    type Wire = pb::PipeKeyRevoke;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        pipe_keys::revoke(&ctx.pipe_keys, &self.fingerprint, task)
+    }
+}
+
 impl TaskOp for ops::InstallPackages {
     type Wire = pb::InstallPackages;
     fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
@@ -261,6 +280,14 @@ impl ReadOp for ops::NvmetReport {
     type Reply = pb::NvmetReportReply;
     fn read(self, ctx: &Ctx) -> Self::Reply {
         crate::actual::nvmet::read(&ctx.nvmet_root).into()
+    }
+}
+
+impl ReadOp for ops::PipeAccessReport {
+    type Wire = pb::Empty;
+    type Reply = pb::PipeAccessReportReply;
+    fn read(self, ctx: &Ctx) -> Self::Reply {
+        pipe_keys::report(&ctx.pipe_keys)
     }
 }
 

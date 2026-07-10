@@ -32,6 +32,7 @@ mod nvmet;
 mod pam;
 mod partition;
 mod pipe;
+mod pipe_keys;
 mod reconcile;
 mod render;
 mod smart;
@@ -72,6 +73,13 @@ struct Opts {
     /// nvmet configfs root for the CSI ops (test-only override, like
     /// `--allow-uid`; production always uses the kernel path).
     nvmet_root: Option<PathBuf>,
+    /// The SSH login whose `authorized_keys` the `PipeKey*` ops manage.
+    pipe_user: String,
+    /// Home of that user (test-only override; production NSS-resolves it).
+    pipe_home: Option<PathBuf>,
+    /// The binary the forced command runs (test-only override; production
+    /// resolves our own `current_exe`).
+    pipe_command: Option<PathBuf>,
 }
 
 impl Opts {
@@ -84,6 +92,9 @@ impl Opts {
             admin_group: "greendot-admin".into(),
             config: None,
             nvmet_root: None,
+            pipe_user: pipe_keys::SSH_USER.into(),
+            pipe_home: None,
+            pipe_command: None,
         };
         while let Some(flag) = args.next() {
             let mut value = || args.next().with_context(|| format!("{flag} needs a value"));
@@ -95,6 +106,9 @@ impl Opts {
                 "--admin-group" => opts.admin_group = value()?,
                 "--config" => opts.config = Some(value()?),
                 "--nvmet-root" => opts.nvmet_root = Some(value()?.into()),
+                "--pipe-user" => opts.pipe_user = value()?,
+                "--pipe-home" => opts.pipe_home = Some(value()?.into()),
+                "--pipe-command" => opts.pipe_command = Some(value()?.into()),
                 other => bail!("unknown flag {other}"),
             }
         }
@@ -176,6 +190,16 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         mutate_lock: std::sync::Mutex::new(()),
         reconcile_config: opts.config,
         nvmet_root: opts.nvmet_root.unwrap_or_else(|| nvmet::NVMET_ROOT.into()),
+        pipe_keys: pipe_keys::PipeKeyConfig {
+            user: opts.pipe_user,
+            // A pipe key is only useful if its login is also admitted at this
+            // socket, which is exactly `allow_user`'s group.
+            socket_group: opts.allow_user,
+            pipe_bin: opts
+                .pipe_command
+                .unwrap_or_else(pipe_keys::resolve_pipe_bin),
+            home_override: opts.pipe_home,
+        },
     });
 
     // SO_PEERCRED authorization: the configured uid, or a member of the
@@ -488,6 +512,8 @@ helper_impl! {
             csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant, ops::CsiHostGrant;
             csi_host_revoke, CsiHostRevokeStream, pb::CsiHostRevoke, ops::CsiHostRevoke;
             csi_volume_expand, CsiVolumeExpandStream, pb::CsiVolumeExpand, ops::CsiVolumeExpand;
+            pipe_key_add, PipeKeyAddStream, pb::PipeKeyAdd, ops::PipeKeyAdd;
+            pipe_key_revoke, PipeKeyRevokeStream, pb::PipeKeyRevoke, ops::PipeKeyRevoke;
             reconcile, ReconcileStream, pb::Reconcile, ops::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd, ops::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce, ops::EnableRoce;
@@ -508,6 +534,7 @@ helper_impl! {
             smart_health, pb::SmartHealth, ops::SmartHealth;
             reconcile_dry_run, pb::Empty, ops::ReconcileDryRun;
             zvol_info, pb::ZvolInfo, ops::ZvolInfo;
+            pipe_access_report, pb::Empty, ops::PipeAccessReport;
     }
 }
 

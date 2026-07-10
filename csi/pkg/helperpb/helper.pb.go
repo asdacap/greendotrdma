@@ -3409,6 +3409,407 @@ func (x *CsiVolumeExpand) GetNewSize() uint64 {
 	return 0
 }
 
+// Authorize one OpenSSH public key to run the pipe forced command. The request
+// carries the key and nothing else: the `command="…",restrict` options are
+// synthesized by the daemon from its own executable path, so a compromised web
+// cannot turn a pipe grant into a shell. The key is re-parsed and canonically
+// re-serialized on ingress (SshPublicKeyLine), so a paste can never smuggle a
+// second authorized_keys line.
+type PipeKeyAdd struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	PublicKey     string                 `protobuf:"bytes,1,opt,name=public_key,json=publicKey,proto3" json:"public_key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PipeKeyAdd) Reset() {
+	*x = PipeKeyAdd{}
+	mi := &file_helper_proto_msgTypes[55]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PipeKeyAdd) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PipeKeyAdd) ProtoMessage() {}
+
+func (x *PipeKeyAdd) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[55]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PipeKeyAdd.ProtoReflect.Descriptor instead.
+func (*PipeKeyAdd) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{55}
+}
+
+func (x *PipeKeyAdd) GetPublicKey() string {
+	if x != nil {
+		return x.PublicKey
+	}
+	return ""
+}
+
+// Remove the key with this SHA256 fingerprint — including a line this UI never
+// wrote, so an admin's manually installed shell key can be revoked here too.
+type PipeKeyRevoke struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Fingerprint   string                 `protobuf:"bytes,1,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PipeKeyRevoke) Reset() {
+	*x = PipeKeyRevoke{}
+	mi := &file_helper_proto_msgTypes[56]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PipeKeyRevoke) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PipeKeyRevoke) ProtoMessage() {}
+
+func (x *PipeKeyRevoke) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[56]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PipeKeyRevoke.ProtoReflect.Descriptor instead.
+func (*PipeKeyRevoke) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{56}
+}
+
+func (x *PipeKeyRevoke) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+// Everything the SSH-access diagnostic needs. Best-effort: a field that could
+// not be read is false/empty, and the web renders that as a failed criterion.
+type PipeAccessReportReply struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	User       string                 `protobuf:"bytes,1,opt,name=user,proto3" json:"user,omitempty"` // the packaged SSH user, e.g. greendot-csi
+	UserExists bool                   `protobuf:"varint,2,opt,name=user_exists,json=userExists,proto3" json:"user_exists,omitempty"`
+	// Membership of the daemon-socket group. Without it sshd lets the key in and
+	// the helper socket then rejects it — the failure the diagnostic exists for.
+	InSocketGroup bool   `protobuf:"varint,3,opt,name=in_socket_group,json=inSocketGroup,proto3" json:"in_socket_group,omitempty"`
+	SocketGroup   string `protobuf:"bytes,4,opt,name=socket_group,json=socketGroup,proto3" json:"socket_group,omitempty"`
+	// sshd's StrictModes rule, applied to each path it walks: owned by root or
+	// the user, and not writable by group or other. A home directory owned by
+	// the wrong user makes sshd refuse the key without saying so.
+	HomeOk               bool            `protobuf:"varint,5,opt,name=home_ok,json=homeOk,proto3" json:"home_ok,omitempty"`
+	HomeDetail           string          `protobuf:"bytes,6,opt,name=home_detail,json=homeDetail,proto3" json:"home_detail,omitempty"`
+	SshDirOk             bool            `protobuf:"varint,7,opt,name=ssh_dir_ok,json=sshDirOk,proto3" json:"ssh_dir_ok,omitempty"`
+	SshDirDetail         string          `protobuf:"bytes,8,opt,name=ssh_dir_detail,json=sshDirDetail,proto3" json:"ssh_dir_detail,omitempty"`
+	AuthorizedKeysOk     bool            `protobuf:"varint,14,opt,name=authorized_keys_ok,json=authorizedKeysOk,proto3" json:"authorized_keys_ok,omitempty"` // absent is fine: no key authorized yet
+	AuthorizedKeysDetail string          `protobuf:"bytes,15,opt,name=authorized_keys_detail,json=authorizedKeysDetail,proto3" json:"authorized_keys_detail,omitempty"`
+	ForcedCommand        string          `protobuf:"bytes,9,opt,name=forced_command,json=forcedCommand,proto3" json:"forced_command,omitempty"`                      // the exact options prefix the daemon writes
+	ForcedCommandBinOk   bool            `protobuf:"varint,10,opt,name=forced_command_bin_ok,json=forcedCommandBinOk,proto3" json:"forced_command_bin_ok,omitempty"` // that binary exists and is executable
+	Keys                 []*PipeKeyEntry `protobuf:"bytes,11,rep,name=keys,proto3" json:"keys,omitempty"`
+	HostKeys             []*HostKey      `protobuf:"bytes,12,rep,name=host_keys,json=hostKeys,proto3" json:"host_keys,omitempty"`
+	// Key lines we could not parse. They are preserved untouched — and counted,
+	// because an entry we cannot read is one whose options we cannot vouch for.
+	UnparsableLines uint32 `protobuf:"varint,13,opt,name=unparsable_lines,json=unparsableLines,proto3" json:"unparsable_lines,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *PipeAccessReportReply) Reset() {
+	*x = PipeAccessReportReply{}
+	mi := &file_helper_proto_msgTypes[57]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PipeAccessReportReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PipeAccessReportReply) ProtoMessage() {}
+
+func (x *PipeAccessReportReply) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[57]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PipeAccessReportReply.ProtoReflect.Descriptor instead.
+func (*PipeAccessReportReply) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{57}
+}
+
+func (x *PipeAccessReportReply) GetUser() string {
+	if x != nil {
+		return x.User
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetUserExists() bool {
+	if x != nil {
+		return x.UserExists
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetInSocketGroup() bool {
+	if x != nil {
+		return x.InSocketGroup
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetSocketGroup() string {
+	if x != nil {
+		return x.SocketGroup
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetHomeOk() bool {
+	if x != nil {
+		return x.HomeOk
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetHomeDetail() string {
+	if x != nil {
+		return x.HomeDetail
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetSshDirOk() bool {
+	if x != nil {
+		return x.SshDirOk
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetSshDirDetail() string {
+	if x != nil {
+		return x.SshDirDetail
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetAuthorizedKeysOk() bool {
+	if x != nil {
+		return x.AuthorizedKeysOk
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetAuthorizedKeysDetail() string {
+	if x != nil {
+		return x.AuthorizedKeysDetail
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetForcedCommand() string {
+	if x != nil {
+		return x.ForcedCommand
+	}
+	return ""
+}
+
+func (x *PipeAccessReportReply) GetForcedCommandBinOk() bool {
+	if x != nil {
+		return x.ForcedCommandBinOk
+	}
+	return false
+}
+
+func (x *PipeAccessReportReply) GetKeys() []*PipeKeyEntry {
+	if x != nil {
+		return x.Keys
+	}
+	return nil
+}
+
+func (x *PipeAccessReportReply) GetHostKeys() []*HostKey {
+	if x != nil {
+		return x.HostKeys
+	}
+	return nil
+}
+
+func (x *PipeAccessReportReply) GetUnparsableLines() uint32 {
+	if x != nil {
+		return x.UnparsableLines
+	}
+	return 0
+}
+
+type PipeKeyEntry struct {
+	state       protoimpl.MessageState `protogen:"open.v1"`
+	Fingerprint string                 `protobuf:"bytes,1,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`
+	Algorithm   string                 `protobuf:"bytes,2,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
+	Comment     string                 `protobuf:"bytes,3,opt,name=comment,proto3" json:"comment,omitempty"` // the key's label
+	// False for a line this UI did not write: its options are absent (a full
+	// shell) or not ours. Such lines are preserved verbatim, never rewritten.
+	ForcedCommandOk bool   `protobuf:"varint,4,opt,name=forced_command_ok,json=forcedCommandOk,proto3" json:"forced_command_ok,omitempty"`
+	Options         string `protobuf:"bytes,5,opt,name=options,proto3" json:"options,omitempty"` // the raw options prefix, for display
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
+}
+
+func (x *PipeKeyEntry) Reset() {
+	*x = PipeKeyEntry{}
+	mi := &file_helper_proto_msgTypes[58]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PipeKeyEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PipeKeyEntry) ProtoMessage() {}
+
+func (x *PipeKeyEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[58]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PipeKeyEntry.ProtoReflect.Descriptor instead.
+func (*PipeKeyEntry) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{58}
+}
+
+func (x *PipeKeyEntry) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *PipeKeyEntry) GetAlgorithm() string {
+	if x != nil {
+		return x.Algorithm
+	}
+	return ""
+}
+
+func (x *PipeKeyEntry) GetComment() string {
+	if x != nil {
+		return x.Comment
+	}
+	return ""
+}
+
+func (x *PipeKeyEntry) GetForcedCommandOk() bool {
+	if x != nil {
+		return x.ForcedCommandOk
+	}
+	return false
+}
+
+func (x *PipeKeyEntry) GetOptions() string {
+	if x != nil {
+		return x.Options
+	}
+	return ""
+}
+
+// One of the box's own SSH host keys, so an admin can pin known_hosts from the
+// page instead of trusting an ssh-keyscan on first contact.
+type HostKey struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Algorithm     string                 `protobuf:"bytes,1,opt,name=algorithm,proto3" json:"algorithm,omitempty"`
+	Fingerprint   string                 `protobuf:"bytes,2,opt,name=fingerprint,proto3" json:"fingerprint,omitempty"`        // SHA256:…
+	KeyLine       string                 `protobuf:"bytes,3,opt,name=key_line,json=keyLine,proto3" json:"key_line,omitempty"` // "<algorithm> <base64>", the web prepends the host
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HostKey) Reset() {
+	*x = HostKey{}
+	mi := &file_helper_proto_msgTypes[59]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HostKey) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HostKey) ProtoMessage() {}
+
+func (x *HostKey) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[59]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HostKey.ProtoReflect.Descriptor instead.
+func (*HostKey) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{59}
+}
+
+func (x *HostKey) GetAlgorithm() string {
+	if x != nil {
+		return x.Algorithm
+	}
+	return ""
+}
+
+func (x *HostKey) GetFingerprint() string {
+	if x != nil {
+		return x.Fingerprint
+	}
+	return ""
+}
+
+func (x *HostKey) GetKeyLine() string {
+	if x != nil {
+		return x.KeyLine
+	}
+	return ""
+}
+
 // `zfs clone <dataset>@<snap> <target>`, optionally followed by a volsize bump
 // (a clone inherits the origin's volsize; creating a bigger volume from a
 // snapshot is one intent, so the resize rides along server-side).
@@ -3424,7 +3825,7 @@ type ZfsClone struct {
 
 func (x *ZfsClone) Reset() {
 	*x = ZfsClone{}
-	mi := &file_helper_proto_msgTypes[55]
+	mi := &file_helper_proto_msgTypes[60]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3436,7 +3837,7 @@ func (x *ZfsClone) String() string {
 func (*ZfsClone) ProtoMessage() {}
 
 func (x *ZfsClone) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[55]
+	mi := &file_helper_proto_msgTypes[60]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3449,7 +3850,7 @@ func (x *ZfsClone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZfsClone.ProtoReflect.Descriptor instead.
 func (*ZfsClone) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{55}
+	return file_helper_proto_rawDescGZIP(), []int{60}
 }
 
 func (x *ZfsClone) GetDataset() string {
@@ -3491,7 +3892,7 @@ type ZvolInfo struct {
 
 func (x *ZvolInfo) Reset() {
 	*x = ZvolInfo{}
-	mi := &file_helper_proto_msgTypes[56]
+	mi := &file_helper_proto_msgTypes[61]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3503,7 +3904,7 @@ func (x *ZvolInfo) String() string {
 func (*ZvolInfo) ProtoMessage() {}
 
 func (x *ZvolInfo) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[56]
+	mi := &file_helper_proto_msgTypes[61]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3516,7 +3917,7 @@ func (x *ZvolInfo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZvolInfo.ProtoReflect.Descriptor instead.
 func (*ZvolInfo) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{56}
+	return file_helper_proto_rawDescGZIP(), []int{61}
 }
 
 func (x *ZvolInfo) GetDataset() string {
@@ -3536,7 +3937,7 @@ type ZvolInfoReply struct {
 
 func (x *ZvolInfoReply) Reset() {
 	*x = ZvolInfoReply{}
-	mi := &file_helper_proto_msgTypes[57]
+	mi := &file_helper_proto_msgTypes[62]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3548,7 +3949,7 @@ func (x *ZvolInfoReply) String() string {
 func (*ZvolInfoReply) ProtoMessage() {}
 
 func (x *ZvolInfoReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[57]
+	mi := &file_helper_proto_msgTypes[62]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3561,7 +3962,7 @@ func (x *ZvolInfoReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ZvolInfoReply.ProtoReflect.Descriptor instead.
 func (*ZvolInfoReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{57}
+	return file_helper_proto_rawDescGZIP(), []int{62}
 }
 
 func (x *ZvolInfoReply) GetExists() bool {
@@ -3589,7 +3990,7 @@ type RxeAdd struct {
 
 func (x *RxeAdd) Reset() {
 	*x = RxeAdd{}
-	mi := &file_helper_proto_msgTypes[58]
+	mi := &file_helper_proto_msgTypes[63]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3601,7 +4002,7 @@ func (x *RxeAdd) String() string {
 func (*RxeAdd) ProtoMessage() {}
 
 func (x *RxeAdd) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[58]
+	mi := &file_helper_proto_msgTypes[63]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3614,7 +4015,7 @@ func (x *RxeAdd) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RxeAdd.ProtoReflect.Descriptor instead.
 func (*RxeAdd) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{58}
+	return file_helper_proto_rawDescGZIP(), []int{63}
 }
 
 func (x *RxeAdd) GetNetdev() string {
@@ -3633,7 +4034,7 @@ type EnableRoce struct {
 
 func (x *EnableRoce) Reset() {
 	*x = EnableRoce{}
-	mi := &file_helper_proto_msgTypes[59]
+	mi := &file_helper_proto_msgTypes[64]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3645,7 +4046,7 @@ func (x *EnableRoce) String() string {
 func (*EnableRoce) ProtoMessage() {}
 
 func (x *EnableRoce) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[59]
+	mi := &file_helper_proto_msgTypes[64]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3658,7 +4059,7 @@ func (x *EnableRoce) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EnableRoce.ProtoReflect.Descriptor instead.
 func (*EnableRoce) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{59}
+	return file_helper_proto_rawDescGZIP(), []int{64}
 }
 
 func (x *EnableRoce) GetNetdev() string {
@@ -3677,7 +4078,7 @@ type InstallPackages struct {
 
 func (x *InstallPackages) Reset() {
 	*x = InstallPackages{}
-	mi := &file_helper_proto_msgTypes[60]
+	mi := &file_helper_proto_msgTypes[65]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3689,7 +4090,7 @@ func (x *InstallPackages) String() string {
 func (*InstallPackages) ProtoMessage() {}
 
 func (x *InstallPackages) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[60]
+	mi := &file_helper_proto_msgTypes[65]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3702,7 +4103,7 @@ func (x *InstallPackages) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InstallPackages.ProtoReflect.Descriptor instead.
 func (*InstallPackages) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{60}
+	return file_helper_proto_rawDescGZIP(), []int{65}
 }
 
 func (x *InstallPackages) GetPackages() []string {
@@ -3723,7 +4124,7 @@ type NfsReportReply struct {
 
 func (x *NfsReportReply) Reset() {
 	*x = NfsReportReply{}
-	mi := &file_helper_proto_msgTypes[61]
+	mi := &file_helper_proto_msgTypes[66]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3735,7 +4136,7 @@ func (x *NfsReportReply) String() string {
 func (*NfsReportReply) ProtoMessage() {}
 
 func (x *NfsReportReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[61]
+	mi := &file_helper_proto_msgTypes[66]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3748,7 +4149,7 @@ func (x *NfsReportReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NfsReportReply.ProtoReflect.Descriptor instead.
 func (*NfsReportReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{61}
+	return file_helper_proto_rawDescGZIP(), []int{66}
 }
 
 func (x *NfsReportReply) GetExports() []*NfsExportEntryMsg {
@@ -3782,7 +4183,7 @@ type NfsExportEntryMsg struct {
 
 func (x *NfsExportEntryMsg) Reset() {
 	*x = NfsExportEntryMsg{}
-	mi := &file_helper_proto_msgTypes[62]
+	mi := &file_helper_proto_msgTypes[67]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3794,7 +4195,7 @@ func (x *NfsExportEntryMsg) String() string {
 func (*NfsExportEntryMsg) ProtoMessage() {}
 
 func (x *NfsExportEntryMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[62]
+	mi := &file_helper_proto_msgTypes[67]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3807,7 +4208,7 @@ func (x *NfsExportEntryMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NfsExportEntryMsg.ProtoReflect.Descriptor instead.
 func (*NfsExportEntryMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{62}
+	return file_helper_proto_rawDescGZIP(), []int{67}
 }
 
 func (x *NfsExportEntryMsg) GetPath() string {
@@ -3835,7 +4236,7 @@ type NfsManagedSpec struct {
 
 func (x *NfsManagedSpec) Reset() {
 	*x = NfsManagedSpec{}
-	mi := &file_helper_proto_msgTypes[63]
+	mi := &file_helper_proto_msgTypes[68]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3847,7 +4248,7 @@ func (x *NfsManagedSpec) String() string {
 func (*NfsManagedSpec) ProtoMessage() {}
 
 func (x *NfsManagedSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[63]
+	mi := &file_helper_proto_msgTypes[68]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3860,7 +4261,7 @@ func (x *NfsManagedSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NfsManagedSpec.ProtoReflect.Descriptor instead.
 func (*NfsManagedSpec) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{63}
+	return file_helper_proto_rawDescGZIP(), []int{68}
 }
 
 func (x *NfsManagedSpec) GetPath() string {
@@ -3894,7 +4295,7 @@ type NvmetReportReply struct {
 
 func (x *NvmetReportReply) Reset() {
 	*x = NvmetReportReply{}
-	mi := &file_helper_proto_msgTypes[64]
+	mi := &file_helper_proto_msgTypes[69]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3906,7 +4307,7 @@ func (x *NvmetReportReply) String() string {
 func (*NvmetReportReply) ProtoMessage() {}
 
 func (x *NvmetReportReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[64]
+	mi := &file_helper_proto_msgTypes[69]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3919,7 +4320,7 @@ func (x *NvmetReportReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NvmetReportReply.ProtoReflect.Descriptor instead.
 func (*NvmetReportReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{64}
+	return file_helper_proto_rawDescGZIP(), []int{69}
 }
 
 func (x *NvmetReportReply) GetSubsystems() []*ActualNvmetSubsys {
@@ -3948,7 +4349,7 @@ type ActualNvmetSubsys struct {
 
 func (x *ActualNvmetSubsys) Reset() {
 	*x = ActualNvmetSubsys{}
-	mi := &file_helper_proto_msgTypes[65]
+	mi := &file_helper_proto_msgTypes[70]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -3960,7 +4361,7 @@ func (x *ActualNvmetSubsys) String() string {
 func (*ActualNvmetSubsys) ProtoMessage() {}
 
 func (x *ActualNvmetSubsys) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[65]
+	mi := &file_helper_proto_msgTypes[70]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -3973,7 +4374,7 @@ func (x *ActualNvmetSubsys) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualNvmetSubsys.ProtoReflect.Descriptor instead.
 func (*ActualNvmetSubsys) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{65}
+	return file_helper_proto_rawDescGZIP(), []int{70}
 }
 
 func (x *ActualNvmetSubsys) GetNqn() string {
@@ -4015,7 +4416,7 @@ type ActualNvmetNs struct {
 
 func (x *ActualNvmetNs) Reset() {
 	*x = ActualNvmetNs{}
-	mi := &file_helper_proto_msgTypes[66]
+	mi := &file_helper_proto_msgTypes[71]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4027,7 +4428,7 @@ func (x *ActualNvmetNs) String() string {
 func (*ActualNvmetNs) ProtoMessage() {}
 
 func (x *ActualNvmetNs) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[66]
+	mi := &file_helper_proto_msgTypes[71]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4040,7 +4441,7 @@ func (x *ActualNvmetNs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualNvmetNs.ProtoReflect.Descriptor instead.
 func (*ActualNvmetNs) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{66}
+	return file_helper_proto_rawDescGZIP(), []int{71}
 }
 
 func (x *ActualNvmetNs) GetNsid() uint32 {
@@ -4077,7 +4478,7 @@ type ActualNvmetPort struct {
 
 func (x *ActualNvmetPort) Reset() {
 	*x = ActualNvmetPort{}
-	mi := &file_helper_proto_msgTypes[67]
+	mi := &file_helper_proto_msgTypes[72]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4089,7 +4490,7 @@ func (x *ActualNvmetPort) String() string {
 func (*ActualNvmetPort) ProtoMessage() {}
 
 func (x *ActualNvmetPort) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[67]
+	mi := &file_helper_proto_msgTypes[72]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4102,7 +4503,7 @@ func (x *ActualNvmetPort) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualNvmetPort.ProtoReflect.Descriptor instead.
 func (*ActualNvmetPort) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{67}
+	return file_helper_proto_rawDescGZIP(), []int{72}
 }
 
 func (x *ActualNvmetPort) GetId() uint32 {
@@ -4150,7 +4551,7 @@ type LioReportReply struct {
 
 func (x *LioReportReply) Reset() {
 	*x = LioReportReply{}
-	mi := &file_helper_proto_msgTypes[68]
+	mi := &file_helper_proto_msgTypes[73]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4162,7 +4563,7 @@ func (x *LioReportReply) String() string {
 func (*LioReportReply) ProtoMessage() {}
 
 func (x *LioReportReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[68]
+	mi := &file_helper_proto_msgTypes[73]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4175,7 +4576,7 @@ func (x *LioReportReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LioReportReply.ProtoReflect.Descriptor instead.
 func (*LioReportReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{68}
+	return file_helper_proto_rawDescGZIP(), []int{73}
 }
 
 func (x *LioReportReply) GetBackstores() []*ActualLioBackstore {
@@ -4203,7 +4604,7 @@ type ActualLioBackstore struct {
 
 func (x *ActualLioBackstore) Reset() {
 	*x = ActualLioBackstore{}
-	mi := &file_helper_proto_msgTypes[69]
+	mi := &file_helper_proto_msgTypes[74]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4215,7 +4616,7 @@ func (x *ActualLioBackstore) String() string {
 func (*ActualLioBackstore) ProtoMessage() {}
 
 func (x *ActualLioBackstore) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[69]
+	mi := &file_helper_proto_msgTypes[74]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4228,7 +4629,7 @@ func (x *ActualLioBackstore) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualLioBackstore.ProtoReflect.Descriptor instead.
 func (*ActualLioBackstore) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{69}
+	return file_helper_proto_rawDescGZIP(), []int{74}
 }
 
 func (x *ActualLioBackstore) GetName() string {
@@ -4266,7 +4667,7 @@ type ActualLioTarget struct {
 
 func (x *ActualLioTarget) Reset() {
 	*x = ActualLioTarget{}
-	mi := &file_helper_proto_msgTypes[70]
+	mi := &file_helper_proto_msgTypes[75]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4278,7 +4679,7 @@ func (x *ActualLioTarget) String() string {
 func (*ActualLioTarget) ProtoMessage() {}
 
 func (x *ActualLioTarget) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[70]
+	mi := &file_helper_proto_msgTypes[75]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4291,7 +4692,7 @@ func (x *ActualLioTarget) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualLioTarget.ProtoReflect.Descriptor instead.
 func (*ActualLioTarget) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{70}
+	return file_helper_proto_rawDescGZIP(), []int{75}
 }
 
 func (x *ActualLioTarget) GetIqn() string {
@@ -4346,7 +4747,7 @@ type ActualLioPortal struct {
 
 func (x *ActualLioPortal) Reset() {
 	*x = ActualLioPortal{}
-	mi := &file_helper_proto_msgTypes[71]
+	mi := &file_helper_proto_msgTypes[76]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4358,7 +4759,7 @@ func (x *ActualLioPortal) String() string {
 func (*ActualLioPortal) ProtoMessage() {}
 
 func (x *ActualLioPortal) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[71]
+	mi := &file_helper_proto_msgTypes[76]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4371,7 +4772,7 @@ func (x *ActualLioPortal) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ActualLioPortal.ProtoReflect.Descriptor instead.
 func (*ActualLioPortal) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{71}
+	return file_helper_proto_rawDescGZIP(), []int{76}
 }
 
 func (x *ActualLioPortal) GetAddrPort() string {
@@ -4397,7 +4798,7 @@ type LioSessionsReply struct {
 
 func (x *LioSessionsReply) Reset() {
 	*x = LioSessionsReply{}
-	mi := &file_helper_proto_msgTypes[72]
+	mi := &file_helper_proto_msgTypes[77]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4409,7 +4810,7 @@ func (x *LioSessionsReply) String() string {
 func (*LioSessionsReply) ProtoMessage() {}
 
 func (x *LioSessionsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[72]
+	mi := &file_helper_proto_msgTypes[77]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4422,7 +4823,7 @@ func (x *LioSessionsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use LioSessionsReply.ProtoReflect.Descriptor instead.
 func (*LioSessionsReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{72}
+	return file_helper_proto_rawDescGZIP(), []int{77}
 }
 
 func (x *LioSessionsReply) GetSessions() []*IscsiSessionMsg {
@@ -4443,7 +4844,7 @@ type IscsiSessionMsg struct {
 
 func (x *IscsiSessionMsg) Reset() {
 	*x = IscsiSessionMsg{}
-	mi := &file_helper_proto_msgTypes[73]
+	mi := &file_helper_proto_msgTypes[78]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4455,7 +4856,7 @@ func (x *IscsiSessionMsg) String() string {
 func (*IscsiSessionMsg) ProtoMessage() {}
 
 func (x *IscsiSessionMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[73]
+	mi := &file_helper_proto_msgTypes[78]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4468,7 +4869,7 @@ func (x *IscsiSessionMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IscsiSessionMsg.ProtoReflect.Descriptor instead.
 func (*IscsiSessionMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{73}
+	return file_helper_proto_rawDescGZIP(), []int{78}
 }
 
 func (x *IscsiSessionMsg) GetTargetIqn() string {
@@ -4501,7 +4902,7 @@ type RdmaDevicesReply struct {
 
 func (x *RdmaDevicesReply) Reset() {
 	*x = RdmaDevicesReply{}
-	mi := &file_helper_proto_msgTypes[74]
+	mi := &file_helper_proto_msgTypes[79]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4513,7 +4914,7 @@ func (x *RdmaDevicesReply) String() string {
 func (*RdmaDevicesReply) ProtoMessage() {}
 
 func (x *RdmaDevicesReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[74]
+	mi := &file_helper_proto_msgTypes[79]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4526,7 +4927,7 @@ func (x *RdmaDevicesReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RdmaDevicesReply.ProtoReflect.Descriptor instead.
 func (*RdmaDevicesReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{74}
+	return file_helper_proto_rawDescGZIP(), []int{79}
 }
 
 func (x *RdmaDevicesReply) GetDevices() []*RdmaDevMsg {
@@ -4548,7 +4949,7 @@ type RdmaDevMsg struct {
 
 func (x *RdmaDevMsg) Reset() {
 	*x = RdmaDevMsg{}
-	mi := &file_helper_proto_msgTypes[75]
+	mi := &file_helper_proto_msgTypes[80]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4560,7 +4961,7 @@ func (x *RdmaDevMsg) String() string {
 func (*RdmaDevMsg) ProtoMessage() {}
 
 func (x *RdmaDevMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[75]
+	mi := &file_helper_proto_msgTypes[80]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4573,7 +4974,7 @@ func (x *RdmaDevMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RdmaDevMsg.ProtoReflect.Descriptor instead.
 func (*RdmaDevMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{75}
+	return file_helper_proto_rawDescGZIP(), []int{80}
 }
 
 func (x *RdmaDevMsg) GetName() string {
@@ -4613,7 +5014,7 @@ type NicPciAddrsReply struct {
 
 func (x *NicPciAddrsReply) Reset() {
 	*x = NicPciAddrsReply{}
-	mi := &file_helper_proto_msgTypes[76]
+	mi := &file_helper_proto_msgTypes[81]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4625,7 +5026,7 @@ func (x *NicPciAddrsReply) String() string {
 func (*NicPciAddrsReply) ProtoMessage() {}
 
 func (x *NicPciAddrsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[76]
+	mi := &file_helper_proto_msgTypes[81]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4638,7 +5039,7 @@ func (x *NicPciAddrsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicPciAddrsReply.ProtoReflect.Descriptor instead.
 func (*NicPciAddrsReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{76}
+	return file_helper_proto_rawDescGZIP(), []int{81}
 }
 
 func (x *NicPciAddrsReply) GetEntries() []*PciAddrIps {
@@ -4658,7 +5059,7 @@ type PciAddrIps struct {
 
 func (x *PciAddrIps) Reset() {
 	*x = PciAddrIps{}
-	mi := &file_helper_proto_msgTypes[77]
+	mi := &file_helper_proto_msgTypes[82]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4670,7 +5071,7 @@ func (x *PciAddrIps) String() string {
 func (*PciAddrIps) ProtoMessage() {}
 
 func (x *PciAddrIps) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[77]
+	mi := &file_helper_proto_msgTypes[82]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4683,7 +5084,7 @@ func (x *PciAddrIps) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PciAddrIps.ProtoReflect.Descriptor instead.
 func (*PciAddrIps) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{77}
+	return file_helper_proto_rawDescGZIP(), []int{82}
 }
 
 func (x *PciAddrIps) GetPci() string {
@@ -4709,7 +5110,7 @@ type NicInterfacesReply struct {
 
 func (x *NicInterfacesReply) Reset() {
 	*x = NicInterfacesReply{}
-	mi := &file_helper_proto_msgTypes[78]
+	mi := &file_helper_proto_msgTypes[83]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4721,7 +5122,7 @@ func (x *NicInterfacesReply) String() string {
 func (*NicInterfacesReply) ProtoMessage() {}
 
 func (x *NicInterfacesReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[78]
+	mi := &file_helper_proto_msgTypes[83]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4734,7 +5135,7 @@ func (x *NicInterfacesReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicInterfacesReply.ProtoReflect.Descriptor instead.
 func (*NicInterfacesReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{78}
+	return file_helper_proto_rawDescGZIP(), []int{83}
 }
 
 func (x *NicInterfacesReply) GetNics() []*NicStatusMsg {
@@ -4759,7 +5160,7 @@ type NicStatusMsg struct {
 
 func (x *NicStatusMsg) Reset() {
 	*x = NicStatusMsg{}
-	mi := &file_helper_proto_msgTypes[79]
+	mi := &file_helper_proto_msgTypes[84]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4771,7 +5172,7 @@ func (x *NicStatusMsg) String() string {
 func (*NicStatusMsg) ProtoMessage() {}
 
 func (x *NicStatusMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[79]
+	mi := &file_helper_proto_msgTypes[84]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4784,7 +5185,7 @@ func (x *NicStatusMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicStatusMsg.ProtoReflect.Descriptor instead.
 func (*NicStatusMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{79}
+	return file_helper_proto_rawDescGZIP(), []int{84}
 }
 
 func (x *NicStatusMsg) GetNetdev() string {
@@ -4838,7 +5239,7 @@ type RoceCapableNicsReply struct {
 
 func (x *RoceCapableNicsReply) Reset() {
 	*x = RoceCapableNicsReply{}
-	mi := &file_helper_proto_msgTypes[80]
+	mi := &file_helper_proto_msgTypes[85]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4850,7 +5251,7 @@ func (x *RoceCapableNicsReply) String() string {
 func (*RoceCapableNicsReply) ProtoMessage() {}
 
 func (x *RoceCapableNicsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[80]
+	mi := &file_helper_proto_msgTypes[85]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4863,7 +5264,7 @@ func (x *RoceCapableNicsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoceCapableNicsReply.ProtoReflect.Descriptor instead.
 func (*RoceCapableNicsReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{80}
+	return file_helper_proto_rawDescGZIP(), []int{85}
 }
 
 func (x *RoceCapableNicsReply) GetNics() []*RoceCapableNic {
@@ -4883,7 +5284,7 @@ type RoceCapableNic struct {
 
 func (x *RoceCapableNic) Reset() {
 	*x = RoceCapableNic{}
-	mi := &file_helper_proto_msgTypes[81]
+	mi := &file_helper_proto_msgTypes[86]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4895,7 +5296,7 @@ func (x *RoceCapableNic) String() string {
 func (*RoceCapableNic) ProtoMessage() {}
 
 func (x *RoceCapableNic) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[81]
+	mi := &file_helper_proto_msgTypes[86]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4908,7 +5309,7 @@ func (x *RoceCapableNic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoceCapableNic.ProtoReflect.Descriptor instead.
 func (*RoceCapableNic) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{81}
+	return file_helper_proto_rawDescGZIP(), []int{86}
 }
 
 func (x *RoceCapableNic) GetNetdev() string {
@@ -4934,7 +5335,7 @@ type NicRdmaAdviceReply struct {
 
 func (x *NicRdmaAdviceReply) Reset() {
 	*x = NicRdmaAdviceReply{}
-	mi := &file_helper_proto_msgTypes[82]
+	mi := &file_helper_proto_msgTypes[87]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4946,7 +5347,7 @@ func (x *NicRdmaAdviceReply) String() string {
 func (*NicRdmaAdviceReply) ProtoMessage() {}
 
 func (x *NicRdmaAdviceReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[82]
+	mi := &file_helper_proto_msgTypes[87]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -4959,7 +5360,7 @@ func (x *NicRdmaAdviceReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicRdmaAdviceReply.ProtoReflect.Descriptor instead.
 func (*NicRdmaAdviceReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{82}
+	return file_helper_proto_rawDescGZIP(), []int{87}
 }
 
 func (x *NicRdmaAdviceReply) GetAdvice() []*NicAdviceMsg {
@@ -4980,7 +5381,7 @@ type NicAdviceMsg struct {
 
 func (x *NicAdviceMsg) Reset() {
 	*x = NicAdviceMsg{}
-	mi := &file_helper_proto_msgTypes[83]
+	mi := &file_helper_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -4992,7 +5393,7 @@ func (x *NicAdviceMsg) String() string {
 func (*NicAdviceMsg) ProtoMessage() {}
 
 func (x *NicAdviceMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[83]
+	mi := &file_helper_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5005,7 +5406,7 @@ func (x *NicAdviceMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicAdviceMsg.ProtoReflect.Descriptor instead.
 func (*NicAdviceMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{83}
+	return file_helper_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *NicAdviceMsg) GetNetdev() string {
@@ -5038,7 +5439,7 @@ type SmartHealthReply struct {
 
 func (x *SmartHealthReply) Reset() {
 	*x = SmartHealthReply{}
-	mi := &file_helper_proto_msgTypes[84]
+	mi := &file_helper_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5050,7 +5451,7 @@ func (x *SmartHealthReply) String() string {
 func (*SmartHealthReply) ProtoMessage() {}
 
 func (x *SmartHealthReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[84]
+	mi := &file_helper_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5063,7 +5464,7 @@ func (x *SmartHealthReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartHealthReply.ProtoReflect.Descriptor instead.
 func (*SmartHealthReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{84}
+	return file_helper_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *SmartHealthReply) GetDevices() []*SmartHealthMsg {
@@ -5084,7 +5485,7 @@ type SmartHealthMsg struct {
 
 func (x *SmartHealthMsg) Reset() {
 	*x = SmartHealthMsg{}
-	mi := &file_helper_proto_msgTypes[85]
+	mi := &file_helper_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5096,7 +5497,7 @@ func (x *SmartHealthMsg) String() string {
 func (*SmartHealthMsg) ProtoMessage() {}
 
 func (x *SmartHealthMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[85]
+	mi := &file_helper_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5109,7 +5510,7 @@ func (x *SmartHealthMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartHealthMsg.ProtoReflect.Descriptor instead.
 func (*SmartHealthMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{85}
+	return file_helper_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *SmartHealthMsg) GetDevice() string {
@@ -5144,7 +5545,7 @@ type ReconcileDryRunReply struct {
 
 func (x *ReconcileDryRunReply) Reset() {
 	*x = ReconcileDryRunReply{}
-	mi := &file_helper_proto_msgTypes[86]
+	mi := &file_helper_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5156,7 +5557,7 @@ func (x *ReconcileDryRunReply) String() string {
 func (*ReconcileDryRunReply) ProtoMessage() {}
 
 func (x *ReconcileDryRunReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[86]
+	mi := &file_helper_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5169,7 +5570,7 @@ func (x *ReconcileDryRunReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileDryRunReply.ProtoReflect.Descriptor instead.
 func (*ReconcileDryRunReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{86}
+	return file_helper_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *ReconcileDryRunReply) GetNvmetOk() bool {
@@ -5205,7 +5606,7 @@ type SubtaskStarted struct {
 
 func (x *SubtaskStarted) Reset() {
 	*x = SubtaskStarted{}
-	mi := &file_helper_proto_msgTypes[87]
+	mi := &file_helper_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5217,7 +5618,7 @@ func (x *SubtaskStarted) String() string {
 func (*SubtaskStarted) ProtoMessage() {}
 
 func (x *SubtaskStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[87]
+	mi := &file_helper_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5230,7 +5631,7 @@ func (x *SubtaskStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubtaskStarted.ProtoReflect.Descriptor instead.
 func (*SubtaskStarted) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{87}
+	return file_helper_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *SubtaskStarted) GetName() string {
@@ -5270,7 +5671,7 @@ type Output struct {
 
 func (x *Output) Reset() {
 	*x = Output{}
-	mi := &file_helper_proto_msgTypes[88]
+	mi := &file_helper_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5282,7 +5683,7 @@ func (x *Output) String() string {
 func (*Output) ProtoMessage() {}
 
 func (x *Output) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[88]
+	mi := &file_helper_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5295,7 +5696,7 @@ func (x *Output) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Output.ProtoReflect.Descriptor instead.
 func (*Output) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{88}
+	return file_helper_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *Output) GetData() string {
@@ -5316,7 +5717,7 @@ type SubtaskFinished struct {
 
 func (x *SubtaskFinished) Reset() {
 	*x = SubtaskFinished{}
-	mi := &file_helper_proto_msgTypes[89]
+	mi := &file_helper_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5328,7 +5729,7 @@ func (x *SubtaskFinished) String() string {
 func (*SubtaskFinished) ProtoMessage() {}
 
 func (x *SubtaskFinished) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[89]
+	mi := &file_helper_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5341,7 +5742,7 @@ func (x *SubtaskFinished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubtaskFinished.ProtoReflect.Descriptor instead.
 func (*SubtaskFinished) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{89}
+	return file_helper_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *SubtaskFinished) GetStatus() SubStatus {
@@ -5375,7 +5776,7 @@ type Finished struct {
 
 func (x *Finished) Reset() {
 	*x = Finished{}
-	mi := &file_helper_proto_msgTypes[90]
+	mi := &file_helper_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5387,7 +5788,7 @@ func (x *Finished) String() string {
 func (*Finished) ProtoMessage() {}
 
 func (x *Finished) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[90]
+	mi := &file_helper_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5400,7 +5801,7 @@ func (x *Finished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Finished.ProtoReflect.Descriptor instead.
 func (*Finished) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{90}
+	return file_helper_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *Finished) GetStatus() SubStatus {
@@ -5433,7 +5834,7 @@ type TaskEvent struct {
 
 func (x *TaskEvent) Reset() {
 	*x = TaskEvent{}
-	mi := &file_helper_proto_msgTypes[91]
+	mi := &file_helper_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5445,7 +5846,7 @@ func (x *TaskEvent) String() string {
 func (*TaskEvent) ProtoMessage() {}
 
 func (x *TaskEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[91]
+	mi := &file_helper_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5458,7 +5859,7 @@ func (x *TaskEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskEvent.ProtoReflect.Descriptor instead.
 func (*TaskEvent) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{91}
+	return file_helper_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *TaskEvent) GetEvent() isTaskEvent_Event {
@@ -5762,7 +6163,43 @@ const file_helper_proto_rawDesc = "" +
 	"\ahostnqn\x18\x02 \x01(\tR\ahostnqn\">\n" +
 	"\x0fCsiVolumeExpand\x12\x10\n" +
 	"\x03nqn\x18\x01 \x01(\tR\x03nqn\x12\x19\n" +
-	"\bnew_size\x18\x02 \x01(\x04R\anewSize\"}\n" +
+	"\bnew_size\x18\x02 \x01(\x04R\anewSize\"+\n" +
+	"\n" +
+	"PipeKeyAdd\x12\x1d\n" +
+	"\n" +
+	"public_key\x18\x01 \x01(\tR\tpublicKey\"1\n" +
+	"\rPipeKeyRevoke\x12 \n" +
+	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\"\xee\x04\n" +
+	"\x15PipeAccessReportReply\x12\x12\n" +
+	"\x04user\x18\x01 \x01(\tR\x04user\x12\x1f\n" +
+	"\vuser_exists\x18\x02 \x01(\bR\n" +
+	"userExists\x12&\n" +
+	"\x0fin_socket_group\x18\x03 \x01(\bR\rinSocketGroup\x12!\n" +
+	"\fsocket_group\x18\x04 \x01(\tR\vsocketGroup\x12\x17\n" +
+	"\ahome_ok\x18\x05 \x01(\bR\x06homeOk\x12\x1f\n" +
+	"\vhome_detail\x18\x06 \x01(\tR\n" +
+	"homeDetail\x12\x1c\n" +
+	"\n" +
+	"ssh_dir_ok\x18\a \x01(\bR\bsshDirOk\x12$\n" +
+	"\x0essh_dir_detail\x18\b \x01(\tR\fsshDirDetail\x12,\n" +
+	"\x12authorized_keys_ok\x18\x0e \x01(\bR\x10authorizedKeysOk\x124\n" +
+	"\x16authorized_keys_detail\x18\x0f \x01(\tR\x14authorizedKeysDetail\x12%\n" +
+	"\x0eforced_command\x18\t \x01(\tR\rforcedCommand\x121\n" +
+	"\x15forced_command_bin_ok\x18\n" +
+	" \x01(\bR\x12forcedCommandBinOk\x124\n" +
+	"\x04keys\x18\v \x03(\v2 .greendot.helper.v1.PipeKeyEntryR\x04keys\x128\n" +
+	"\thost_keys\x18\f \x03(\v2\x1b.greendot.helper.v1.HostKeyR\bhostKeys\x12)\n" +
+	"\x10unparsable_lines\x18\r \x01(\rR\x0funparsableLines\"\xae\x01\n" +
+	"\fPipeKeyEntry\x12 \n" +
+	"\vfingerprint\x18\x01 \x01(\tR\vfingerprint\x12\x1c\n" +
+	"\talgorithm\x18\x02 \x01(\tR\talgorithm\x12\x18\n" +
+	"\acomment\x18\x03 \x01(\tR\acomment\x12*\n" +
+	"\x11forced_command_ok\x18\x04 \x01(\bR\x0fforcedCommandOk\x12\x18\n" +
+	"\aoptions\x18\x05 \x01(\tR\aoptions\"d\n" +
+	"\aHostKey\x12\x1c\n" +
+	"\talgorithm\x18\x01 \x01(\tR\talgorithm\x12 \n" +
+	"\vfingerprint\x18\x02 \x01(\tR\vfingerprint\x12\x19\n" +
+	"\bkey_line\x18\x03 \x01(\tR\akeyLine\"}\n" +
 	"\bZfsClone\x12\x18\n" +
 	"\adataset\x18\x01 \x01(\tR\adataset\x12\x12\n" +
 	"\x04snap\x18\x02 \x01(\tR\x04snap\x12\x16\n" +
@@ -5960,7 +6397,7 @@ const file_helper_proto_rawDesc = "" +
 	"\x16NIC_RDMA_KIND_INACTIVE\x10\x02\x12\"\n" +
 	"\x1eNIC_RDMA_KIND_CAPABLE_DISABLED\x10\x03\x12\x1f\n" +
 	"\x1bNIC_RDMA_KIND_SOFT_ROCEABLE\x10\x04\x12\x1d\n" +
-	"\x19NIC_RDMA_KIND_UNSUPPORTED\x10\x052\xcc#\n" +
+	"\x19NIC_RDMA_KIND_UNSUPPORTED\x10\x052\xca%\n" +
 	"\x06Helper\x12<\n" +
 	"\x04Ping\x12\x19.greendot.helper.v1.Empty\x1a\x19.greendot.helper.v1.Empty\x12O\n" +
 	"\fAuthenticate\x12 .greendot.helper.v1.Authenticate\x1a\x1d.greendot.helper.v1.AuthReply\x12M\n" +
@@ -6006,7 +6443,10 @@ const file_helper_proto_rawDesc = "" +
 	"\fCsiHostGrant\x12 .greendot.helper.v1.CsiHostGrant\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12S\n" +
 	"\rCsiHostRevoke\x12!.greendot.helper.v1.CsiHostRevoke\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12W\n" +
 	"\x0fCsiVolumeExpand\x12#.greendot.helper.v1.CsiVolumeExpand\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12I\n" +
-	"\bZfsClone\x12\x1c.greendot.helper.v1.ZfsClone\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12E\n" +
+	"\bZfsClone\x12\x1c.greendot.helper.v1.ZfsClone\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12M\n" +
+	"\n" +
+	"PipeKeyAdd\x12\x1e.greendot.helper.v1.PipeKeyAdd\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12S\n" +
+	"\rPipeKeyRevoke\x12!.greendot.helper.v1.PipeKeyRevoke\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12E\n" +
 	"\x06RxeAdd\x12\x1a.greendot.helper.v1.RxeAdd\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12M\n" +
 	"\n" +
 	"EnableRoce\x12\x1e.greendot.helper.v1.EnableRoce\x1a\x1d.greendot.helper.v1.TaskEvent0\x01\x12W\n" +
@@ -6024,7 +6464,8 @@ const file_helper_proto_rawDesc = "" +
 	"\rNicRdmaAdvice\x12\x19.greendot.helper.v1.Empty\x1a&.greendot.helper.v1.NicRdmaAdviceReply\x12T\n" +
 	"\vSmartHealth\x12\x1f.greendot.helper.v1.SmartHealth\x1a$.greendot.helper.v1.SmartHealthReply\x12V\n" +
 	"\x0fReconcileDryRun\x12\x19.greendot.helper.v1.Empty\x1a(.greendot.helper.v1.ReconcileDryRunReply\x12K\n" +
-	"\bZvolInfo\x12\x1c.greendot.helper.v1.ZvolInfo\x1a!.greendot.helper.v1.ZvolInfoReplyB2Z0github.com/asdacap/greendotrdma/csi/pkg/helperpbb\x06proto3"
+	"\bZvolInfo\x12\x1c.greendot.helper.v1.ZvolInfo\x1a!.greendot.helper.v1.ZvolInfoReply\x12X\n" +
+	"\x10PipeAccessReport\x12\x19.greendot.helper.v1.Empty\x1a).greendot.helper.v1.PipeAccessReportReplyB2Z0github.com/asdacap/greendotrdma/csi/pkg/helperpbb\x06proto3"
 
 var (
 	file_helper_proto_rawDescOnce sync.Once
@@ -6039,264 +6480,277 @@ func file_helper_proto_rawDescGZIP() []byte {
 }
 
 var file_helper_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_helper_proto_msgTypes = make([]protoimpl.MessageInfo, 92)
+var file_helper_proto_msgTypes = make([]protoimpl.MessageInfo, 97)
 var file_helper_proto_goTypes = []any{
-	(Transport)(0),               // 0: greendot.helper.v1.Transport
-	(VdevLayout)(0),              // 1: greendot.helper.v1.VdevLayout
-	(LvmReportKind)(0),           // 2: greendot.helper.v1.LvmReportKind
-	(ErrKind)(0),                 // 3: greendot.helper.v1.ErrKind
-	(SubStatus)(0),               // 4: greendot.helper.v1.SubStatus
-	(NicRdmaKind)(0),             // 5: greendot.helper.v1.NicRdmaKind
-	(*Empty)(nil),                // 6: greendot.helper.v1.Empty
-	(*NvmetDesired)(nil),         // 7: greendot.helper.v1.NvmetDesired
-	(*NvmetSubsysSpec)(nil),      // 8: greendot.helper.v1.NvmetSubsysSpec
-	(*NvmetNsSpec)(nil),          // 9: greendot.helper.v1.NvmetNsSpec
-	(*NvmetPortSpec)(nil),        // 10: greendot.helper.v1.NvmetPortSpec
-	(*LioDesired)(nil),           // 11: greendot.helper.v1.LioDesired
-	(*LioBackstoreSpec)(nil),     // 12: greendot.helper.v1.LioBackstoreSpec
-	(*LioTargetSpec)(nil),        // 13: greendot.helper.v1.LioTargetSpec
-	(*LioLunSpec)(nil),           // 14: greendot.helper.v1.LioLunSpec
-	(*LioPortalSpec)(nil),        // 15: greendot.helper.v1.LioPortalSpec
-	(*NfsDesired)(nil),           // 16: greendot.helper.v1.NfsDesired
-	(*NfsExportSpec)(nil),        // 17: greendot.helper.v1.NfsExportSpec
-	(*NfsClientSpec)(nil),        // 18: greendot.helper.v1.NfsClientSpec
-	(*Authenticate)(nil),         // 19: greendot.helper.v1.Authenticate
-	(*OkAuth)(nil),               // 20: greendot.helper.v1.OkAuth
-	(*ErrResponse)(nil),          // 21: greendot.helper.v1.ErrResponse
-	(*AuthReply)(nil),            // 22: greendot.helper.v1.AuthReply
-	(*ZvolCreate)(nil),           // 23: greendot.helper.v1.ZvolCreate
-	(*ZvolDelete)(nil),           // 24: greendot.helper.v1.ZvolDelete
-	(*ZvolResize)(nil),           // 25: greendot.helper.v1.ZvolResize
-	(*SnapshotCreate)(nil),       // 26: greendot.helper.v1.SnapshotCreate
-	(*SnapshotDestroy)(nil),      // 27: greendot.helper.v1.SnapshotDestroy
-	(*ZfsFsCreate)(nil),          // 28: greendot.helper.v1.ZfsFsCreate
-	(*ZfsSetMountpoint)(nil),     // 29: greendot.helper.v1.ZfsSetMountpoint
-	(*ZfsMount)(nil),             // 30: greendot.helper.v1.ZfsMount
-	(*ZfsUnmount)(nil),           // 31: greendot.helper.v1.ZfsUnmount
-	(*ZfsDestroy)(nil),           // 32: greendot.helper.v1.ZfsDestroy
-	(*PartitionTableCreate)(nil), // 33: greendot.helper.v1.PartitionTableCreate
-	(*PartitionCreate)(nil),      // 34: greendot.helper.v1.PartitionCreate
-	(*PartitionDelete)(nil),      // 35: greendot.helper.v1.PartitionDelete
-	(*PartitionShrink)(nil),      // 36: greendot.helper.v1.PartitionShrink
-	(*PoolCreate)(nil),           // 37: greendot.helper.v1.PoolCreate
-	(*PoolDeviceAdd)(nil),        // 38: greendot.helper.v1.PoolDeviceAdd
-	(*PoolDeviceRemove)(nil),     // 39: greendot.helper.v1.PoolDeviceRemove
-	(*PoolDeviceDetach)(nil),     // 40: greendot.helper.v1.PoolDeviceDetach
-	(*SmartReport)(nil),          // 41: greendot.helper.v1.SmartReport
-	(*SmartHealth)(nil),          // 42: greendot.helper.v1.SmartHealth
-	(*LvmReport)(nil),            // 43: greendot.helper.v1.LvmReport
-	(*VgCreate)(nil),             // 44: greendot.helper.v1.VgCreate
-	(*VgExtend)(nil),             // 45: greendot.helper.v1.VgExtend
-	(*VgReduce)(nil),             // 46: greendot.helper.v1.VgReduce
-	(*VgRemove)(nil),             // 47: greendot.helper.v1.VgRemove
-	(*LvCreate)(nil),             // 48: greendot.helper.v1.LvCreate
-	(*ThinPoolCreate)(nil),       // 49: greendot.helper.v1.ThinPoolCreate
-	(*ThinLvCreate)(nil),         // 50: greendot.helper.v1.ThinLvCreate
-	(*LvResize)(nil),             // 51: greendot.helper.v1.LvResize
-	(*LvShrink)(nil),             // 52: greendot.helper.v1.LvShrink
-	(*LvRename)(nil),             // 53: greendot.helper.v1.LvRename
-	(*LvDelete)(nil),             // 54: greendot.helper.v1.LvDelete
-	(*Reconcile)(nil),            // 55: greendot.helper.v1.Reconcile
-	(*CsiNvmeApply)(nil),         // 56: greendot.helper.v1.CsiNvmeApply
-	(*CsiNvmeDelete)(nil),        // 57: greendot.helper.v1.CsiNvmeDelete
-	(*CsiHostGrant)(nil),         // 58: greendot.helper.v1.CsiHostGrant
-	(*CsiHostRevoke)(nil),        // 59: greendot.helper.v1.CsiHostRevoke
-	(*CsiVolumeExpand)(nil),      // 60: greendot.helper.v1.CsiVolumeExpand
-	(*ZfsClone)(nil),             // 61: greendot.helper.v1.ZfsClone
-	(*ZvolInfo)(nil),             // 62: greendot.helper.v1.ZvolInfo
-	(*ZvolInfoReply)(nil),        // 63: greendot.helper.v1.ZvolInfoReply
-	(*RxeAdd)(nil),               // 64: greendot.helper.v1.RxeAdd
-	(*EnableRoce)(nil),           // 65: greendot.helper.v1.EnableRoce
-	(*InstallPackages)(nil),      // 66: greendot.helper.v1.InstallPackages
-	(*NfsReportReply)(nil),       // 67: greendot.helper.v1.NfsReportReply
-	(*NfsExportEntryMsg)(nil),    // 68: greendot.helper.v1.NfsExportEntryMsg
-	(*NfsManagedSpec)(nil),       // 69: greendot.helper.v1.NfsManagedSpec
-	(*NvmetReportReply)(nil),     // 70: greendot.helper.v1.NvmetReportReply
-	(*ActualNvmetSubsys)(nil),    // 71: greendot.helper.v1.ActualNvmetSubsys
-	(*ActualNvmetNs)(nil),        // 72: greendot.helper.v1.ActualNvmetNs
-	(*ActualNvmetPort)(nil),      // 73: greendot.helper.v1.ActualNvmetPort
-	(*LioReportReply)(nil),       // 74: greendot.helper.v1.LioReportReply
-	(*ActualLioBackstore)(nil),   // 75: greendot.helper.v1.ActualLioBackstore
-	(*ActualLioTarget)(nil),      // 76: greendot.helper.v1.ActualLioTarget
-	(*ActualLioPortal)(nil),      // 77: greendot.helper.v1.ActualLioPortal
-	(*LioSessionsReply)(nil),     // 78: greendot.helper.v1.LioSessionsReply
-	(*IscsiSessionMsg)(nil),      // 79: greendot.helper.v1.IscsiSessionMsg
-	(*RdmaDevicesReply)(nil),     // 80: greendot.helper.v1.RdmaDevicesReply
-	(*RdmaDevMsg)(nil),           // 81: greendot.helper.v1.RdmaDevMsg
-	(*NicPciAddrsReply)(nil),     // 82: greendot.helper.v1.NicPciAddrsReply
-	(*PciAddrIps)(nil),           // 83: greendot.helper.v1.PciAddrIps
-	(*NicInterfacesReply)(nil),   // 84: greendot.helper.v1.NicInterfacesReply
-	(*NicStatusMsg)(nil),         // 85: greendot.helper.v1.NicStatusMsg
-	(*RoceCapableNicsReply)(nil), // 86: greendot.helper.v1.RoceCapableNicsReply
-	(*RoceCapableNic)(nil),       // 87: greendot.helper.v1.RoceCapableNic
-	(*NicRdmaAdviceReply)(nil),   // 88: greendot.helper.v1.NicRdmaAdviceReply
-	(*NicAdviceMsg)(nil),         // 89: greendot.helper.v1.NicAdviceMsg
-	(*SmartHealthReply)(nil),     // 90: greendot.helper.v1.SmartHealthReply
-	(*SmartHealthMsg)(nil),       // 91: greendot.helper.v1.SmartHealthMsg
-	(*ReconcileDryRunReply)(nil), // 92: greendot.helper.v1.ReconcileDryRunReply
-	(*SubtaskStarted)(nil),       // 93: greendot.helper.v1.SubtaskStarted
-	(*Output)(nil),               // 94: greendot.helper.v1.Output
-	(*SubtaskFinished)(nil),      // 95: greendot.helper.v1.SubtaskFinished
-	(*Finished)(nil),             // 96: greendot.helper.v1.Finished
-	(*TaskEvent)(nil),            // 97: greendot.helper.v1.TaskEvent
+	(Transport)(0),                // 0: greendot.helper.v1.Transport
+	(VdevLayout)(0),               // 1: greendot.helper.v1.VdevLayout
+	(LvmReportKind)(0),            // 2: greendot.helper.v1.LvmReportKind
+	(ErrKind)(0),                  // 3: greendot.helper.v1.ErrKind
+	(SubStatus)(0),                // 4: greendot.helper.v1.SubStatus
+	(NicRdmaKind)(0),              // 5: greendot.helper.v1.NicRdmaKind
+	(*Empty)(nil),                 // 6: greendot.helper.v1.Empty
+	(*NvmetDesired)(nil),          // 7: greendot.helper.v1.NvmetDesired
+	(*NvmetSubsysSpec)(nil),       // 8: greendot.helper.v1.NvmetSubsysSpec
+	(*NvmetNsSpec)(nil),           // 9: greendot.helper.v1.NvmetNsSpec
+	(*NvmetPortSpec)(nil),         // 10: greendot.helper.v1.NvmetPortSpec
+	(*LioDesired)(nil),            // 11: greendot.helper.v1.LioDesired
+	(*LioBackstoreSpec)(nil),      // 12: greendot.helper.v1.LioBackstoreSpec
+	(*LioTargetSpec)(nil),         // 13: greendot.helper.v1.LioTargetSpec
+	(*LioLunSpec)(nil),            // 14: greendot.helper.v1.LioLunSpec
+	(*LioPortalSpec)(nil),         // 15: greendot.helper.v1.LioPortalSpec
+	(*NfsDesired)(nil),            // 16: greendot.helper.v1.NfsDesired
+	(*NfsExportSpec)(nil),         // 17: greendot.helper.v1.NfsExportSpec
+	(*NfsClientSpec)(nil),         // 18: greendot.helper.v1.NfsClientSpec
+	(*Authenticate)(nil),          // 19: greendot.helper.v1.Authenticate
+	(*OkAuth)(nil),                // 20: greendot.helper.v1.OkAuth
+	(*ErrResponse)(nil),           // 21: greendot.helper.v1.ErrResponse
+	(*AuthReply)(nil),             // 22: greendot.helper.v1.AuthReply
+	(*ZvolCreate)(nil),            // 23: greendot.helper.v1.ZvolCreate
+	(*ZvolDelete)(nil),            // 24: greendot.helper.v1.ZvolDelete
+	(*ZvolResize)(nil),            // 25: greendot.helper.v1.ZvolResize
+	(*SnapshotCreate)(nil),        // 26: greendot.helper.v1.SnapshotCreate
+	(*SnapshotDestroy)(nil),       // 27: greendot.helper.v1.SnapshotDestroy
+	(*ZfsFsCreate)(nil),           // 28: greendot.helper.v1.ZfsFsCreate
+	(*ZfsSetMountpoint)(nil),      // 29: greendot.helper.v1.ZfsSetMountpoint
+	(*ZfsMount)(nil),              // 30: greendot.helper.v1.ZfsMount
+	(*ZfsUnmount)(nil),            // 31: greendot.helper.v1.ZfsUnmount
+	(*ZfsDestroy)(nil),            // 32: greendot.helper.v1.ZfsDestroy
+	(*PartitionTableCreate)(nil),  // 33: greendot.helper.v1.PartitionTableCreate
+	(*PartitionCreate)(nil),       // 34: greendot.helper.v1.PartitionCreate
+	(*PartitionDelete)(nil),       // 35: greendot.helper.v1.PartitionDelete
+	(*PartitionShrink)(nil),       // 36: greendot.helper.v1.PartitionShrink
+	(*PoolCreate)(nil),            // 37: greendot.helper.v1.PoolCreate
+	(*PoolDeviceAdd)(nil),         // 38: greendot.helper.v1.PoolDeviceAdd
+	(*PoolDeviceRemove)(nil),      // 39: greendot.helper.v1.PoolDeviceRemove
+	(*PoolDeviceDetach)(nil),      // 40: greendot.helper.v1.PoolDeviceDetach
+	(*SmartReport)(nil),           // 41: greendot.helper.v1.SmartReport
+	(*SmartHealth)(nil),           // 42: greendot.helper.v1.SmartHealth
+	(*LvmReport)(nil),             // 43: greendot.helper.v1.LvmReport
+	(*VgCreate)(nil),              // 44: greendot.helper.v1.VgCreate
+	(*VgExtend)(nil),              // 45: greendot.helper.v1.VgExtend
+	(*VgReduce)(nil),              // 46: greendot.helper.v1.VgReduce
+	(*VgRemove)(nil),              // 47: greendot.helper.v1.VgRemove
+	(*LvCreate)(nil),              // 48: greendot.helper.v1.LvCreate
+	(*ThinPoolCreate)(nil),        // 49: greendot.helper.v1.ThinPoolCreate
+	(*ThinLvCreate)(nil),          // 50: greendot.helper.v1.ThinLvCreate
+	(*LvResize)(nil),              // 51: greendot.helper.v1.LvResize
+	(*LvShrink)(nil),              // 52: greendot.helper.v1.LvShrink
+	(*LvRename)(nil),              // 53: greendot.helper.v1.LvRename
+	(*LvDelete)(nil),              // 54: greendot.helper.v1.LvDelete
+	(*Reconcile)(nil),             // 55: greendot.helper.v1.Reconcile
+	(*CsiNvmeApply)(nil),          // 56: greendot.helper.v1.CsiNvmeApply
+	(*CsiNvmeDelete)(nil),         // 57: greendot.helper.v1.CsiNvmeDelete
+	(*CsiHostGrant)(nil),          // 58: greendot.helper.v1.CsiHostGrant
+	(*CsiHostRevoke)(nil),         // 59: greendot.helper.v1.CsiHostRevoke
+	(*CsiVolumeExpand)(nil),       // 60: greendot.helper.v1.CsiVolumeExpand
+	(*PipeKeyAdd)(nil),            // 61: greendot.helper.v1.PipeKeyAdd
+	(*PipeKeyRevoke)(nil),         // 62: greendot.helper.v1.PipeKeyRevoke
+	(*PipeAccessReportReply)(nil), // 63: greendot.helper.v1.PipeAccessReportReply
+	(*PipeKeyEntry)(nil),          // 64: greendot.helper.v1.PipeKeyEntry
+	(*HostKey)(nil),               // 65: greendot.helper.v1.HostKey
+	(*ZfsClone)(nil),              // 66: greendot.helper.v1.ZfsClone
+	(*ZvolInfo)(nil),              // 67: greendot.helper.v1.ZvolInfo
+	(*ZvolInfoReply)(nil),         // 68: greendot.helper.v1.ZvolInfoReply
+	(*RxeAdd)(nil),                // 69: greendot.helper.v1.RxeAdd
+	(*EnableRoce)(nil),            // 70: greendot.helper.v1.EnableRoce
+	(*InstallPackages)(nil),       // 71: greendot.helper.v1.InstallPackages
+	(*NfsReportReply)(nil),        // 72: greendot.helper.v1.NfsReportReply
+	(*NfsExportEntryMsg)(nil),     // 73: greendot.helper.v1.NfsExportEntryMsg
+	(*NfsManagedSpec)(nil),        // 74: greendot.helper.v1.NfsManagedSpec
+	(*NvmetReportReply)(nil),      // 75: greendot.helper.v1.NvmetReportReply
+	(*ActualNvmetSubsys)(nil),     // 76: greendot.helper.v1.ActualNvmetSubsys
+	(*ActualNvmetNs)(nil),         // 77: greendot.helper.v1.ActualNvmetNs
+	(*ActualNvmetPort)(nil),       // 78: greendot.helper.v1.ActualNvmetPort
+	(*LioReportReply)(nil),        // 79: greendot.helper.v1.LioReportReply
+	(*ActualLioBackstore)(nil),    // 80: greendot.helper.v1.ActualLioBackstore
+	(*ActualLioTarget)(nil),       // 81: greendot.helper.v1.ActualLioTarget
+	(*ActualLioPortal)(nil),       // 82: greendot.helper.v1.ActualLioPortal
+	(*LioSessionsReply)(nil),      // 83: greendot.helper.v1.LioSessionsReply
+	(*IscsiSessionMsg)(nil),       // 84: greendot.helper.v1.IscsiSessionMsg
+	(*RdmaDevicesReply)(nil),      // 85: greendot.helper.v1.RdmaDevicesReply
+	(*RdmaDevMsg)(nil),            // 86: greendot.helper.v1.RdmaDevMsg
+	(*NicPciAddrsReply)(nil),      // 87: greendot.helper.v1.NicPciAddrsReply
+	(*PciAddrIps)(nil),            // 88: greendot.helper.v1.PciAddrIps
+	(*NicInterfacesReply)(nil),    // 89: greendot.helper.v1.NicInterfacesReply
+	(*NicStatusMsg)(nil),          // 90: greendot.helper.v1.NicStatusMsg
+	(*RoceCapableNicsReply)(nil),  // 91: greendot.helper.v1.RoceCapableNicsReply
+	(*RoceCapableNic)(nil),        // 92: greendot.helper.v1.RoceCapableNic
+	(*NicRdmaAdviceReply)(nil),    // 93: greendot.helper.v1.NicRdmaAdviceReply
+	(*NicAdviceMsg)(nil),          // 94: greendot.helper.v1.NicAdviceMsg
+	(*SmartHealthReply)(nil),      // 95: greendot.helper.v1.SmartHealthReply
+	(*SmartHealthMsg)(nil),        // 96: greendot.helper.v1.SmartHealthMsg
+	(*ReconcileDryRunReply)(nil),  // 97: greendot.helper.v1.ReconcileDryRunReply
+	(*SubtaskStarted)(nil),        // 98: greendot.helper.v1.SubtaskStarted
+	(*Output)(nil),                // 99: greendot.helper.v1.Output
+	(*SubtaskFinished)(nil),       // 100: greendot.helper.v1.SubtaskFinished
+	(*Finished)(nil),              // 101: greendot.helper.v1.Finished
+	(*TaskEvent)(nil),             // 102: greendot.helper.v1.TaskEvent
 }
 var file_helper_proto_depIdxs = []int32{
-	8,  // 0: greendot.helper.v1.NvmetDesired.subsystems:type_name -> greendot.helper.v1.NvmetSubsysSpec
-	10, // 1: greendot.helper.v1.NvmetDesired.ports:type_name -> greendot.helper.v1.NvmetPortSpec
-	9,  // 2: greendot.helper.v1.NvmetSubsysSpec.namespaces:type_name -> greendot.helper.v1.NvmetNsSpec
-	0,  // 3: greendot.helper.v1.NvmetPortSpec.trtype:type_name -> greendot.helper.v1.Transport
-	12, // 4: greendot.helper.v1.LioDesired.backstores:type_name -> greendot.helper.v1.LioBackstoreSpec
-	13, // 5: greendot.helper.v1.LioDesired.targets:type_name -> greendot.helper.v1.LioTargetSpec
-	14, // 6: greendot.helper.v1.LioTargetSpec.luns:type_name -> greendot.helper.v1.LioLunSpec
-	15, // 7: greendot.helper.v1.LioTargetSpec.portals:type_name -> greendot.helper.v1.LioPortalSpec
-	17, // 8: greendot.helper.v1.NfsDesired.exports:type_name -> greendot.helper.v1.NfsExportSpec
-	18, // 9: greendot.helper.v1.NfsExportSpec.clients:type_name -> greendot.helper.v1.NfsClientSpec
-	3,  // 10: greendot.helper.v1.ErrResponse.kind:type_name -> greendot.helper.v1.ErrKind
-	20, // 11: greendot.helper.v1.AuthReply.ok:type_name -> greendot.helper.v1.OkAuth
-	21, // 12: greendot.helper.v1.AuthReply.err:type_name -> greendot.helper.v1.ErrResponse
-	1,  // 13: greendot.helper.v1.PoolCreate.vdev:type_name -> greendot.helper.v1.VdevLayout
-	2,  // 14: greendot.helper.v1.LvmReport.what:type_name -> greendot.helper.v1.LvmReportKind
-	0,  // 15: greendot.helper.v1.CsiNvmeApply.transport:type_name -> greendot.helper.v1.Transport
-	68, // 16: greendot.helper.v1.NfsReportReply.exports:type_name -> greendot.helper.v1.NfsExportEntryMsg
-	69, // 17: greendot.helper.v1.NfsReportReply.managed:type_name -> greendot.helper.v1.NfsManagedSpec
-	71, // 18: greendot.helper.v1.NvmetReportReply.subsystems:type_name -> greendot.helper.v1.ActualNvmetSubsys
-	73, // 19: greendot.helper.v1.NvmetReportReply.ports:type_name -> greendot.helper.v1.ActualNvmetPort
-	72, // 20: greendot.helper.v1.ActualNvmetSubsys.namespaces:type_name -> greendot.helper.v1.ActualNvmetNs
-	75, // 21: greendot.helper.v1.LioReportReply.backstores:type_name -> greendot.helper.v1.ActualLioBackstore
-	76, // 22: greendot.helper.v1.LioReportReply.targets:type_name -> greendot.helper.v1.ActualLioTarget
-	77, // 23: greendot.helper.v1.ActualLioTarget.portals:type_name -> greendot.helper.v1.ActualLioPortal
-	79, // 24: greendot.helper.v1.LioSessionsReply.sessions:type_name -> greendot.helper.v1.IscsiSessionMsg
-	81, // 25: greendot.helper.v1.RdmaDevicesReply.devices:type_name -> greendot.helper.v1.RdmaDevMsg
-	83, // 26: greendot.helper.v1.NicPciAddrsReply.entries:type_name -> greendot.helper.v1.PciAddrIps
-	85, // 27: greendot.helper.v1.NicInterfacesReply.nics:type_name -> greendot.helper.v1.NicStatusMsg
-	5,  // 28: greendot.helper.v1.NicStatusMsg.kind:type_name -> greendot.helper.v1.NicRdmaKind
-	87, // 29: greendot.helper.v1.RoceCapableNicsReply.nics:type_name -> greendot.helper.v1.RoceCapableNic
-	89, // 30: greendot.helper.v1.NicRdmaAdviceReply.advice:type_name -> greendot.helper.v1.NicAdviceMsg
-	91, // 31: greendot.helper.v1.SmartHealthReply.devices:type_name -> greendot.helper.v1.SmartHealthMsg
-	4,  // 32: greendot.helper.v1.SubtaskFinished.status:type_name -> greendot.helper.v1.SubStatus
-	4,  // 33: greendot.helper.v1.Finished.status:type_name -> greendot.helper.v1.SubStatus
-	93, // 34: greendot.helper.v1.TaskEvent.subtask_started:type_name -> greendot.helper.v1.SubtaskStarted
-	94, // 35: greendot.helper.v1.TaskEvent.stdout:type_name -> greendot.helper.v1.Output
-	94, // 36: greendot.helper.v1.TaskEvent.stderr:type_name -> greendot.helper.v1.Output
-	95, // 37: greendot.helper.v1.TaskEvent.subtask_finished:type_name -> greendot.helper.v1.SubtaskFinished
-	96, // 38: greendot.helper.v1.TaskEvent.finished:type_name -> greendot.helper.v1.Finished
-	6,  // 39: greendot.helper.v1.Helper.Ping:input_type -> greendot.helper.v1.Empty
-	19, // 40: greendot.helper.v1.Helper.Authenticate:input_type -> greendot.helper.v1.Authenticate
-	23, // 41: greendot.helper.v1.Helper.ZvolCreate:input_type -> greendot.helper.v1.ZvolCreate
-	24, // 42: greendot.helper.v1.Helper.ZvolDelete:input_type -> greendot.helper.v1.ZvolDelete
-	25, // 43: greendot.helper.v1.Helper.ZvolResize:input_type -> greendot.helper.v1.ZvolResize
-	26, // 44: greendot.helper.v1.Helper.SnapshotCreate:input_type -> greendot.helper.v1.SnapshotCreate
-	27, // 45: greendot.helper.v1.Helper.SnapshotDestroy:input_type -> greendot.helper.v1.SnapshotDestroy
-	28, // 46: greendot.helper.v1.Helper.ZfsFsCreate:input_type -> greendot.helper.v1.ZfsFsCreate
-	29, // 47: greendot.helper.v1.Helper.ZfsSetMountpoint:input_type -> greendot.helper.v1.ZfsSetMountpoint
-	30, // 48: greendot.helper.v1.Helper.ZfsMount:input_type -> greendot.helper.v1.ZfsMount
-	31, // 49: greendot.helper.v1.Helper.ZfsUnmount:input_type -> greendot.helper.v1.ZfsUnmount
-	32, // 50: greendot.helper.v1.Helper.ZfsDestroy:input_type -> greendot.helper.v1.ZfsDestroy
-	37, // 51: greendot.helper.v1.Helper.PoolCreate:input_type -> greendot.helper.v1.PoolCreate
-	38, // 52: greendot.helper.v1.Helper.PoolDeviceAdd:input_type -> greendot.helper.v1.PoolDeviceAdd
-	39, // 53: greendot.helper.v1.Helper.PoolDeviceRemove:input_type -> greendot.helper.v1.PoolDeviceRemove
-	40, // 54: greendot.helper.v1.Helper.PoolDeviceDetach:input_type -> greendot.helper.v1.PoolDeviceDetach
-	33, // 55: greendot.helper.v1.Helper.PartitionTableCreate:input_type -> greendot.helper.v1.PartitionTableCreate
-	34, // 56: greendot.helper.v1.Helper.PartitionCreate:input_type -> greendot.helper.v1.PartitionCreate
-	35, // 57: greendot.helper.v1.Helper.PartitionDelete:input_type -> greendot.helper.v1.PartitionDelete
-	36, // 58: greendot.helper.v1.Helper.PartitionShrink:input_type -> greendot.helper.v1.PartitionShrink
-	43, // 59: greendot.helper.v1.Helper.LvmReport:input_type -> greendot.helper.v1.LvmReport
-	44, // 60: greendot.helper.v1.Helper.VgCreate:input_type -> greendot.helper.v1.VgCreate
-	45, // 61: greendot.helper.v1.Helper.VgExtend:input_type -> greendot.helper.v1.VgExtend
-	46, // 62: greendot.helper.v1.Helper.VgReduce:input_type -> greendot.helper.v1.VgReduce
-	47, // 63: greendot.helper.v1.Helper.VgRemove:input_type -> greendot.helper.v1.VgRemove
-	48, // 64: greendot.helper.v1.Helper.LvCreate:input_type -> greendot.helper.v1.LvCreate
-	49, // 65: greendot.helper.v1.Helper.ThinPoolCreate:input_type -> greendot.helper.v1.ThinPoolCreate
-	50, // 66: greendot.helper.v1.Helper.ThinLvCreate:input_type -> greendot.helper.v1.ThinLvCreate
-	51, // 67: greendot.helper.v1.Helper.LvResize:input_type -> greendot.helper.v1.LvResize
-	52, // 68: greendot.helper.v1.Helper.LvShrink:input_type -> greendot.helper.v1.LvShrink
-	53, // 69: greendot.helper.v1.Helper.LvRename:input_type -> greendot.helper.v1.LvRename
-	54, // 70: greendot.helper.v1.Helper.LvDelete:input_type -> greendot.helper.v1.LvDelete
-	55, // 71: greendot.helper.v1.Helper.Reconcile:input_type -> greendot.helper.v1.Reconcile
-	56, // 72: greendot.helper.v1.Helper.CsiNvmeApply:input_type -> greendot.helper.v1.CsiNvmeApply
-	57, // 73: greendot.helper.v1.Helper.CsiNvmeDelete:input_type -> greendot.helper.v1.CsiNvmeDelete
-	58, // 74: greendot.helper.v1.Helper.CsiHostGrant:input_type -> greendot.helper.v1.CsiHostGrant
-	59, // 75: greendot.helper.v1.Helper.CsiHostRevoke:input_type -> greendot.helper.v1.CsiHostRevoke
-	60, // 76: greendot.helper.v1.Helper.CsiVolumeExpand:input_type -> greendot.helper.v1.CsiVolumeExpand
-	61, // 77: greendot.helper.v1.Helper.ZfsClone:input_type -> greendot.helper.v1.ZfsClone
-	64, // 78: greendot.helper.v1.Helper.RxeAdd:input_type -> greendot.helper.v1.RxeAdd
-	65, // 79: greendot.helper.v1.Helper.EnableRoce:input_type -> greendot.helper.v1.EnableRoce
-	66, // 80: greendot.helper.v1.Helper.InstallPackages:input_type -> greendot.helper.v1.InstallPackages
-	41, // 81: greendot.helper.v1.Helper.SmartReport:input_type -> greendot.helper.v1.SmartReport
-	6,  // 82: greendot.helper.v1.Helper.RdmaResources:input_type -> greendot.helper.v1.Empty
-	6,  // 83: greendot.helper.v1.Helper.NfsReport:input_type -> greendot.helper.v1.Empty
-	6,  // 84: greendot.helper.v1.Helper.NvmetReport:input_type -> greendot.helper.v1.Empty
-	6,  // 85: greendot.helper.v1.Helper.LioReport:input_type -> greendot.helper.v1.Empty
-	6,  // 86: greendot.helper.v1.Helper.LioSessions:input_type -> greendot.helper.v1.Empty
-	6,  // 87: greendot.helper.v1.Helper.RdmaDevices:input_type -> greendot.helper.v1.Empty
-	6,  // 88: greendot.helper.v1.Helper.NicPciAddrs:input_type -> greendot.helper.v1.Empty
-	6,  // 89: greendot.helper.v1.Helper.NicInterfaces:input_type -> greendot.helper.v1.Empty
-	6,  // 90: greendot.helper.v1.Helper.RoceCapableNics:input_type -> greendot.helper.v1.Empty
-	6,  // 91: greendot.helper.v1.Helper.NicRdmaAdvice:input_type -> greendot.helper.v1.Empty
-	42, // 92: greendot.helper.v1.Helper.SmartHealth:input_type -> greendot.helper.v1.SmartHealth
-	6,  // 93: greendot.helper.v1.Helper.ReconcileDryRun:input_type -> greendot.helper.v1.Empty
-	62, // 94: greendot.helper.v1.Helper.ZvolInfo:input_type -> greendot.helper.v1.ZvolInfo
-	6,  // 95: greendot.helper.v1.Helper.Ping:output_type -> greendot.helper.v1.Empty
-	22, // 96: greendot.helper.v1.Helper.Authenticate:output_type -> greendot.helper.v1.AuthReply
-	97, // 97: greendot.helper.v1.Helper.ZvolCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 98: greendot.helper.v1.Helper.ZvolDelete:output_type -> greendot.helper.v1.TaskEvent
-	97, // 99: greendot.helper.v1.Helper.ZvolResize:output_type -> greendot.helper.v1.TaskEvent
-	97, // 100: greendot.helper.v1.Helper.SnapshotCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 101: greendot.helper.v1.Helper.SnapshotDestroy:output_type -> greendot.helper.v1.TaskEvent
-	97, // 102: greendot.helper.v1.Helper.ZfsFsCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 103: greendot.helper.v1.Helper.ZfsSetMountpoint:output_type -> greendot.helper.v1.TaskEvent
-	97, // 104: greendot.helper.v1.Helper.ZfsMount:output_type -> greendot.helper.v1.TaskEvent
-	97, // 105: greendot.helper.v1.Helper.ZfsUnmount:output_type -> greendot.helper.v1.TaskEvent
-	97, // 106: greendot.helper.v1.Helper.ZfsDestroy:output_type -> greendot.helper.v1.TaskEvent
-	97, // 107: greendot.helper.v1.Helper.PoolCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 108: greendot.helper.v1.Helper.PoolDeviceAdd:output_type -> greendot.helper.v1.TaskEvent
-	97, // 109: greendot.helper.v1.Helper.PoolDeviceRemove:output_type -> greendot.helper.v1.TaskEvent
-	97, // 110: greendot.helper.v1.Helper.PoolDeviceDetach:output_type -> greendot.helper.v1.TaskEvent
-	97, // 111: greendot.helper.v1.Helper.PartitionTableCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 112: greendot.helper.v1.Helper.PartitionCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 113: greendot.helper.v1.Helper.PartitionDelete:output_type -> greendot.helper.v1.TaskEvent
-	97, // 114: greendot.helper.v1.Helper.PartitionShrink:output_type -> greendot.helper.v1.TaskEvent
-	97, // 115: greendot.helper.v1.Helper.LvmReport:output_type -> greendot.helper.v1.TaskEvent
-	97, // 116: greendot.helper.v1.Helper.VgCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 117: greendot.helper.v1.Helper.VgExtend:output_type -> greendot.helper.v1.TaskEvent
-	97, // 118: greendot.helper.v1.Helper.VgReduce:output_type -> greendot.helper.v1.TaskEvent
-	97, // 119: greendot.helper.v1.Helper.VgRemove:output_type -> greendot.helper.v1.TaskEvent
-	97, // 120: greendot.helper.v1.Helper.LvCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 121: greendot.helper.v1.Helper.ThinPoolCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 122: greendot.helper.v1.Helper.ThinLvCreate:output_type -> greendot.helper.v1.TaskEvent
-	97, // 123: greendot.helper.v1.Helper.LvResize:output_type -> greendot.helper.v1.TaskEvent
-	97, // 124: greendot.helper.v1.Helper.LvShrink:output_type -> greendot.helper.v1.TaskEvent
-	97, // 125: greendot.helper.v1.Helper.LvRename:output_type -> greendot.helper.v1.TaskEvent
-	97, // 126: greendot.helper.v1.Helper.LvDelete:output_type -> greendot.helper.v1.TaskEvent
-	97, // 127: greendot.helper.v1.Helper.Reconcile:output_type -> greendot.helper.v1.TaskEvent
-	97, // 128: greendot.helper.v1.Helper.CsiNvmeApply:output_type -> greendot.helper.v1.TaskEvent
-	97, // 129: greendot.helper.v1.Helper.CsiNvmeDelete:output_type -> greendot.helper.v1.TaskEvent
-	97, // 130: greendot.helper.v1.Helper.CsiHostGrant:output_type -> greendot.helper.v1.TaskEvent
-	97, // 131: greendot.helper.v1.Helper.CsiHostRevoke:output_type -> greendot.helper.v1.TaskEvent
-	97, // 132: greendot.helper.v1.Helper.CsiVolumeExpand:output_type -> greendot.helper.v1.TaskEvent
-	97, // 133: greendot.helper.v1.Helper.ZfsClone:output_type -> greendot.helper.v1.TaskEvent
-	97, // 134: greendot.helper.v1.Helper.RxeAdd:output_type -> greendot.helper.v1.TaskEvent
-	97, // 135: greendot.helper.v1.Helper.EnableRoce:output_type -> greendot.helper.v1.TaskEvent
-	97, // 136: greendot.helper.v1.Helper.InstallPackages:output_type -> greendot.helper.v1.TaskEvent
-	97, // 137: greendot.helper.v1.Helper.SmartReport:output_type -> greendot.helper.v1.TaskEvent
-	97, // 138: greendot.helper.v1.Helper.RdmaResources:output_type -> greendot.helper.v1.TaskEvent
-	67, // 139: greendot.helper.v1.Helper.NfsReport:output_type -> greendot.helper.v1.NfsReportReply
-	70, // 140: greendot.helper.v1.Helper.NvmetReport:output_type -> greendot.helper.v1.NvmetReportReply
-	74, // 141: greendot.helper.v1.Helper.LioReport:output_type -> greendot.helper.v1.LioReportReply
-	78, // 142: greendot.helper.v1.Helper.LioSessions:output_type -> greendot.helper.v1.LioSessionsReply
-	80, // 143: greendot.helper.v1.Helper.RdmaDevices:output_type -> greendot.helper.v1.RdmaDevicesReply
-	82, // 144: greendot.helper.v1.Helper.NicPciAddrs:output_type -> greendot.helper.v1.NicPciAddrsReply
-	84, // 145: greendot.helper.v1.Helper.NicInterfaces:output_type -> greendot.helper.v1.NicInterfacesReply
-	86, // 146: greendot.helper.v1.Helper.RoceCapableNics:output_type -> greendot.helper.v1.RoceCapableNicsReply
-	88, // 147: greendot.helper.v1.Helper.NicRdmaAdvice:output_type -> greendot.helper.v1.NicRdmaAdviceReply
-	90, // 148: greendot.helper.v1.Helper.SmartHealth:output_type -> greendot.helper.v1.SmartHealthReply
-	92, // 149: greendot.helper.v1.Helper.ReconcileDryRun:output_type -> greendot.helper.v1.ReconcileDryRunReply
-	63, // 150: greendot.helper.v1.Helper.ZvolInfo:output_type -> greendot.helper.v1.ZvolInfoReply
-	95, // [95:151] is the sub-list for method output_type
-	39, // [39:95] is the sub-list for method input_type
-	39, // [39:39] is the sub-list for extension type_name
-	39, // [39:39] is the sub-list for extension extendee
-	0,  // [0:39] is the sub-list for field type_name
+	8,   // 0: greendot.helper.v1.NvmetDesired.subsystems:type_name -> greendot.helper.v1.NvmetSubsysSpec
+	10,  // 1: greendot.helper.v1.NvmetDesired.ports:type_name -> greendot.helper.v1.NvmetPortSpec
+	9,   // 2: greendot.helper.v1.NvmetSubsysSpec.namespaces:type_name -> greendot.helper.v1.NvmetNsSpec
+	0,   // 3: greendot.helper.v1.NvmetPortSpec.trtype:type_name -> greendot.helper.v1.Transport
+	12,  // 4: greendot.helper.v1.LioDesired.backstores:type_name -> greendot.helper.v1.LioBackstoreSpec
+	13,  // 5: greendot.helper.v1.LioDesired.targets:type_name -> greendot.helper.v1.LioTargetSpec
+	14,  // 6: greendot.helper.v1.LioTargetSpec.luns:type_name -> greendot.helper.v1.LioLunSpec
+	15,  // 7: greendot.helper.v1.LioTargetSpec.portals:type_name -> greendot.helper.v1.LioPortalSpec
+	17,  // 8: greendot.helper.v1.NfsDesired.exports:type_name -> greendot.helper.v1.NfsExportSpec
+	18,  // 9: greendot.helper.v1.NfsExportSpec.clients:type_name -> greendot.helper.v1.NfsClientSpec
+	3,   // 10: greendot.helper.v1.ErrResponse.kind:type_name -> greendot.helper.v1.ErrKind
+	20,  // 11: greendot.helper.v1.AuthReply.ok:type_name -> greendot.helper.v1.OkAuth
+	21,  // 12: greendot.helper.v1.AuthReply.err:type_name -> greendot.helper.v1.ErrResponse
+	1,   // 13: greendot.helper.v1.PoolCreate.vdev:type_name -> greendot.helper.v1.VdevLayout
+	2,   // 14: greendot.helper.v1.LvmReport.what:type_name -> greendot.helper.v1.LvmReportKind
+	0,   // 15: greendot.helper.v1.CsiNvmeApply.transport:type_name -> greendot.helper.v1.Transport
+	64,  // 16: greendot.helper.v1.PipeAccessReportReply.keys:type_name -> greendot.helper.v1.PipeKeyEntry
+	65,  // 17: greendot.helper.v1.PipeAccessReportReply.host_keys:type_name -> greendot.helper.v1.HostKey
+	73,  // 18: greendot.helper.v1.NfsReportReply.exports:type_name -> greendot.helper.v1.NfsExportEntryMsg
+	74,  // 19: greendot.helper.v1.NfsReportReply.managed:type_name -> greendot.helper.v1.NfsManagedSpec
+	76,  // 20: greendot.helper.v1.NvmetReportReply.subsystems:type_name -> greendot.helper.v1.ActualNvmetSubsys
+	78,  // 21: greendot.helper.v1.NvmetReportReply.ports:type_name -> greendot.helper.v1.ActualNvmetPort
+	77,  // 22: greendot.helper.v1.ActualNvmetSubsys.namespaces:type_name -> greendot.helper.v1.ActualNvmetNs
+	80,  // 23: greendot.helper.v1.LioReportReply.backstores:type_name -> greendot.helper.v1.ActualLioBackstore
+	81,  // 24: greendot.helper.v1.LioReportReply.targets:type_name -> greendot.helper.v1.ActualLioTarget
+	82,  // 25: greendot.helper.v1.ActualLioTarget.portals:type_name -> greendot.helper.v1.ActualLioPortal
+	84,  // 26: greendot.helper.v1.LioSessionsReply.sessions:type_name -> greendot.helper.v1.IscsiSessionMsg
+	86,  // 27: greendot.helper.v1.RdmaDevicesReply.devices:type_name -> greendot.helper.v1.RdmaDevMsg
+	88,  // 28: greendot.helper.v1.NicPciAddrsReply.entries:type_name -> greendot.helper.v1.PciAddrIps
+	90,  // 29: greendot.helper.v1.NicInterfacesReply.nics:type_name -> greendot.helper.v1.NicStatusMsg
+	5,   // 30: greendot.helper.v1.NicStatusMsg.kind:type_name -> greendot.helper.v1.NicRdmaKind
+	92,  // 31: greendot.helper.v1.RoceCapableNicsReply.nics:type_name -> greendot.helper.v1.RoceCapableNic
+	94,  // 32: greendot.helper.v1.NicRdmaAdviceReply.advice:type_name -> greendot.helper.v1.NicAdviceMsg
+	96,  // 33: greendot.helper.v1.SmartHealthReply.devices:type_name -> greendot.helper.v1.SmartHealthMsg
+	4,   // 34: greendot.helper.v1.SubtaskFinished.status:type_name -> greendot.helper.v1.SubStatus
+	4,   // 35: greendot.helper.v1.Finished.status:type_name -> greendot.helper.v1.SubStatus
+	98,  // 36: greendot.helper.v1.TaskEvent.subtask_started:type_name -> greendot.helper.v1.SubtaskStarted
+	99,  // 37: greendot.helper.v1.TaskEvent.stdout:type_name -> greendot.helper.v1.Output
+	99,  // 38: greendot.helper.v1.TaskEvent.stderr:type_name -> greendot.helper.v1.Output
+	100, // 39: greendot.helper.v1.TaskEvent.subtask_finished:type_name -> greendot.helper.v1.SubtaskFinished
+	101, // 40: greendot.helper.v1.TaskEvent.finished:type_name -> greendot.helper.v1.Finished
+	6,   // 41: greendot.helper.v1.Helper.Ping:input_type -> greendot.helper.v1.Empty
+	19,  // 42: greendot.helper.v1.Helper.Authenticate:input_type -> greendot.helper.v1.Authenticate
+	23,  // 43: greendot.helper.v1.Helper.ZvolCreate:input_type -> greendot.helper.v1.ZvolCreate
+	24,  // 44: greendot.helper.v1.Helper.ZvolDelete:input_type -> greendot.helper.v1.ZvolDelete
+	25,  // 45: greendot.helper.v1.Helper.ZvolResize:input_type -> greendot.helper.v1.ZvolResize
+	26,  // 46: greendot.helper.v1.Helper.SnapshotCreate:input_type -> greendot.helper.v1.SnapshotCreate
+	27,  // 47: greendot.helper.v1.Helper.SnapshotDestroy:input_type -> greendot.helper.v1.SnapshotDestroy
+	28,  // 48: greendot.helper.v1.Helper.ZfsFsCreate:input_type -> greendot.helper.v1.ZfsFsCreate
+	29,  // 49: greendot.helper.v1.Helper.ZfsSetMountpoint:input_type -> greendot.helper.v1.ZfsSetMountpoint
+	30,  // 50: greendot.helper.v1.Helper.ZfsMount:input_type -> greendot.helper.v1.ZfsMount
+	31,  // 51: greendot.helper.v1.Helper.ZfsUnmount:input_type -> greendot.helper.v1.ZfsUnmount
+	32,  // 52: greendot.helper.v1.Helper.ZfsDestroy:input_type -> greendot.helper.v1.ZfsDestroy
+	37,  // 53: greendot.helper.v1.Helper.PoolCreate:input_type -> greendot.helper.v1.PoolCreate
+	38,  // 54: greendot.helper.v1.Helper.PoolDeviceAdd:input_type -> greendot.helper.v1.PoolDeviceAdd
+	39,  // 55: greendot.helper.v1.Helper.PoolDeviceRemove:input_type -> greendot.helper.v1.PoolDeviceRemove
+	40,  // 56: greendot.helper.v1.Helper.PoolDeviceDetach:input_type -> greendot.helper.v1.PoolDeviceDetach
+	33,  // 57: greendot.helper.v1.Helper.PartitionTableCreate:input_type -> greendot.helper.v1.PartitionTableCreate
+	34,  // 58: greendot.helper.v1.Helper.PartitionCreate:input_type -> greendot.helper.v1.PartitionCreate
+	35,  // 59: greendot.helper.v1.Helper.PartitionDelete:input_type -> greendot.helper.v1.PartitionDelete
+	36,  // 60: greendot.helper.v1.Helper.PartitionShrink:input_type -> greendot.helper.v1.PartitionShrink
+	43,  // 61: greendot.helper.v1.Helper.LvmReport:input_type -> greendot.helper.v1.LvmReport
+	44,  // 62: greendot.helper.v1.Helper.VgCreate:input_type -> greendot.helper.v1.VgCreate
+	45,  // 63: greendot.helper.v1.Helper.VgExtend:input_type -> greendot.helper.v1.VgExtend
+	46,  // 64: greendot.helper.v1.Helper.VgReduce:input_type -> greendot.helper.v1.VgReduce
+	47,  // 65: greendot.helper.v1.Helper.VgRemove:input_type -> greendot.helper.v1.VgRemove
+	48,  // 66: greendot.helper.v1.Helper.LvCreate:input_type -> greendot.helper.v1.LvCreate
+	49,  // 67: greendot.helper.v1.Helper.ThinPoolCreate:input_type -> greendot.helper.v1.ThinPoolCreate
+	50,  // 68: greendot.helper.v1.Helper.ThinLvCreate:input_type -> greendot.helper.v1.ThinLvCreate
+	51,  // 69: greendot.helper.v1.Helper.LvResize:input_type -> greendot.helper.v1.LvResize
+	52,  // 70: greendot.helper.v1.Helper.LvShrink:input_type -> greendot.helper.v1.LvShrink
+	53,  // 71: greendot.helper.v1.Helper.LvRename:input_type -> greendot.helper.v1.LvRename
+	54,  // 72: greendot.helper.v1.Helper.LvDelete:input_type -> greendot.helper.v1.LvDelete
+	55,  // 73: greendot.helper.v1.Helper.Reconcile:input_type -> greendot.helper.v1.Reconcile
+	56,  // 74: greendot.helper.v1.Helper.CsiNvmeApply:input_type -> greendot.helper.v1.CsiNvmeApply
+	57,  // 75: greendot.helper.v1.Helper.CsiNvmeDelete:input_type -> greendot.helper.v1.CsiNvmeDelete
+	58,  // 76: greendot.helper.v1.Helper.CsiHostGrant:input_type -> greendot.helper.v1.CsiHostGrant
+	59,  // 77: greendot.helper.v1.Helper.CsiHostRevoke:input_type -> greendot.helper.v1.CsiHostRevoke
+	60,  // 78: greendot.helper.v1.Helper.CsiVolumeExpand:input_type -> greendot.helper.v1.CsiVolumeExpand
+	66,  // 79: greendot.helper.v1.Helper.ZfsClone:input_type -> greendot.helper.v1.ZfsClone
+	61,  // 80: greendot.helper.v1.Helper.PipeKeyAdd:input_type -> greendot.helper.v1.PipeKeyAdd
+	62,  // 81: greendot.helper.v1.Helper.PipeKeyRevoke:input_type -> greendot.helper.v1.PipeKeyRevoke
+	69,  // 82: greendot.helper.v1.Helper.RxeAdd:input_type -> greendot.helper.v1.RxeAdd
+	70,  // 83: greendot.helper.v1.Helper.EnableRoce:input_type -> greendot.helper.v1.EnableRoce
+	71,  // 84: greendot.helper.v1.Helper.InstallPackages:input_type -> greendot.helper.v1.InstallPackages
+	41,  // 85: greendot.helper.v1.Helper.SmartReport:input_type -> greendot.helper.v1.SmartReport
+	6,   // 86: greendot.helper.v1.Helper.RdmaResources:input_type -> greendot.helper.v1.Empty
+	6,   // 87: greendot.helper.v1.Helper.NfsReport:input_type -> greendot.helper.v1.Empty
+	6,   // 88: greendot.helper.v1.Helper.NvmetReport:input_type -> greendot.helper.v1.Empty
+	6,   // 89: greendot.helper.v1.Helper.LioReport:input_type -> greendot.helper.v1.Empty
+	6,   // 90: greendot.helper.v1.Helper.LioSessions:input_type -> greendot.helper.v1.Empty
+	6,   // 91: greendot.helper.v1.Helper.RdmaDevices:input_type -> greendot.helper.v1.Empty
+	6,   // 92: greendot.helper.v1.Helper.NicPciAddrs:input_type -> greendot.helper.v1.Empty
+	6,   // 93: greendot.helper.v1.Helper.NicInterfaces:input_type -> greendot.helper.v1.Empty
+	6,   // 94: greendot.helper.v1.Helper.RoceCapableNics:input_type -> greendot.helper.v1.Empty
+	6,   // 95: greendot.helper.v1.Helper.NicRdmaAdvice:input_type -> greendot.helper.v1.Empty
+	42,  // 96: greendot.helper.v1.Helper.SmartHealth:input_type -> greendot.helper.v1.SmartHealth
+	6,   // 97: greendot.helper.v1.Helper.ReconcileDryRun:input_type -> greendot.helper.v1.Empty
+	67,  // 98: greendot.helper.v1.Helper.ZvolInfo:input_type -> greendot.helper.v1.ZvolInfo
+	6,   // 99: greendot.helper.v1.Helper.PipeAccessReport:input_type -> greendot.helper.v1.Empty
+	6,   // 100: greendot.helper.v1.Helper.Ping:output_type -> greendot.helper.v1.Empty
+	22,  // 101: greendot.helper.v1.Helper.Authenticate:output_type -> greendot.helper.v1.AuthReply
+	102, // 102: greendot.helper.v1.Helper.ZvolCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 103: greendot.helper.v1.Helper.ZvolDelete:output_type -> greendot.helper.v1.TaskEvent
+	102, // 104: greendot.helper.v1.Helper.ZvolResize:output_type -> greendot.helper.v1.TaskEvent
+	102, // 105: greendot.helper.v1.Helper.SnapshotCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 106: greendot.helper.v1.Helper.SnapshotDestroy:output_type -> greendot.helper.v1.TaskEvent
+	102, // 107: greendot.helper.v1.Helper.ZfsFsCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 108: greendot.helper.v1.Helper.ZfsSetMountpoint:output_type -> greendot.helper.v1.TaskEvent
+	102, // 109: greendot.helper.v1.Helper.ZfsMount:output_type -> greendot.helper.v1.TaskEvent
+	102, // 110: greendot.helper.v1.Helper.ZfsUnmount:output_type -> greendot.helper.v1.TaskEvent
+	102, // 111: greendot.helper.v1.Helper.ZfsDestroy:output_type -> greendot.helper.v1.TaskEvent
+	102, // 112: greendot.helper.v1.Helper.PoolCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 113: greendot.helper.v1.Helper.PoolDeviceAdd:output_type -> greendot.helper.v1.TaskEvent
+	102, // 114: greendot.helper.v1.Helper.PoolDeviceRemove:output_type -> greendot.helper.v1.TaskEvent
+	102, // 115: greendot.helper.v1.Helper.PoolDeviceDetach:output_type -> greendot.helper.v1.TaskEvent
+	102, // 116: greendot.helper.v1.Helper.PartitionTableCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 117: greendot.helper.v1.Helper.PartitionCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 118: greendot.helper.v1.Helper.PartitionDelete:output_type -> greendot.helper.v1.TaskEvent
+	102, // 119: greendot.helper.v1.Helper.PartitionShrink:output_type -> greendot.helper.v1.TaskEvent
+	102, // 120: greendot.helper.v1.Helper.LvmReport:output_type -> greendot.helper.v1.TaskEvent
+	102, // 121: greendot.helper.v1.Helper.VgCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 122: greendot.helper.v1.Helper.VgExtend:output_type -> greendot.helper.v1.TaskEvent
+	102, // 123: greendot.helper.v1.Helper.VgReduce:output_type -> greendot.helper.v1.TaskEvent
+	102, // 124: greendot.helper.v1.Helper.VgRemove:output_type -> greendot.helper.v1.TaskEvent
+	102, // 125: greendot.helper.v1.Helper.LvCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 126: greendot.helper.v1.Helper.ThinPoolCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 127: greendot.helper.v1.Helper.ThinLvCreate:output_type -> greendot.helper.v1.TaskEvent
+	102, // 128: greendot.helper.v1.Helper.LvResize:output_type -> greendot.helper.v1.TaskEvent
+	102, // 129: greendot.helper.v1.Helper.LvShrink:output_type -> greendot.helper.v1.TaskEvent
+	102, // 130: greendot.helper.v1.Helper.LvRename:output_type -> greendot.helper.v1.TaskEvent
+	102, // 131: greendot.helper.v1.Helper.LvDelete:output_type -> greendot.helper.v1.TaskEvent
+	102, // 132: greendot.helper.v1.Helper.Reconcile:output_type -> greendot.helper.v1.TaskEvent
+	102, // 133: greendot.helper.v1.Helper.CsiNvmeApply:output_type -> greendot.helper.v1.TaskEvent
+	102, // 134: greendot.helper.v1.Helper.CsiNvmeDelete:output_type -> greendot.helper.v1.TaskEvent
+	102, // 135: greendot.helper.v1.Helper.CsiHostGrant:output_type -> greendot.helper.v1.TaskEvent
+	102, // 136: greendot.helper.v1.Helper.CsiHostRevoke:output_type -> greendot.helper.v1.TaskEvent
+	102, // 137: greendot.helper.v1.Helper.CsiVolumeExpand:output_type -> greendot.helper.v1.TaskEvent
+	102, // 138: greendot.helper.v1.Helper.ZfsClone:output_type -> greendot.helper.v1.TaskEvent
+	102, // 139: greendot.helper.v1.Helper.PipeKeyAdd:output_type -> greendot.helper.v1.TaskEvent
+	102, // 140: greendot.helper.v1.Helper.PipeKeyRevoke:output_type -> greendot.helper.v1.TaskEvent
+	102, // 141: greendot.helper.v1.Helper.RxeAdd:output_type -> greendot.helper.v1.TaskEvent
+	102, // 142: greendot.helper.v1.Helper.EnableRoce:output_type -> greendot.helper.v1.TaskEvent
+	102, // 143: greendot.helper.v1.Helper.InstallPackages:output_type -> greendot.helper.v1.TaskEvent
+	102, // 144: greendot.helper.v1.Helper.SmartReport:output_type -> greendot.helper.v1.TaskEvent
+	102, // 145: greendot.helper.v1.Helper.RdmaResources:output_type -> greendot.helper.v1.TaskEvent
+	72,  // 146: greendot.helper.v1.Helper.NfsReport:output_type -> greendot.helper.v1.NfsReportReply
+	75,  // 147: greendot.helper.v1.Helper.NvmetReport:output_type -> greendot.helper.v1.NvmetReportReply
+	79,  // 148: greendot.helper.v1.Helper.LioReport:output_type -> greendot.helper.v1.LioReportReply
+	83,  // 149: greendot.helper.v1.Helper.LioSessions:output_type -> greendot.helper.v1.LioSessionsReply
+	85,  // 150: greendot.helper.v1.Helper.RdmaDevices:output_type -> greendot.helper.v1.RdmaDevicesReply
+	87,  // 151: greendot.helper.v1.Helper.NicPciAddrs:output_type -> greendot.helper.v1.NicPciAddrsReply
+	89,  // 152: greendot.helper.v1.Helper.NicInterfaces:output_type -> greendot.helper.v1.NicInterfacesReply
+	91,  // 153: greendot.helper.v1.Helper.RoceCapableNics:output_type -> greendot.helper.v1.RoceCapableNicsReply
+	93,  // 154: greendot.helper.v1.Helper.NicRdmaAdvice:output_type -> greendot.helper.v1.NicRdmaAdviceReply
+	95,  // 155: greendot.helper.v1.Helper.SmartHealth:output_type -> greendot.helper.v1.SmartHealthReply
+	97,  // 156: greendot.helper.v1.Helper.ReconcileDryRun:output_type -> greendot.helper.v1.ReconcileDryRunReply
+	68,  // 157: greendot.helper.v1.Helper.ZvolInfo:output_type -> greendot.helper.v1.ZvolInfoReply
+	63,  // 158: greendot.helper.v1.Helper.PipeAccessReport:output_type -> greendot.helper.v1.PipeAccessReportReply
+	100, // [100:159] is the sub-list for method output_type
+	41,  // [41:100] is the sub-list for method input_type
+	41,  // [41:41] is the sub-list for extension type_name
+	41,  // [41:41] is the sub-list for extension extendee
+	0,   // [0:41] is the sub-list for field type_name
 }
 
 func init() { file_helper_proto_init() }
@@ -6312,15 +6766,15 @@ func file_helper_proto_init() {
 	file_helper_proto_msgTypes[22].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[28].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[31].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[55].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[61].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[75].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[79].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[85].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[87].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[89].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[60].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[66].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[80].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[84].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[90].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[91].OneofWrappers = []any{
+	file_helper_proto_msgTypes[92].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[94].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[95].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[96].OneofWrappers = []any{
 		(*TaskEvent_SubtaskStarted)(nil),
 		(*TaskEvent_Stdout)(nil),
 		(*TaskEvent_Stderr)(nil),
@@ -6333,7 +6787,7 @@ func file_helper_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_helper_proto_rawDesc), len(file_helper_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   92,
+			NumMessages:   97,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

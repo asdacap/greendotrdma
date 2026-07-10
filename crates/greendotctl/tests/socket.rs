@@ -400,3 +400,111 @@ async fn pipe_relays_grpc_over_stdio() {
     .await;
     assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
 }
+
+/// The pipe-key ops over the real socket: the daemon writes the file, the
+/// options are the daemon's own forced command (the request cannot name one),
+/// and a hostile paste is rejected by the ingress middleware — prost does not
+/// validate, so this is the choke point that matters.
+#[tokio::test]
+async fn pipe_key_ops_write_authorized_keys_and_reject_hostile_pastes() {
+    const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 admin@laptop";
+    const FP: &str = "SHA256:NEU/y0JmR4RY7ck8XRGElQSKmEzy2SirhXgqbFWxZ00";
+
+    let dir = test_dir("pipekeys");
+    let home = dir.join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    // A real executable, so the report's forced-command criterion holds.
+    let pipe_bin = std::env::current_exe().unwrap();
+    let helper = Helper::start(&[
+        "--pipe-home",
+        home.to_str().unwrap(),
+        "--pipe-command",
+        pipe_bin.to_str().unwrap(),
+    ]);
+    let mut client = helper.client();
+    let authorized_keys = home.join(".ssh/authorized_keys");
+    let forced = format!("command=\"{} pipe\",restrict", pipe_bin.display());
+
+    // A paste that would smuggle a second, shell-granting line. The wire type
+    // carries it happily; the daemon's TryFrom must not.
+    let hostile = format!("{KEY}\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 evil");
+    let events = drain(
+        client
+            .pipe_key_add(pb::PipeKeyAdd {
+                public_key: hostile,
+            })
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    match events.last() {
+        Some(TaskEvent::Finished {
+            status: SubStatus::Failed,
+            error: Some(msg),
+        }) => assert!(msg.contains("invalid request"), "{msg}"),
+        other => panic!("expected rejected task, got {other:?}"),
+    }
+    assert!(!authorized_keys.exists(), "nothing was written");
+
+    // The happy path: one line, carrying the daemon's own forced command.
+    let events = drain(
+        client
+            .pipe_key_add(pb::PipeKeyAdd {
+                public_key: KEY.into(),
+            })
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
+    assert_eq!(
+        std::fs::read_to_string(&authorized_keys).unwrap(),
+        format!("{forced} {KEY}\n")
+    );
+
+    // The report is what the page and its diagnostic render.
+    let report = client
+        .pipe_access_report(pb::Empty {})
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(report.forced_command, forced);
+    assert!(report.forced_command_bin_ok);
+    assert_eq!(report.keys.len(), 1);
+    assert_eq!(report.keys[0].fingerprint, FP);
+    assert!(report.keys[0].forced_command_ok);
+    assert_eq!(report.unparsable_lines, 0);
+
+    // Revoke by fingerprint; a malformed one is rejected on ingress and the
+    // file is left exactly as it was.
+    let events = drain(
+        client
+            .pipe_key_revoke(pb::PipeKeyRevoke {
+                fingerprint: "../../etc/shadow".into(),
+            })
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Failed, "{events:?}");
+    assert_eq!(
+        std::fs::read_to_string(&authorized_keys).unwrap(),
+        format!("{forced} {KEY}\n")
+    );
+
+    let events = drain(
+        client
+            .pipe_key_revoke(pb::PipeKeyRevoke {
+                fingerprint: FP.into(),
+            })
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
+    assert_eq!(std::fs::read_to_string(&authorized_keys).unwrap(), "");
+}

@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}SSH access — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>SSH access</h1>
+<p class="muted">Keys authorized to open a <code>greendotctl pipe</code> session as
+<code>{{ view.user }}</code> — how the <a href="/docs/kubernetes-csi">Kubernetes CSI</a>
+controller drives this box without a root credential.</p>
+{% include "_ssh_access.html" %}
+{% endblock %}

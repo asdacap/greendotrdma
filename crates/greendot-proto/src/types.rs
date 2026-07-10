@@ -107,6 +107,10 @@ validated_string!(
     /// GPT partition label.
     PartLabel, validate::part_label, "partition label");
 validated_string!(
+    /// An OpenSSH SHA256 public-key fingerprint, `SHA256:<base64>` — the
+    /// stable id by which a pipe key is revoked.
+    SshFingerprint, validate::ssh_fingerprint, "SSH fingerprint");
+validated_string!(
     /// System (PAM) user name.
     Username, validate::username, "username");
 validated_string!(
@@ -639,6 +643,18 @@ mod tests {
     #[case::shell_meta("foo;rm", false)]
     fn package_name(#[case] input: &str, #[case] ok: bool) {
         assert_eq!(PackageName::new(input).is_ok(), ok, "{input:?}");
+    }
+
+    #[rstest]
+    #[case::sha256("SHA256:NEU/y0JmR4RY7ck8XRGElQSKmEzy2SirhXgqbFWxZ00", true)]
+    #[case::empty("", false)]
+    #[case::no_prefix("NEU/y0JmR4RY7ck8XRGElQSKmEzy2SirhXgqbFWxZ00", false)]
+    #[case::md5("MD5:aa:bb", false)]
+    #[case::empty_digest("SHA256:", false)]
+    #[case::padded("SHA256:abc=", false)]
+    #[case::path_traversal("SHA256:../../etc", false)]
+    fn ssh_fingerprint(#[case] input: &str, #[case] ok: bool) {
+        assert_eq!(SshFingerprint::new(input).is_ok(), ok, "{input:?}");
     }
 
     #[rstest]

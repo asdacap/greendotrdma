@@ -38,18 +38,15 @@ error, and the connector path is traversal-guarded. The controller is original
 
 ## Deploy
 
-1. On the box (installed by the deb): create the parent dataset and the SSH
-   trust —
-   ```sh
-   zfs create tank/csi
-   install -d -o greendot-csi -g greendot-csi -m 700 /var/lib/greendotrdma/csi/.ssh
-   echo 'command="/usr/libexec/greendotrdma/greendotctl pipe",restrict ssh-ed25519 AAAA…' \
-     > /var/lib/greendotrdma/csi/.ssh/authorized_keys
-   ```
+1. On the box: `zfs create tank/csi`, then paste the controller's **public** key
+   into greendot-web's **SSH access** page (`/ssh-access`). The daemon writes
+   the `command="…greendotctl pipe",restrict` options itself — the web never
+   supplies them — and the page renders the box's `known_hosts` block for the
+   next step, so there is no `ssh-keyscan` TOFU.
 2. In the cluster:
    ```sh
    kubectl -n kube-system create secret generic greendot-csi-ssh --from-file=id_ed25519=…
-   ssh-keyscan -H <box> | kubectl -n kube-system create configmap greendot-csi-known-hosts --from-file=known_hosts=/dev/stdin
+   kubectl -n kube-system create configmap greendot-csi-known-hosts --from-file=known_hosts=…
    kubectl apply -f deploy/
    ```
 3. Nothing else on the workers: the node plugin loads the fabric module

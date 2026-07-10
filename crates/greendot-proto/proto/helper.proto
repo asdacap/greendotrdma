@@ -88,6 +88,11 @@ service Helper {
   rpc CsiVolumeExpand(.greendot.helper.v1.CsiVolumeExpand) returns (stream TaskEvent);
   rpc ZfsClone(.greendot.helper.v1.ZfsClone) returns (stream TaskEvent);
 
+  // SSH keys authorized to open a `greendotctl pipe` session (the CSI
+  // controller's login today). The daemon owns the forced command.
+  rpc PipeKeyAdd(.greendot.helper.v1.PipeKeyAdd) returns (stream TaskEvent);
+  rpc PipeKeyRevoke(.greendot.helper.v1.PipeKeyRevoke) returns (stream TaskEvent);
+
   // System setup.
   rpc RxeAdd(.greendot.helper.v1.RxeAdd) returns (stream TaskEvent);
   rpc EnableRoce(.greendot.helper.v1.EnableRoce) returns (stream TaskEvent);
@@ -110,6 +115,7 @@ service Helper {
   rpc SmartHealth(.greendot.helper.v1.SmartHealth) returns (SmartHealthReply);
   rpc ReconcileDryRun(Empty) returns (ReconcileDryRunReply);
   rpc ZvolInfo(.greendot.helper.v1.ZvolInfo) returns (ZvolInfoReply);
+  rpc PipeAccessReport(Empty) returns (PipeAccessReportReply);
 }
 
 // Placeholder for unit request variants (Ping, NfsReport, ...). A oneof arm
@@ -342,6 +348,60 @@ message CsiHostRevoke { string nqn = 1; string hostnqn = 2; }
 // namespace 1 (the dataset is derived from the subsystem's own device_path —
 // the CsiNqn scopes what can be resized), then revalidate the namespace size.
 message CsiVolumeExpand { string nqn = 1; uint64 new_size = 2; }
+
+// Authorize one OpenSSH public key to run the pipe forced command. The request
+// carries the key and nothing else: the `command="…",restrict` options are
+// synthesized by the daemon from its own executable path, so a compromised web
+// cannot turn a pipe grant into a shell. The key is re-parsed and canonically
+// re-serialized on ingress (SshPublicKeyLine), so a paste can never smuggle a
+// second authorized_keys line.
+message PipeKeyAdd { string public_key = 1; }  // SshPublicKeyLine
+// Remove the key with this SHA256 fingerprint — including a line this UI never
+// wrote, so an admin's manually installed shell key can be revoked here too.
+message PipeKeyRevoke { string fingerprint = 1; }  // SshFingerprint
+
+// Everything the SSH-access diagnostic needs. Best-effort: a field that could
+// not be read is false/empty, and the web renders that as a failed criterion.
+message PipeAccessReportReply {
+  string user = 1;                  // the packaged SSH user, e.g. greendot-csi
+  bool user_exists = 2;
+  // Membership of the daemon-socket group. Without it sshd lets the key in and
+  // the helper socket then rejects it — the failure the diagnostic exists for.
+  bool in_socket_group = 3;
+  string socket_group = 4;
+  // sshd's StrictModes rule, applied to each path it walks: owned by root or
+  // the user, and not writable by group or other. A home directory owned by
+  // the wrong user makes sshd refuse the key without saying so.
+  bool home_ok = 5;
+  string home_detail = 6;
+  bool ssh_dir_ok = 7;
+  string ssh_dir_detail = 8;
+  bool authorized_keys_ok = 14;     // absent is fine: no key authorized yet
+  string authorized_keys_detail = 15;
+  string forced_command = 9;        // the exact options prefix the daemon writes
+  bool forced_command_bin_ok = 10;  // that binary exists and is executable
+  repeated PipeKeyEntry keys = 11;
+  repeated HostKey host_keys = 12;
+  // Key lines we could not parse. They are preserved untouched — and counted,
+  // because an entry we cannot read is one whose options we cannot vouch for.
+  uint32 unparsable_lines = 13;
+}
+message PipeKeyEntry {
+  string fingerprint = 1;
+  string algorithm = 2;
+  string comment = 3;         // the key's label
+  // False for a line this UI did not write: its options are absent (a full
+  // shell) or not ours. Such lines are preserved verbatim, never rewritten.
+  bool forced_command_ok = 4;
+  string options = 5;         // the raw options prefix, for display
+}
+// One of the box's own SSH host keys, so an admin can pin known_hosts from the
+// page instead of trusting an ssh-keyscan on first contact.
+message HostKey {
+  string algorithm = 1;
+  string fingerprint = 2;  // SHA256:…
+  string key_line = 3;     // "<algorithm> <base64>", the web prepends the host
+}
 
 // `zfs clone <dataset>@<snap> <target>`, optionally followed by a volsize bump
 // (a clone inherits the origin's volsize; creating a bigger volume from a

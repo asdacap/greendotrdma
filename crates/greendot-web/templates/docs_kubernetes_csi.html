@@ -26,21 +26,28 @@ a pinned <code>known_hosts</code>.</p>
 
 <h2>2. Box-side setup</h2>
 <pre class="log"># parent dataset for CSI volumes
-zfs create tank/csi
-# trust the controller's public key, pipe-only
-install -d -o greendot-csi -g greendot-csi -m 700 /var/lib/greendotrdma/csi/.ssh
-echo 'command="/usr/libexec/greendotrdma/greendotctl pipe",restrict ssh-ed25519 AAAA…' \
-  &gt; /var/lib/greendotrdma/csi/.ssh/authorized_keys</pre>
+zfs create tank/csi</pre>
+<p>Then generate the controller's keypair wherever you keep such things
+(<code>ssh-keygen -t ed25519</code>) and paste the public half into
+<a href="/ssh-access">SSH access</a>. The box writes the forced command itself, so the key
+cannot be granted a shell by mistake; the private key never touches this appliance. That page
+also diagnoses the trust path, and shows the host keys for the next step.</p>
 
 <h2>3. Cluster-side setup</h2>
 <pre class="log">kubectl -n kube-system create secret generic greendot-csi-ssh --from-file=id_ed25519=…
-ssh-keyscan -H STORAGE_HOST | kubectl -n kube-system create configmap \
-  greendot-csi-known-hosts --from-file=known_hosts=/dev/stdin
+kubectl -n kube-system create configmap greendot-csi-known-hosts --from-file=known_hosts=…
 kubectl apply -f csi/deploy/    # edit controller.yaml's addresses first</pre>
-<p>Each worker needs the fabric module loaded (<code>modprobe nvme-rdma</code>, or
-<code>nvme-tcp</code> for TCP; persist via <code>/etc/modules-load.d</code>). No
-<code>nvme-cli</code> is required on workers — the node plugin writes
-<code>/dev/nvme-fabrics</code> directly. Note the transport is whatever the driver is
+<p><a href="/ssh-access">SSH access</a> renders the <code>known_hosts</code> block to paste —
+read over this already-authenticated session, so there is no <code>ssh-keyscan</code>
+trust-on-first-use to regret.</p>
+<p>Nothing else is needed on the workers. The node plugin loads the fabric module itself at
+stage time (<code>nvme-rdma</code>, or <code>nvme-tcp</code> for TCP — the DaemonSet
+hostPath-mounts <code>/lib/modules</code> for that), and an initContainer writes
+<code>/etc/nvme/hostnqn</code> and <code>hostid</code> if the node has none. No
+<code>nvme-cli</code> is required — the node plugin writes <code>/dev/nvme-fabrics</code>
+directly. A worker with no hardware RDMA NIC passes
+<code>--soft-roce-netdev &lt;dev&gt;</code> to the node plugin, which stands up a Soft-RoCE
+(<code>rxe</code>) link on that netdev. Note the transport is whatever the driver is
 configured with: <code>rdma</code> serves RDMA, <code>tcp</code> serves TCP — nothing
 "falls back" silently, and the dot on the Exports page shows which one initiators
 actually use.</p>

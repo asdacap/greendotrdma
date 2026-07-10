@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+
+{% block title %}Diagnose SSH access — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<p><a href="/ssh-access">← Back to SSH access</a></p>
+<h1>Diagnose SSH access</h1>
+<p class="muted small">One login as <code>{{ view.user }}</code>, followed from sshd to the
+helper socket.</p>
+
+<ul class="criteria">
+  {% for c in view.criteria %}
+  <li>
+    <span class="dot {% if c.ok %}dot-green{% else %}dot-red{% endif %}"></span>
+    <span class="crit-label">{{ c.label }}</span>
+    <span class="crit-detail muted small">{{ c.detail }}</span>
+  </li>
+  {% endfor %}
+</ul>
+{% endblock %}

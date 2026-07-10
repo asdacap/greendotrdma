@@ -1,0 +1,102 @@
+<div id="ssh-access-content">
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="muted small">{{ flash }}</p>{% endif %}
+  {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
+
+  <p class="error">A key here can drive <strong>every</strong> helper operation, not only the
+  Kubernetes CSI ones — it can destroy any dataset or install packages as root. Grant it the
+  way you would grant storage-root.</p>
+
+  {% if view.degraded %}
+  <p><a role="button" href="/ssh-access/diagnose">Diagnose</a></p>
+  {% endif %}
+
+  {% if view.rows.is_empty() %}
+  <p class="empty">No SSH keys authorized — nothing can drive the helper over SSH yet.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Label</th><th>Fingerprint</th><th>Type</th><th></th></tr></thead>
+    <tbody>
+      {% for r in view.rows %}
+      <tr>
+        <td>
+          {% if r.label.is_empty() %}<span class="muted">(no label)</span>{% else %}{{ r.label }}{% endif %}
+          {% if !r.forced_command_ok %}<br><span class="badge" title="This line does not carry the forced command, so the key gets a full shell. GreenDotRDMA did not write it and will not rewrite it.">Full shell</span>
+          <span class="muted small">{% if r.options.is_empty() %}no options{% else %}{{ r.options }}{% endif %}</span>{% endif %}
+        </td>
+        <td class="small">{{ r.fingerprint }}</td>
+        <td class="small">{{ r.algorithm }}</td>
+        <td>
+          <form class="inline" hx-post="/ssh-access/revoke" hx-target="#ssh-access-content" hx-swap="outerHTML"
+                hx-confirm="Revoke {{ r.confirm }}? Anything using this key loses access to the box at once — a CSI controller would stop being able to provision or fence volumes."
+                data-confirm-path="{{ r.confirm }}">
+            <input type="hidden" name="fingerprint" value="{{ r.fingerprint }}">
+            <button class="danger">Revoke</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <button type="button" class="dialog-trigger" data-dialog-open>Authorize SSH key</button>
+  <dialog>
+  <article>
+  <header>Authorize SSH key</header>
+  <form class="card" hx-post="/ssh-access/add" hx-target="#ssh-access-content" hx-swap="outerHTML"
+        hx-confirm="Authorizing this key grants full control of this box's storage over SSH. Continue?">
+    <label>Label (which cluster or machine is this for?)
+      <input name="label" placeholder="k8s-prod controller" maxlength="64">
+    </label>
+    <label>Public key
+      <textarea name="public_key" rows="3" required
+                placeholder="ssh-ed25519 AAAAC3Nza… admin@laptop"></textarea>
+    </label>
+    <p class="muted small">Paste a public key — the <code>.pub</code> half. Generate one with
+    <code>ssh-keygen -t ed25519</code>; the private key stays wherever you made it and never
+    touches this box.</p>
+    <footer>
+      <button type="button" class="secondary" data-dialog-close>Cancel</button>
+      <button type="submit">Authorize key</button>
+    </footer>
+  </form>
+  </article>
+  </dialog>
+
+  <article class="card">
+    <header>What a key may do</header>
+    <p class="muted small">Every key above is written with this forced command, so an SSH session
+    can only speak the helper protocol — no shell, no forwarding. The web never supplies this
+    string; the box does.</p>
+    <pre class="log">{{ view.forced_command }} &lt;key&gt;</pre>
+    <p class="muted small">The key logs in as <code>{{ view.user }}</code>, which the helper
+    socket admits because it is in the <code>{{ view.socket_group }}</code> group.</p>
+  </article>
+
+  {% if !view.host_keys.is_empty() %}
+  <article class="card">
+    <header>This box's host keys</header>
+    <p class="muted small">Pin these instead of trusting <code>ssh-keyscan</code> on first
+    contact — you are reading them over an already-authenticated connection.</p>
+    <table>
+      <thead><tr><th>Type</th><th>Fingerprint</th></tr></thead>
+      <tbody>
+        {% for h in view.host_keys %}
+        <tr><td class="small">{{ h.algorithm }}</td><td class="small">{{ h.fingerprint }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    <p class="muted small">A <code>known_hosts</code> for the CSI controller:</p>
+    <pre class="log" id="known-hosts">{% for h in view.host_keys %}{{ h.known_hosts_line }}
+{% endfor %}</pre>
+    <button type="button" data-copy="#known-hosts">Copy</button>
+    <p class="muted small">Load it, and the matching private key, into the cluster:</p>
+    <pre class="log" id="kubectl-cmds">kubectl -n kube-system create secret generic greendot-csi-ssh \
+  --from-file=id_ed25519=&lt;the private key&gt;
+kubectl -n kube-system create configmap greendot-csi-known-hosts \
+  --from-file=known_hosts=&lt;the block above&gt;</pre>
+    <button type="button" data-copy="#kubectl-cmds">Copy</button>
+  </article>
+  {% endif %}
+</div>

@@ -198,6 +198,8 @@ impl HelperClient {
         enable_roce(ops::EnableRoce => pb::EnableRoce);
         install_packages(ops::InstallPackages => pb::InstallPackages);
         smart_report(ops::SmartReport => pb::SmartReport);
+        pipe_key_add(ops::PipeKeyAdd => pb::PipeKeyAdd);
+        pipe_key_revoke(ops::PipeKeyRevoke => pb::PipeKeyRevoke);
     }
 
     /// The full desired-state reconcile pass (fieldless by design: the daemon
@@ -225,6 +227,7 @@ impl HelperClient {
         roce_capable_nics -> HashMap<String, String>;
         nic_rdma_advice -> HashMap<String, nic::NicAdvice>;
         reconcile_dry_run -> pb::ReconcileDryRunReply;
+        pipe_access_report -> pb::PipeAccessReportReply;
     }
 
     /// Batch SMART health; an empty reply on failure renders every device gray.

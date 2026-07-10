@@ -66,6 +66,8 @@ const (
 	Helper_CsiHostRevoke_FullMethodName        = "/greendot.helper.v1.Helper/CsiHostRevoke"
 	Helper_CsiVolumeExpand_FullMethodName      = "/greendot.helper.v1.Helper/CsiVolumeExpand"
 	Helper_ZfsClone_FullMethodName             = "/greendot.helper.v1.Helper/ZfsClone"
+	Helper_PipeKeyAdd_FullMethodName           = "/greendot.helper.v1.Helper/PipeKeyAdd"
+	Helper_PipeKeyRevoke_FullMethodName        = "/greendot.helper.v1.Helper/PipeKeyRevoke"
 	Helper_RxeAdd_FullMethodName               = "/greendot.helper.v1.Helper/RxeAdd"
 	Helper_EnableRoce_FullMethodName           = "/greendot.helper.v1.Helper/EnableRoce"
 	Helper_InstallPackages_FullMethodName      = "/greendot.helper.v1.Helper/InstallPackages"
@@ -83,6 +85,7 @@ const (
 	Helper_SmartHealth_FullMethodName          = "/greendot.helper.v1.Helper/SmartHealth"
 	Helper_ReconcileDryRun_FullMethodName      = "/greendot.helper.v1.Helper/ReconcileDryRun"
 	Helper_ZvolInfo_FullMethodName             = "/greendot.helper.v1.Helper/ZvolInfo"
+	Helper_PipeAccessReport_FullMethodName     = "/greendot.helper.v1.Helper/PipeAccessReport"
 )
 
 // HelperClient is the client API for Helper service.
@@ -156,6 +159,10 @@ type HelperClient interface {
 	CsiHostRevoke(ctx context.Context, in *CsiHostRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	CsiVolumeExpand(ctx context.Context, in *CsiVolumeExpand, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	ZfsClone(ctx context.Context, in *ZfsClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
+	// SSH keys authorized to open a `greendotctl pipe` session (the CSI
+	// controller's login today). The daemon owns the forced command.
+	PipeKeyAdd(ctx context.Context, in *PipeKeyAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
+	PipeKeyRevoke(ctx context.Context, in *PipeKeyRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	// System setup.
 	RxeAdd(ctx context.Context, in *RxeAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	EnableRoce(ctx context.Context, in *EnableRoce, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
@@ -176,6 +183,7 @@ type HelperClient interface {
 	SmartHealth(ctx context.Context, in *SmartHealth, opts ...grpc.CallOption) (*SmartHealthReply, error)
 	ReconcileDryRun(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ReconcileDryRunReply, error)
 	ZvolInfo(ctx context.Context, in *ZvolInfo, opts ...grpc.CallOption) (*ZvolInfoReply, error)
+	PipeAccessReport(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PipeAccessReportReply, error)
 }
 
 type helperClient struct {
@@ -909,9 +917,47 @@ func (c *helperClient) ZfsClone(ctx context.Context, in *ZfsClone, opts ...grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_ZfsCloneClient = grpc.ServerStreamingClient[TaskEvent]
 
+func (c *helperClient) PipeKeyAdd(ctx context.Context, in *PipeKeyAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_PipeKeyAdd_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PipeKeyAdd, TaskEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_PipeKeyAddClient = grpc.ServerStreamingClient[TaskEvent]
+
+func (c *helperClient) PipeKeyRevoke(ctx context.Context, in *PipeKeyRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_PipeKeyRevoke_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[PipeKeyRevoke, TaskEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_PipeKeyRevokeClient = grpc.ServerStreamingClient[TaskEvent]
+
 func (c *helperClient) RxeAdd(ctx context.Context, in *RxeAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_RxeAdd_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_RxeAdd_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -930,7 +976,7 @@ type Helper_RxeAddClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) EnableRoce(ctx context.Context, in *EnableRoce, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_EnableRoce_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_EnableRoce_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -949,7 +995,7 @@ type Helper_EnableRoceClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) InstallPackages(ctx context.Context, in *InstallPackages, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_InstallPackages_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_InstallPackages_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -968,7 +1014,7 @@ type Helper_InstallPackagesClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) SmartReport(ctx context.Context, in *SmartReport, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_SmartReport_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[42], Helper_SmartReport_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -987,7 +1033,7 @@ type Helper_SmartReportClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) RdmaResources(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_RdmaResources_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[43], Helper_RdmaResources_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1124,6 +1170,16 @@ func (c *helperClient) ZvolInfo(ctx context.Context, in *ZvolInfo, opts ...grpc.
 	return out, nil
 }
 
+func (c *helperClient) PipeAccessReport(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PipeAccessReportReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PipeAccessReportReply)
+	err := c.cc.Invoke(ctx, Helper_PipeAccessReport_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // HelperServer is the server API for Helper service.
 // All implementations must embed UnimplementedHelperServer
 // for forward compatibility.
@@ -1195,6 +1251,10 @@ type HelperServer interface {
 	CsiHostRevoke(*CsiHostRevoke, grpc.ServerStreamingServer[TaskEvent]) error
 	CsiVolumeExpand(*CsiVolumeExpand, grpc.ServerStreamingServer[TaskEvent]) error
 	ZfsClone(*ZfsClone, grpc.ServerStreamingServer[TaskEvent]) error
+	// SSH keys authorized to open a `greendotctl pipe` session (the CSI
+	// controller's login today). The daemon owns the forced command.
+	PipeKeyAdd(*PipeKeyAdd, grpc.ServerStreamingServer[TaskEvent]) error
+	PipeKeyRevoke(*PipeKeyRevoke, grpc.ServerStreamingServer[TaskEvent]) error
 	// System setup.
 	RxeAdd(*RxeAdd, grpc.ServerStreamingServer[TaskEvent]) error
 	EnableRoce(*EnableRoce, grpc.ServerStreamingServer[TaskEvent]) error
@@ -1215,6 +1275,7 @@ type HelperServer interface {
 	SmartHealth(context.Context, *SmartHealth) (*SmartHealthReply, error)
 	ReconcileDryRun(context.Context, *Empty) (*ReconcileDryRunReply, error)
 	ZvolInfo(context.Context, *ZvolInfo) (*ZvolInfoReply, error)
+	PipeAccessReport(context.Context, *Empty) (*PipeAccessReportReply, error)
 	mustEmbedUnimplementedHelperServer()
 }
 
@@ -1342,6 +1403,12 @@ func (UnimplementedHelperServer) CsiVolumeExpand(*CsiVolumeExpand, grpc.ServerSt
 func (UnimplementedHelperServer) ZfsClone(*ZfsClone, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method ZfsClone not implemented")
 }
+func (UnimplementedHelperServer) PipeKeyAdd(*PipeKeyAdd, grpc.ServerStreamingServer[TaskEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method PipeKeyAdd not implemented")
+}
+func (UnimplementedHelperServer) PipeKeyRevoke(*PipeKeyRevoke, grpc.ServerStreamingServer[TaskEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method PipeKeyRevoke not implemented")
+}
 func (UnimplementedHelperServer) RxeAdd(*RxeAdd, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method RxeAdd not implemented")
 }
@@ -1392,6 +1459,9 @@ func (UnimplementedHelperServer) ReconcileDryRun(context.Context, *Empty) (*Reco
 }
 func (UnimplementedHelperServer) ZvolInfo(context.Context, *ZvolInfo) (*ZvolInfoReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ZvolInfo not implemented")
+}
+func (UnimplementedHelperServer) PipeAccessReport(context.Context, *Empty) (*PipeAccessReportReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method PipeAccessReport not implemented")
 }
 func (UnimplementedHelperServer) mustEmbedUnimplementedHelperServer() {}
 func (UnimplementedHelperServer) testEmbeddedByValue()                {}
@@ -1857,6 +1927,28 @@ func _Helper_ZfsClone_Handler(srv interface{}, stream grpc.ServerStream) error {
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_ZfsCloneServer = grpc.ServerStreamingServer[TaskEvent]
 
+func _Helper_PipeKeyAdd_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PipeKeyAdd)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HelperServer).PipeKeyAdd(m, &grpc.GenericServerStream[PipeKeyAdd, TaskEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_PipeKeyAddServer = grpc.ServerStreamingServer[TaskEvent]
+
+func _Helper_PipeKeyRevoke_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(PipeKeyRevoke)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HelperServer).PipeKeyRevoke(m, &grpc.GenericServerStream[PipeKeyRevoke, TaskEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_PipeKeyRevokeServer = grpc.ServerStreamingServer[TaskEvent]
+
 func _Helper_RxeAdd_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(RxeAdd)
 	if err := stream.RecvMsg(m); err != nil {
@@ -2128,6 +2220,24 @@ func _Helper_ZvolInfo_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Helper_PipeAccessReport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HelperServer).PipeAccessReport(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Helper_PipeAccessReport_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HelperServer).PipeAccessReport(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // Helper_ServiceDesc is the grpc.ServiceDesc for Helper service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -2190,6 +2300,10 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ZvolInfo",
 			Handler:    _Helper_ZvolInfo_Handler,
+		},
+		{
+			MethodName: "PipeAccessReport",
+			Handler:    _Helper_PipeAccessReport_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
@@ -2376,6 +2490,16 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "ZfsClone",
 			Handler:       _Helper_ZfsClone_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "PipeKeyAdd",
+			Handler:       _Helper_PipeKeyAdd_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "PipeKeyRevoke",
+			Handler:       _Helper_PipeKeyRevoke_Handler,
 			ServerStreams: true,
 		},
 		{

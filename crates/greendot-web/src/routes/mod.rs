@@ -11,6 +11,7 @@ pub mod nfs;
 pub mod nvme;
 pub mod settings;
 pub mod snapshots;
+pub mod ssh_access;
 pub mod tasks;
 pub mod zfs;
 
@@ -73,6 +74,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(tasks::router())
         .merge(docs::router())
         .merge(client_access::router())
+        .merge(ssh_access::router())
         .layer(middleware::from_fn_with_state(
             Arc::clone(&state),
             auth::require_auth,
@@ -380,6 +382,8 @@ pub(crate) mod testutil {
             csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant;
             csi_host_revoke, CsiHostRevokeStream, pb::CsiHostRevoke;
             csi_volume_expand, CsiVolumeExpandStream, pb::CsiVolumeExpand;
+            pipe_key_add, PipeKeyAddStream, pb::PipeKeyAdd;
+            pipe_key_revoke, PipeKeyRevokeStream, pb::PipeKeyRevoke;
         }
         reads {
             nfs_report, pb::Empty, pb::NfsReportReply;
@@ -392,6 +396,7 @@ pub(crate) mod testutil {
             nic_rdma_advice, pb::Empty, pb::NicRdmaAdviceReply;
             reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
             zvol_info, pb::ZvolInfo, pb::ZvolInfoReply;
+            pipe_access_report, pb::Empty, pb::PipeAccessReportReply;
         }
     }
 

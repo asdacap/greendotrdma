@@ -237,6 +237,17 @@ pub(crate) fn package_name(s: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+-.".contains(c))
 }
 
+pub(crate) fn ssh_fingerprint(s: &str) -> bool {
+    // OpenSSH's `SHA256:<unpadded base64>` key fingerprint.
+    s.len() <= 128
+        && s.strip_prefix("SHA256:").is_some_and(|digest| {
+            !digest.is_empty()
+                && digest
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "+/".contains(c))
+        })
+}
+
 pub(crate) fn username(s: &str) -> bool {
     s.len() <= 32
         && s.chars()

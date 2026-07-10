@@ -12,6 +12,13 @@ toml = { workspace = true }
 prost = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
+ssh-key = { version = "0.6", default-features = false, features = [
+  "alloc",
+  "std",
+  "ecdsa",
+  "ed25519",
+  "rsa",
+], optional = true }
 tower = { version = "0.5", features = ["util"], optional = true }
 hyper-util = { version = "0.1", features = ["tokio"], optional = true }
 
@@ -20,7 +27,7 @@ default = ["grpc"]
 # The gRPC transport: pb codegen, ops, and the validating conversions. Off,
 # the crate is the pure domain model (types/desired/actual/config) — what
 # greendot-client needs without dragging tonic onto an initiator machine.
-grpc = ["dep:prost", "dep:tonic", "dep:tonic-build"]
+grpc = ["dep:prost", "dep:tonic", "dep:tonic-build", "dep:ssh-key"]
 # The lazy unix-socket gRPC client (greendot-web, the reconcile CLI proxy).
 client = ["grpc", "dep:tokio", "dep:tower", "dep:hyper-util"]
 
