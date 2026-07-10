@@ -3,14 +3,12 @@
   {% if let Some(flash) = view.flash %}<p class="muted small">{{ flash }}</p>{% endif %}
   {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
 
-  <p class="error">A key here can drive <strong>every</strong> helper operation, not only the
-  Kubernetes CSI ones — it can destroy any dataset or install packages as root. Grant it the
-  way you would grant storage-root.</p>
-
   {% if view.degraded %}
   <p><a role="button" href="/ssh-access/diagnose">Diagnose</a></p>
   {% endif %}
 
+  <article class="card">
+  <header>Authorized keys</header>
   {% if view.rows.is_empty() %}
   <p class="empty">No SSH keys authorized — nothing can drive the helper over SSH yet.</p>
   {% else %}
@@ -63,20 +61,13 @@
   </form>
   </article>
   </dialog>
-
-  <article class="card">
-    <header>What a key may do</header>
-    <p class="muted small">Every key above is written with this forced command, so an SSH session
-    can only speak the helper protocol — no shell, no forwarding. The web never supplies this
-    string; the box does.</p>
-    <pre class="log">{{ view.forced_command }} &lt;key&gt;</pre>
-    <p class="muted small">The key logs in as <code>{{ view.user }}</code>, which the helper
-    socket admits because it is in the <code>{{ view.socket_group }}</code> group.</p>
   </article>
 
-  {% if !view.host_keys.is_empty() %}
   <article class="card">
     <header>This box's host keys</header>
+    {% if view.host_keys.is_empty() %}
+    <p class="empty">No host keys reported.</p>
+    {% else %}
     <p class="muted small">Pin these instead of trusting <code>ssh-keyscan</code> on first
     contact — you are reading them over an already-authenticated connection.</p>
     <table>
@@ -97,6 +88,6 @@
 kubectl -n kube-system create configmap greendot-csi-known-hosts \
   --from-file=known_hosts=&lt;the block above&gt;</pre>
     <button type="button" data-copy="#kubectl-cmds">Copy</button>
+    {% endif %}
   </article>
-  {% endif %}
 </div>

@@ -53,8 +53,6 @@ struct HostKeyRow {
 
 struct SshAccessView {
     user: String,
-    socket_group: String,
-    forced_command: String,
     rows: Vec<KeyRow>,
     host_keys: Vec<HostKeyRow>,
     flash: Option<String>,
@@ -159,8 +157,6 @@ fn view_from(
 
     SshAccessView {
         user: report.user,
-        socket_group: report.socket_group,
-        forced_command: report.forced_command,
         rows,
         host_keys,
         flash,
@@ -348,6 +344,13 @@ mod tests {
         assert!(html.contains("data-confirm-path=\"SHA256:bbb\""));
         // Report facts are all false here, so the page offers its diagnostic.
         assert!(html.contains("/ssh-access/diagnose"));
+
+        // An empty report still renders both sections, with their empty states.
+        let view = view_from(pb::PipeAccessReportReply::default(), "h", None, None, None);
+        let html = SshAccessPartial { view }.render().unwrap();
+        assert!(html.contains("Authorized keys"));
+        assert!(html.contains("No SSH keys authorized"));
+        assert!(html.contains("No host keys reported"));
     }
 
     const KEY: &str = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 admin@laptop";
