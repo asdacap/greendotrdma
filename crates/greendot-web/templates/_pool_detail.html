@@ -116,7 +116,7 @@
     </article>
   </dialog>
 
-  <h2>Filesystems</h2>
+  <h2>Filesystem datasets</h2>
   {% if view.fs_rows.is_empty() %}
   <p class="empty">This pool has no child filesystem datasets yet.</p>
   {% else %}
@@ -187,11 +187,12 @@
   </table>
   {% endif %}
 
-  <button type="button" class="dialog-trigger" data-dialog-open>Create filesystem</button>
+  <button type="button" class="dialog-trigger" data-dialog-open>Create filesystem dataset</button>
   <dialog>
   <article>
-  <header>Create filesystem</header>
+  <header>Create filesystem dataset</header>
   <form class="card" hx-post="/zfs/fs" hx-target="#pool-detail-content" hx-swap="outerHTML">
+    <p class="muted small">A filesystem is a ZFS dataset — it can hold child filesystems and zvols.</p>
     <label>Parent dataset
       <select name="parent" required>
         {% for p in view.parents %}<option>{{ p }}</option>{% endfor %}
@@ -233,6 +234,7 @@
   <article>
   <header>Create zvol</header>
   <form class="card" hx-post="/zfs/zvol" hx-target="#pool-detail-content" hx-swap="outerHTML">
+    <p class="muted small">A zvol nests under the pool root or any filesystem dataset.</p>
     <label>Parent dataset
       <select name="parent" required>
         {% for p in view.parents %}<option>{{ p }}</option>{% endfor %}
