@@ -46,7 +46,7 @@ use greendot_proto::pb::helper_server::{Helper, HelperServer};
 use greendot_proto::{AuthResult, ErrKind, SubStatus, Task, TaskEvent, ops, pb};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -213,6 +213,10 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         autoload_modules,
     });
 
+    if ctx.autoload_modules {
+        load_startup_modules();
+    }
+
     // SO_PEERCRED authorization: the configured uid, or a member of the
     // allowed group (see [`peer_allowed`]). Rejected and errored connections
     // are dropped so the daemon keeps serving (mirrors the old accept loop's
@@ -308,6 +312,33 @@ struct ChannelSink(mpsc::Sender<std::result::Result<pb::TaskEvent, Status>>);
 /// How long a full event channel may stall a worker before the client is
 /// declared dead.
 const SEND_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `modprobe -a` for [`modules::STARTUP_MODULES`] plus the recognized NICs'
+/// RDMA drivers, run once before the daemon serves.
+///
+/// Deliberately *not* a Task: there is no client to stream subtask events to at
+/// startup, so modprobe's stdout/stderr are inherited straight into the
+/// daemon's own — journald records them. A module the kernel doesn't ship makes
+/// `modprobe -a` exit non-zero after loading the rest; that is a warning, not a
+/// reason to refuse to serve.
+fn load_startup_modules() {
+    let nics = hardware::rdma_driver_modules(Path::new(hardware::NET_ROOT));
+    let Some(spec) = modules::ensure(modules::STARTUP_MODULES, &nics) else {
+        return;
+    };
+    info!(args = ?spec.args, "autoloading kernel modules");
+    match std::process::Command::new(&spec.command)
+        .args(&spec.args)
+        .status()
+    {
+        Ok(status) if status.success() => info!("kernel modules loaded"),
+        Ok(status) => warn!(
+            code = status.code(),
+            "modprobe reported failures; some transports may be unavailable"
+        ),
+        Err(e) => warn!(error = %e, "modprobe could not run"),
+    }
+}
 
 impl EventSink for ChannelSink {
     fn emit(&mut self, ev: TaskEvent) -> io::Result<()> {

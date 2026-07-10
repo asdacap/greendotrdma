@@ -38,6 +38,22 @@ pub fn transport_module(transport: Transport) -> KernelModule {
     }
 }
 
+/// Every module an apply might need, regardless of what is currently desired.
+/// Loaded once at daemon startup so the RDMA device exists *before* the first
+/// export is configured — `irdma` never auto-loads, and until it is up the UI
+/// cannot offer an RDMA export to create, which would load it.
+///
+/// `Rxe` is excluded: `rdma_rxe` *is* the Soft-RoCE device, so loading it is
+/// part of enabling Soft-RoCE, which [`rxe_add`] does on request.
+pub const STARTUP_MODULES: &[KernelModule] = &[
+    KernelModule::NvmetLoop,
+    KernelModule::NvmetTcp,
+    KernelModule::NvmetRdma,
+    KernelModule::Iscsi,
+    KernelModule::Iser,
+    KernelModule::Rpcrdma,
+];
+
 /// `modprobe -a` for the requested set, plus `nic_rdma_modules` (the
 /// recognized NICs' RDMA drivers, see [`crate::hardware::rdma_driver_modules`])
 /// when any requested module rides hardware RDMA. `None` when the whole set is
@@ -110,6 +126,33 @@ pub fn rdma_resources() -> TaskSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_set_loads_every_transport_and_present_nic_drivers() {
+        let spec = ensure(STARTUP_MODULES, &["irdma"]).expect("startup set is never empty");
+        assert_eq!(spec.command, "modprobe");
+        for name in [
+            "nvmet",
+            "nvme_loop",
+            "nvmet_tcp",
+            "nvmet_rdma",
+            "target_core_mod",
+            "iscsi_target_mod",
+            "ib_isert",
+            "rpcrdma",
+            // The startup set rides hardware RDMA, so a present NIC's driver
+            // comes along — this is what breaks the irdma chicken-and-egg.
+            "irdma",
+        ] {
+            assert!(spec.args.iter().any(|a| a == name), "{name} not loaded");
+        }
+        // Soft-RoCE is enabled on request, never at startup.
+        assert!(!spec.args.iter().any(|a| a == "rdma_rxe"));
+        // No recognized NIC → no driver modules, transports load regardless.
+        let bare = ensure(STARTUP_MODULES, &[]).unwrap();
+        assert!(!bare.args.iter().any(|a| a == "irdma"));
+        assert!(bare.args.iter().any(|a| a == "nvmet_rdma"));
+    }
 
     #[test]
     fn modprobe_args_deduped_nic_riders_and_empty_is_none() {
