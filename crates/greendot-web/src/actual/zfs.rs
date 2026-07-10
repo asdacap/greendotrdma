@@ -246,9 +246,10 @@ pub fn parse_pool_vdevs(out: &str) -> Result<Vec<PoolMember>> {
 /// Device path → pool name: the leaves of [`parse_pool_vdevs`] (a parse
 /// error degrades to the empty map, matching the old lenient behaviour).
 ///
-/// v1 limitation: members are matched verbatim against the lsblk `/dev/<name>`
-/// paths, so a pool created against a `/dev/disk/by-id/...` path is recorded here
-/// but won't match a bare device row — lsblk's `zfs_member` remains the fallback.
+/// Keys are the real `/dev/<name>` paths [`ZPOOL_LIST_VDEVS`] resolves with
+/// `-L`, so they match the lsblk rows verbatim. Only *imported* pools appear:
+/// a `zfs_member` device absent from this map carries a label no live pool
+/// claims (a stale label, or an exported pool).
 pub fn parse_pool_members(out: &str) -> HashMap<String, String> {
     parse_pool_vdevs(out)
         .unwrap_or_default()
@@ -293,12 +294,17 @@ pub async fn pools() -> Result<Option<Vec<Pool>>> {
     .transpose()
 }
 
-/// `zpool list -vHPp`: `-v` per-vdev rows, `-P` full leaf paths, `-p` exact
-/// numbers. Feeds both [`pool_members`] and [`pool_vdevs`].
+/// `zpool list -vHLPp`: `-v` per-vdev rows, `-L` resolve symlinks to real
+/// device paths, `-P` full leaf paths, `-p` exact numbers. Feeds both
+/// [`pool_members`] and [`pool_vdevs`].
+///
+/// `-L` is what lets a pool created against `/dev/disk/by-id/...` match the
+/// `/dev/<name>` rows lsblk reports; without it every such member falls through
+/// to the unnamed-pool branch.
 const ZPOOL_LIST_VDEVS: &[&str] = &[
     "zpool",
     "list",
-    "-vHPp",
+    "-vHLPp",
     "-o",
     "name,size,alloc,free,frag,health",
 ];
@@ -469,8 +475,12 @@ rz\t11990251733248\t2199023255552\t9791228477696\t1\tONLINE
     }
 
     #[test]
-    fn parses_pool_members_skipping_containers_and_unresolved_byid() {
-        // `zpool list -vHP`: pool headers are flush-left; vdev containers and
+    fn parses_pool_members_skipping_containers() {
+        // `-L` must stay in the argv: it is what makes zpool print the real
+        // `/dev/<name>` leaves this map is keyed by, rather than by-id symlinks.
+        assert!(ZPOOL_LIST_VDEVS.contains(&"-vHLPp"));
+
+        // `zpool list -vHLP`: pool headers are flush-left; vdev containers and
         // leaf devices are tab-indented. Only `/dev/...` leaves map to a pool.
         let out = "tank\t3985729650688\t1099511627776\t2886218022912\t4\tONLINE\n\
                    \tmirror-0\t3985729650688\t1099511627776\t2886218022912\t-\t-\n\
@@ -483,7 +493,8 @@ rz\t11990251733248\t2199023255552\t9791228477696\t1\tONLINE
         assert_eq!(map.get("/dev/sdc"), Some(&"tank".to_string()));
         // The mirror-0 container row is not a device → not mapped.
         assert!(!map.contains_key("mirror-0"));
-        // A by-id leaf is recorded verbatim (won't match a bare /dev/sdX lookup).
+        // `-L` should leave no by-id leaves; one that slips through is still
+        // recorded verbatim rather than dropped.
         assert_eq!(
             map.get("/dev/disk/by-id/wwn-0x5000abc-part1"),
             Some(&"backup".to_string())

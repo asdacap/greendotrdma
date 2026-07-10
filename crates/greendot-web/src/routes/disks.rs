@@ -72,9 +72,12 @@ fn usage_for(
         };
     }
     match fstype {
+        // A `zfs_member` device no imported pool claims carries a stale label —
+        // ZFS leaves one behind on a removed vdev. Say so: calling it a pool
+        // member sends the user hunting for a pool that does not exist.
         Some("zfs_member") => match ctx.members.get(device_path) {
             Some(pool) => format!("ZFS pool: {pool}"),
-            None => "ZFS pool member".to_string(),
+            None => "stale ZFS label (no imported pool) — wipe to reuse".to_string(),
         },
         Some("LVM2_member") => "LVM physical volume".to_string(),
         Some(fs) if ctx.in_use.contains(device_path) => format!("exported ({fs})"),
@@ -768,14 +771,14 @@ mod tests {
             usage_for("/dev/sda1", Some("/boot"), Some("vfat"), 0, &ctx),
             "mounted at /boot (vfat)"
         );
-        // ZFS member resolved to its pool name, or a bare fallback when unknown
+        // ZFS member resolved to its pool name; an unclaimed label is stale
         assert_eq!(
             usage_for("/dev/sdb", None, Some("zfs_member"), 0, &ctx),
             "ZFS pool: tank"
         );
         assert_eq!(
             usage_for("/dev/sdd", None, Some("zfs_member"), 0, &ctx),
-            "ZFS pool member"
+            "stale ZFS label (no imported pool) — wipe to reuse"
         );
         assert_eq!(
             usage_for("/dev/sde", None, Some("LVM2_member"), 0, &ctx),

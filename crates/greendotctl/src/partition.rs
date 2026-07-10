@@ -5,8 +5,16 @@ use crate::util::{dev, s};
 use greendot_proto::{BlockDev, PartLabel};
 
 /// Writes a brand-new empty GPT — destroys the existing table.
+///
+/// `--wipe always` is required: sfdisk's `auto` default only erases filesystem
+/// signatures in interactive mode, so a piped script leaves a stale
+/// `zfs_member`/`LVM2_member` magic behind and the disk stays unusable.
 pub fn table_create(disk: &BlockDev) -> TaskSpec {
-    TaskSpec::with_stdin("sfdisk", s(&[&dev(disk)]), "label: gpt\n".into())
+    TaskSpec::with_stdin(
+        "sfdisk",
+        s(&["--wipe", "always", &dev(disk)]),
+        "label: gpt\n".into(),
+    )
 }
 
 pub fn partition_create(
@@ -71,7 +79,11 @@ mod tests {
         let t = table_create(&disk());
         assert_eq!(
             (t.command.as_str(), t.args.clone(), t.stdin.as_deref()),
-            ("sfdisk", s(&["/dev/sdb"]), Some("label: gpt\n"))
+            (
+                "sfdisk",
+                s(&["--wipe", "always", "/dev/sdb"]),
+                Some("label: gpt\n")
+            )
         );
         let d = partition_delete(&disk(), 3);
         assert_eq!(
