@@ -622,17 +622,8 @@ details summary:hover { color: var(--text); }
    modal upgrades every hx-confirm. Native <dialog> gives ESC + focus-trap; Pico
    paints article/header/footer and the brand drops it onto the panel. */
 
-/* Trigger reads like the old <summary>: a quiet muted label that opens a modal. */
-.dialog-trigger {
-  margin: 10px 0;
-  padding: 0;
-  background: none;
-  border: none;
-  color: var(--muted);
-  cursor: pointer;
-  font: inherit;
-}
-.dialog-trigger:hover { color: var(--text); }
+/* Trigger is a normal quiet panel button (Pico paints it); only margins are local. */
+.dialog-trigger { margin: 10px 0; }
 .rowactions .dialog-trigger { margin: 0; }
 
 dialog { border: none; background: transparent; padding: 0; }
