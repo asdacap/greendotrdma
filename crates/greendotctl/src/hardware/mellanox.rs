@@ -29,6 +29,13 @@ impl NetworkHardware for Mellanox {
         }
     }
 
+    /// `mlx5_ib` normally auto-loads off the mlx5_core auxiliary device, but
+    /// not on minimal installs without the udev modalias path — an explicit
+    /// load is harmless when it already did.
+    fn rdma_modules(&self) -> &'static [&'static str] {
+        &["mlx5_ib"]
+    }
+
     fn enable(&self, pci: &PciAddress) -> Vec<TaskSpec> {
         vec![
             // `devlink dev param set pci/<pci> name enable_roce value true cmode

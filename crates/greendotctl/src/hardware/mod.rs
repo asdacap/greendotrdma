@@ -59,6 +59,12 @@ pub trait NetworkHardware: Sync {
         let _ = net_dir;
         None
     }
+    /// Kernel modules this vendor's NICs need loaded to expose their RDMA
+    /// devices — `modprobe` fodder for the autoload paths. Default: none (the
+    /// driver stack loads itself).
+    fn rdma_modules(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 /// Every supported NIC vendor. Append one entry to add a vendor.
@@ -131,6 +137,29 @@ pub fn roce_capable(net_root: &Path) -> Vec<(String, &'static str)> {
         })
         .collect();
     out.sort();
+    out
+}
+
+/// The RDMA driver modules for every recognized NIC present, sorted and
+/// deduplicated. Matched on vendor alone, not [`NetworkHardware::enableable`]:
+/// Intel is advisory-only for the RoCE toggle, but loading `irdma` is exactly
+/// the host-side step its advisory demands.
+pub fn rdma_driver_modules(net_root: &Path) -> Vec<&'static str> {
+    let Ok(entries) = std::fs::read_dir(net_root) else {
+        return Vec::new();
+    };
+    let mut out: Vec<&'static str> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let net_dir = entry.path();
+            is_ethernet(&net_dir)
+                .then(|| vendor_impl(&net_dir))
+                .flatten()
+        })
+        .flat_map(|hw| hw.rdma_modules().iter().copied())
+        .collect();
+    out.sort();
+    out.dedup();
     out
 }
 
@@ -276,6 +305,7 @@ mod tests {
             roce_capable(&f.net_root()),
             vec![("ens16".to_owned(), "Mellanox")]
         );
+        assert_eq!(rdma_driver_modules(&f.net_root()), vec!["mlx5_ib"]);
     }
 
     #[test]
@@ -304,5 +334,9 @@ mod tests {
         );
         assert!(detect(&f.net_root(), "ens16v0").is_none());
         assert!(detect(&f.net_root(), "eth3").is_some());
+
+        // Driver-module inventory: both Intel NICs fold into one irdma entry,
+        // Mellanox contributes mlx5_ib, unmatched vendors contribute nothing.
+        assert_eq!(rdma_driver_modules(&f.net_root()), vec!["irdma", "mlx5_ib"]);
     }
 }

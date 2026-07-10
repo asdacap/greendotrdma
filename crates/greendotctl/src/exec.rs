@@ -40,6 +40,9 @@ pub struct Ctx {
     /// Where the pipe keys live, and the forced command they are granted —
     /// resolved once at startup, never taken from a request.
     pub pipe_keys: PipeKeyConfig,
+    /// Whether applies load their required kernel modules themselves
+    /// (`autoload_modules` in the config, resolved once at startup).
+    pub autoload_modules: bool,
 }
 
 /// A task rpc: executes as a recorded stream of subtasks. The
@@ -177,12 +180,23 @@ impl TaskOp for ops::ZfsClone {
 impl TaskOp for ops::CsiNvmeApply {
     type Wire = pb::CsiNvmeApply;
     fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        // Nothing loads the nvmet modules for the CSI path but us — the
+        // reconcile's module area only covers the web's own exports.
+        if ctx.autoload_modules
+            && let Some(spec) = modules::ensure(
+                &[modules::transport_module(self.transport)],
+                &hardware::rdma_driver_modules(Path::new(hardware::NET_ROOT)),
+            )
+            && cmd::run(task, "Load kernel modules", &spec)? != SubStatus::Success
+        {
+            return Ok(());
+        }
         // `zfs create` returns before udev materializes the zvol's device
         // node, and enabling the nvmet namespace opens that node — so a fresh
         // volume's first apply can race into an ENOENT. Wait briefly, as a
         // visible subtask, only when the node isn't there yet.
         if !Path::new(self.device_path.as_str()).exists() {
-            let mut sub = task.begin_subtask(format!("Wait for {}", self.device_path));
+            let sub = task.begin_subtask(format!("Wait for {}", self.device_path));
             let appeared = (0..100).any(|_| {
                 std::thread::sleep(std::time::Duration::from_millis(100));
                 Path::new(self.device_path.as_str()).exists()

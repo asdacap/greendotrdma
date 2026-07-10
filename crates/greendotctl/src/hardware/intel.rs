@@ -53,6 +53,12 @@ impl NetworkHardware for Intel {
         Vec::new()
     }
 
+    /// `irdma` (E810/X7xx RDMA) never auto-loads — the same host-side load the
+    /// VF advisory below demands.
+    fn rdma_modules(&self) -> &'static [&'static str] {
+        &["irdma"]
+    }
+
     fn advice(&self, net_dir: &Path) -> Option<(&'static str, &'static str)> {
         let dev = device_id(net_dir)?;
         INTEL_IRDMA_VF_IDS

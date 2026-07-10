@@ -16,6 +16,10 @@ pub struct Config {
     pub state_path: PathBuf,
     pub nvmet_root: PathBuf,
     pub lio_root: PathBuf,
+    /// Whether the daemon runs `modprobe` itself when applying exports: the
+    /// nvmet transport modules, plus recognized NICs' RDMA driver modules for
+    /// RDMA-riding applies.
+    pub autoload_modules: bool,
 }
 
 impl Default for Config {
@@ -25,6 +29,7 @@ impl Default for Config {
             state_path: "/var/lib/greendotrdma/state.toml".into(),
             nvmet_root: "/sys/kernel/config/nvmet".into(),
             lio_root: "/sys/kernel/config/target".into(),
+            autoload_modules: true,
         }
     }
 }
@@ -66,11 +71,13 @@ mod tests {
         // and web-only keys (`listen`, TLS, …) are ignored, not rejected.
         let path = temp_toml(
             "ok",
-            "listen = \"0.0.0.0:9000\"\nstate_path = \"/tmp/state.toml\"\n",
+            "listen = \"0.0.0.0:9000\"\nstate_path = \"/tmp/state.toml\"\nautoload_modules = false\n",
         );
         let c = Config::load(Some(path.clone())).unwrap();
         assert_eq!(c.state_path, PathBuf::from("/tmp/state.toml"));
         assert_eq!(c.helper_socket, Config::default().helper_socket);
+        assert!(d.autoload_modules, "autoload defaults to on");
+        assert!(!c.autoload_modules);
         std::fs::remove_file(&path).ok();
 
         // A missing file and a value of the wrong type both error.

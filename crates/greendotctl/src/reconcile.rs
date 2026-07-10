@@ -192,13 +192,21 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
     wanted.extend(iscsi_modules(&desired.iscsi_exports));
     wanted.extend(nfs_modules(&desired.nfs_exports));
 
-    area(task, wanted.is_empty(), "Load kernel modules", |sub| {
-        match modules::ensure(&wanted) {
-            Some(spec) => cmd::run_into(sub, &spec),
-            // Nothing to load once deduplicated.
-            None => Ok(SubStatus::Success),
-        }
-    })?;
+    // `autoload_modules = false` greys the area out rather than dropping it,
+    // so a pass that then fails on a missing transport points at the setting.
+    area(
+        task,
+        !cfg.autoload_modules || wanted.is_empty(),
+        "Load kernel modules",
+        |sub| {
+            let nics = crate::hardware::rdma_driver_modules(Path::new(crate::hardware::NET_ROOT));
+            match modules::ensure(&wanted, &nics) {
+                Some(spec) => cmd::run_into(sub, &spec),
+                // Nothing to load once deduplicated.
+                None => Ok(SubStatus::Success),
+            }
+        },
+    )?;
     area(task, nvmet_ok, "Apply NVMe-oF configuration", |sub| {
         nvmet::apply(&nvmet_desired, Path::new(nvmet::NVMET_ROOT), sub)
     })?;

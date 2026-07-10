@@ -12,3 +12,8 @@ tls_key = "/etc/greendotrdma/key.pem"
 # SQLite task run-history.
 # state_path = "/var/lib/greendotrdma/state.toml"
 # db_path = "/var/lib/greendotrdma/state.db"
+
+# The daemon runs `modprobe` itself when applying exports: the nvmet transport
+# modules, plus recognized NICs' RDMA driver modules (e.g. irdma) for
+# RDMA-riding applies. Read at daemon startup.
+# autoload_modules = true

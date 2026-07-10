@@ -253,12 +253,21 @@ fn task_status(events: &[TaskEvent]) -> SubStatus {
 /// The CSI lifecycle over the real socket against a `--nvmet-root` tempdir:
 /// apply → grant → revoke (the fence) → delete, plus ingress rejection of a
 /// web-prefix NQN — the ownership boundary enforced at the choke point.
+/// `autoload_modules = false` keeps the unprivileged test from running a real
+/// `modprobe` (and shows the setting turns the autoload off).
 #[tokio::test]
 async fn csi_ops_drive_the_nvmet_root_end_to_end() {
     let dir = test_dir("csi");
     let root = dir.join("nvmet");
     std::fs::create_dir_all(&root).unwrap();
-    let helper = Helper::start(&["--nvmet-root", root.to_str().unwrap()]);
+    let config = dir.join("config.toml");
+    std::fs::write(&config, "autoload_modules = false\n").unwrap();
+    let helper = Helper::start(&[
+        "--nvmet-root",
+        root.to_str().unwrap(),
+        "--config",
+        config.to_str().unwrap(),
+    ]);
     let mut client = helper.client();
 
     let nqn = CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap();
@@ -284,6 +293,12 @@ async fn csi_ops_drive_the_nvmet_root_end_to_end() {
     )
     .await;
     assert_eq!(task_status(&events), SubStatus::Success, "{events:?}");
+    assert!(
+        !events.iter().any(
+            |e| matches!(e, TaskEvent::SubtaskStarted { name, .. } if name == "Load kernel modules")
+        ),
+        "autoload_modules = false must suppress the module load; events: {events:?}"
+    );
     let subsys = root.join("subsystems/nqn.2026-06.io.greendot.csi:pvc-1");
     assert_eq!(
         std::fs::read_to_string(subsys.join("namespaces/1/device_uuid")).unwrap(),
@@ -353,6 +368,41 @@ async fn csi_ops_drive_the_nvmet_root_end_to_end() {
         }) => assert!(msg.contains("invalid request"), "{msg}"),
         other => panic!("expected rejected task, got {other:?}"),
     }
+}
+
+/// With autoload on (the default — no `--config`), a CSI apply's first subtask
+/// is the module load. Whether the real `modprobe` succeeds is host-dependent
+/// (unprivileged, modules possibly already loaded), so only the framing is
+/// asserted: the subtask runs and the stream terminates.
+#[tokio::test]
+async fn csi_apply_autoloads_modules_by_default() {
+    let dir = test_dir("csiauto");
+    let root = dir.join("nvmet");
+    std::fs::create_dir_all(&root).unwrap();
+    let helper = Helper::start(&["--nvmet-root", root.to_str().unwrap()]);
+    let mut client = helper.client();
+
+    let apply = ops::CsiNvmeApply {
+        nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-auto").unwrap(),
+        device_path: greendot_proto::DevicePath::new("/dev/null").unwrap(),
+        device_uuid: greendot_proto::NsUuid::new("58668891-c3e4-45d0-b90e-824525c16081").unwrap(),
+        traddr: "10.0.0.5".parse().unwrap(),
+        trsvcid: 4421,
+        transport: greendot_proto::Transport::Rdma,
+    };
+    let events = drain(
+        client
+            .csi_nvme_apply(pb::CsiNvmeApply::from(apply))
+            .await
+            .unwrap()
+            .into_inner(),
+    )
+    .await;
+    assert!(
+        matches!(events.first(), Some(TaskEvent::SubtaskStarted { name, .. }) if name == "Load kernel modules"),
+        "{events:?}"
+    );
+    assert!(matches!(events.last(), Some(TaskEvent::Finished { .. })));
 }
 
 /// gRPC/h2 through a spawned `greendotctl pipe` child's stdio — exactly the
@@ -427,7 +477,9 @@ async fn pipe_key_ops_write_authorized_keys_and_reject_hostile_pastes() {
 
     // A paste that would smuggle a second, shell-granting line. The wire type
     // carries it happily; the daemon's TryFrom must not.
-    let hostile = format!("{KEY}\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 evil");
+    let hostile = format!(
+        "{KEY}\nssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKdhWt9PS+RZA4evy8mCnJjidpS48BAw5bb6TV7mGJ26 evil"
+    );
     let events = drain(
         client
             .pipe_key_add(pb::PipeKeyAdd {

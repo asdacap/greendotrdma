@@ -177,6 +177,16 @@ async fn serve_forever(opts: Opts) -> Result<()> {
     }
     info!(socket = %opts.socket.display(), allowed_uid, "listening");
 
+    // Resolved once; a config edit needs a daemon restart, like every other
+    // startup-resolved knob. An unreadable config still serves (reconcile
+    // reports it per-pass) and keeps the default.
+    let autoload_modules = greendot_proto::config::Config::load(opts.config.clone())
+        .map(|cfg| cfg.autoload_modules)
+        .unwrap_or_else(|e| {
+            warn!(error = %format!("{e:#}"), "config unreadable; module autoload keeps its default");
+            greendot_proto::config::Config::default().autoload_modules
+        });
+
     let ctx = Arc::new(Ctx {
         auth: pam::AuthConfig {
             pam_service: opts.pam_service,
@@ -200,6 +210,7 @@ async fn serve_forever(opts: Opts) -> Result<()> {
                 .unwrap_or_else(pipe_keys::resolve_pipe_bin),
             home_override: opts.pipe_home,
         },
+        autoload_modules,
     });
 
     // SO_PEERCRED authorization: the configured uid, or a member of the

@@ -3,7 +3,7 @@
 //! `NetworkHardware` trait.
 
 use crate::cmd::{self, TaskSpec};
-use greendot_proto::{KernelModule, NetdevName, SubStatus, Task};
+use greendot_proto::{KernelModule, NetdevName, SubStatus, Task, Transport};
 use std::io;
 
 fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
@@ -19,14 +19,44 @@ fn modprobe_names(module: KernelModule) -> &'static [&'static str] {
     }
 }
 
-/// `modprobe -a <names>` for the requested set. `None` when the set is empty.
-pub fn ensure(modules: &[KernelModule]) -> Option<TaskSpec> {
+/// Whether this module serves traffic over hardware RDMA — i.e. loading it is
+/// only useful once the NIC's own RDMA driver is up too. Soft-RoCE (`Rxe`) is
+/// deliberately not one: `rdma_rxe` itself is the RDMA device.
+fn rides_hardware_rdma(module: KernelModule) -> bool {
+    matches!(
+        module,
+        KernelModule::NvmetRdma | KernelModule::Iser | KernelModule::Rpcrdma
+    )
+}
+
+/// The nvmet transport module behind one CSI export's transport.
+pub fn transport_module(transport: Transport) -> KernelModule {
+    match transport {
+        Transport::Rdma => KernelModule::NvmetRdma,
+        Transport::Tcp => KernelModule::NvmetTcp,
+        Transport::Loop => KernelModule::NvmetLoop,
+    }
+}
+
+/// `modprobe -a` for the requested set, plus `nic_rdma_modules` (the
+/// recognized NICs' RDMA drivers, see [`crate::hardware::rdma_driver_modules`])
+/// when any requested module rides hardware RDMA. `None` when the whole set is
+/// empty.
+pub fn ensure(modules: &[KernelModule], nic_rdma_modules: &[&str]) -> Option<TaskSpec> {
     let mut names: Vec<String> = vec!["-a".into()];
+    let mut push = |name: &str| {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.into());
+        }
+    };
     for module in modules {
         for name in modprobe_names(*module) {
-            if !names.iter().any(|n| n == name) {
-                names.push((*name).into());
-            }
+            push(name);
+        }
+    }
+    if modules.iter().copied().any(rides_hardware_rdma) {
+        for name in nic_rdma_modules {
+            push(name);
         }
     }
     (names.len() > 1).then(|| TaskSpec::new("modprobe", names))
@@ -35,7 +65,7 @@ pub fn ensure(modules: &[KernelModule]) -> Option<TaskSpec> {
 /// Enables Soft-RoCE on `netdev` as one task: load the rxe module, then add
 /// the rdma link (only if the load succeeded). `Err` only on a sink failure.
 pub fn rxe_add(task: &mut Task, netdev: &NetdevName) -> io::Result<()> {
-    if let Some(spec) = ensure(&[KernelModule::Rxe])
+    if let Some(spec) = ensure(&[KernelModule::Rxe], &[])
         && cmd::run(task, "Load rxe module", &spec)? != SubStatus::Success
     {
         return Ok(());
@@ -82,21 +112,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn modprobe_args_deduped_and_empty_is_none() {
-        let spec = ensure(&[
-            KernelModule::NvmetRdma,
-            KernelModule::NvmetTcp,
-            KernelModule::Rxe,
-        ])
+    fn modprobe_args_deduped_nic_riders_and_empty_is_none() {
+        let spec = ensure(
+            &[
+                KernelModule::NvmetRdma,
+                KernelModule::NvmetTcp,
+                KernelModule::Rxe,
+            ],
+            &["irdma", "nvmet"], // rdma rider present → appended, still deduped
+        )
         .unwrap();
         assert_eq!(spec.command, "modprobe");
         assert_eq!(
             spec.args,
-            ["-a", "nvmet", "nvmet_rdma", "nvmet_tcp", "rdma_rxe"]
+            [
+                "-a",
+                "nvmet",
+                "nvmet_rdma",
+                "nvmet_tcp",
+                "rdma_rxe",
+                "irdma"
+            ]
+            .map(String::from)
+            .to_vec()
+        );
+        // No hardware-RDMA rider → NIC drivers stay unloaded; soft-RoCE is
+        // deliberately not a rider.
+        assert_eq!(
+            ensure(&[KernelModule::NvmetTcp, KernelModule::Rxe], &["irdma"])
+                .unwrap()
+                .args,
+            ["-a", "nvmet", "nvmet_tcp", "rdma_rxe"]
                 .map(String::from)
                 .to_vec()
         );
-        assert!(ensure(&[]).is_none());
+        assert!(ensure(&[], &["irdma"]).is_none());
+    }
+
+    #[test]
+    fn transport_maps_to_its_nvmet_module() {
+        assert_eq!(
+            [Transport::Rdma, Transport::Tcp, Transport::Loop].map(transport_module),
+            [
+                KernelModule::NvmetRdma,
+                KernelModule::NvmetTcp,
+                KernelModule::NvmetLoop
+            ]
+        );
     }
 
     #[test]
