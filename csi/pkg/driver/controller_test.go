@@ -413,6 +413,13 @@ func TestPublishUnpublishFencing(t *testing.T) {
 	if grant.Nqn != CSINQNPrefix+"tank:csi:pvc-1" || grant.Hostnqn != hostnqn {
 		t.Fatalf("bad grant: %+v", grant)
 	}
+	// Publish re-applies the export first, so an attach after a target reboot
+	// (configfs wiped, subsystem gone) self-heals: it rebuilds the subsystem +
+	// RDMA port for this volume's zvol before granting the node's ACL.
+	apply := f.reqs["CsiNvmeApply"].(*helperpb.CsiNvmeApply)
+	if apply.Nqn != CSINQNPrefix+"tank:csi:pvc-1" || apply.DevicePath != "/dev/zvol/tank/csi/pvc-1" {
+		t.Fatalf("publish did not re-apply the export: %+v", apply)
+	}
 
 	// An imported id grants against its encoded nqn token, unchanged fencing.
 	imp := encodeImportID("tank/legacy/db")

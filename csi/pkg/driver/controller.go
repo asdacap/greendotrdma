@@ -464,6 +464,16 @@ func (cs *ControllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 		return nil, status.Errorf(codes.InvalidArgument,
 			"node id %q is not a host NQN — the node plugin must run with --nodeid from /etc/nvme/hostnqn", node)
 	}
+	// The nvmet export lives in the target's kernel configfs, which a target
+	// reboot wipes — while the zvol (ZFS) survives. CreateVolume built the
+	// export, but the external-provisioner never calls it again for a bound PV,
+	// so the first attach after a reboot would find the subsystem gone and
+	// CsiHostGrant fail "does not exist". Re-apply the export here first: it is
+	// idempotent (same code path as CreateVolume) and rebuilds the subsystem +
+	// RDMA port, so publish self-heals instead of requiring a manual reconcile.
+	if err := cs.applyExport(ctx, cs.nqnOf(ref), ref.dataset); err != nil {
+		return nil, err
+	}
 	stream, err := cs.helper.CsiHostGrant(ctx, &helperpb.CsiHostGrant{
 		Nqn: cs.nqnOf(ref), Hostnqn: node,
 	})
