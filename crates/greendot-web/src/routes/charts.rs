@@ -89,18 +89,20 @@ async fn charts_page(
 pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
     let mut samples = Vec::new();
     for (key, value) in state.metrics.latest_raw() {
-        // keys look like "disk:sda:read_bps" / "rdma:rxe0:rx_bps"
+        // keys look like "disk:sda:read_bps" / "rdma:rxe0:rx_bps" / "pool:tank:read_bps"
         let parts: Vec<&str> = key.split(':').collect();
-        let (name, device) = match parts.as_slice() {
-            ["disk", dev, "read_bps"] => ("greendot_disk_read_bytes_total", dev),
-            ["disk", dev, "write_bps"] => ("greendot_disk_written_bytes_total", dev),
-            ["rdma", dev, "rx_bps"] => ("greendot_rdma_received_bytes_total", dev),
-            ["rdma", dev, "tx_bps"] => ("greendot_rdma_transmitted_bytes_total", dev),
+        let (name, label, target) = match parts.as_slice() {
+            ["disk", dev, "read_bps"] => ("greendot_disk_read_bytes_total", "device", dev),
+            ["disk", dev, "write_bps"] => ("greendot_disk_written_bytes_total", "device", dev),
+            ["rdma", dev, "rx_bps"] => ("greendot_rdma_received_bytes_total", "device", dev),
+            ["rdma", dev, "tx_bps"] => ("greendot_rdma_transmitted_bytes_total", "device", dev),
+            ["pool", pool, "read_bps"] => ("greendot_pool_read_bytes_total", "pool", pool),
+            ["pool", pool, "write_bps"] => ("greendot_pool_written_bytes_total", "pool", pool),
             _ => continue,
         };
         samples.push(PromSample {
             name,
-            labels: vec![("device", (*device).to_owned())],
+            labels: vec![(label, (*target).to_owned())],
             value: value as f64,
         });
     }

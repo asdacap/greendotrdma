@@ -30,6 +30,15 @@
   </table>
   {% endif %}
 
+  <h2>Traffic</h2>
+  <div class="chartgrid">
+    <div class="chartcard"><div class="chart-title">Read</div>{{ view.read_svg|safe }}</div>
+    <div class="chartcard"><div class="chart-title">Write</div>{{ view.write_svg|safe }}</div>
+  </div>
+
+  <h2>Capacity used</h2>
+  <div class="chartcard">{{ view.used_svg|safe }}</div>
+
   <h2>Devices</h2>
   {% if view.members.is_empty() %}
   <p class="empty">No device information available for this pool.</p>

@@ -1,5 +1,6 @@
-//! The 5-second collector: /sys/block I/O counters and RDMA port traffic
-//! counters into the metrics store, with 1-min/1-hour rollup flushes.
+//! The 5-second collector: /sys/block I/O counters, RDMA port traffic
+//! counters, and per-ZFS-pool objset I/O counters into the metrics store,
+//! with 1-min/1-hour rollup flushes.
 
 use super::Metrics;
 use crate::routes::AppState;
@@ -56,6 +57,46 @@ fn collect_rdma(metrics: &Metrics, root: &Path, ts: i64) {
                     metrics.push_counter(&format!("rdma:{dev}:{dir}_bps"), ts, bytes);
                 }
             }
+        }
+    }
+}
+
+/// One value from a kstat table: lines are `name type data` triples after a
+/// two-line header.
+fn kstat_field(kstat: &str, name: &str) -> Option<u64> {
+    kstat.lines().find_map(|line| {
+        let mut f = line.split_whitespace();
+        if f.next() != Some(name) {
+            return None;
+        }
+        f.nth(1)?.parse().ok()
+    })
+}
+
+/// Sums the `nread`/`nwritten` byte counters of every
+/// `/proc/spl/kstat/zfs/<pool>/objset-*` dataset kstat into per-pool
+/// `pool:<name>:read_bps`/`write_bps` counters. A destroyed dataset makes the
+/// sum dip, which push_counter treats as a reset and skips one sample.
+fn collect_pool_io(metrics: &Metrics, root: &Path, ts: i64) {
+    for pool in read_dir_names(root) {
+        let dir = root.join(&pool);
+        let (mut read, mut written, mut seen) = (0u64, 0u64, false);
+        for objset in read_dir_names(&dir) {
+            if !objset.starts_with("objset-") {
+                continue;
+            }
+            if let Ok(raw) = std::fs::read_to_string(dir.join(&objset))
+                && let (Some(r), Some(w)) =
+                    (kstat_field(&raw, "nread"), kstat_field(&raw, "nwritten"))
+            {
+                read += r;
+                written += w;
+                seen = true;
+            }
+        }
+        if seen {
+            metrics.push_counter(&format!("pool:{pool}:read_bps"), ts, read);
+            metrics.push_counter(&format!("pool:{pool}:write_bps"), ts, written);
         }
     }
 }
@@ -135,6 +176,7 @@ pub async fn collector(state: std::sync::Arc<AppState>) {
         collect_block(&state.metrics, Path::new("/sys/block"), ts);
         collect_rdma(&state.metrics, Path::new("/sys/class/infiniband"), ts);
         collect_drive_temp(&state.metrics, Path::new("/sys/class/hwmon"), ts);
+        collect_pool_io(&state.metrics, Path::new("/proc/spl/kstat/zfs"), ts);
         if ts / 60 != last_minute {
             last_minute = ts / 60;
             collect_pools(&state.metrics, ts).await;
@@ -197,6 +239,53 @@ mod tests {
             vec![(105, (1024.0 * 512.0) / 5.0)]
         );
         assert_eq!(metrics.ring_series("disk:sda:write_bps"), vec![(105, 0.0)]);
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    /// Real objset kstat shape: header, then `name type data` triples.
+    fn objset(dataset: &str, nread: u64, nwritten: u64) -> String {
+        format!(
+            "36 1 0x01 7 2160 5342936343 5342936343\n\
+             name                            type data\n\
+             dataset_name                    7    {dataset}\n\
+             writes                          4    10\n\
+             nwritten                        4    {nwritten}\n\
+             reads                           4    5\n\
+             nread                           4    {nread}\n\
+             nunlinks                        4    0\n"
+        )
+    }
+
+    #[test]
+    fn pool_io_sums_objsets_per_pool_and_skips_non_pool_entries() {
+        let tmp = std::env::temp_dir().join(format!("gd-zpoolio{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let pool = tmp.join("tank");
+        std::fs::create_dir_all(&pool).unwrap();
+        std::fs::write(pool.join("objset-0x36"), objset("tank", 100, 200)).unwrap();
+        std::fs::write(pool.join("objset-0x37"), objset("tank/vm1", 50, 25)).unwrap();
+        // Non-objset pool entries and top-level plain files (arcstats) are ignored.
+        std::fs::write(pool.join("state"), "ONLINE\n").unwrap();
+        std::fs::write(tmp.join("arcstats"), "garbage\n").unwrap();
+
+        let metrics = Metrics::in_memory().unwrap();
+        // Two passes so rates exist: +250 read, +100 written over 5s.
+        collect_pool_io(&metrics, &tmp, 100);
+        std::fs::write(pool.join("objset-0x36"), objset("tank", 300, 300)).unwrap();
+        std::fs::write(pool.join("objset-0x37"), objset("tank/vm1", 100, 25)).unwrap();
+        collect_pool_io(&metrics, &tmp, 105);
+
+        assert_eq!(metrics.ring_series("pool:tank:read_bps"), vec![(105, 50.0)]);
+        assert_eq!(
+            metrics.ring_series("pool:tank:write_bps"),
+            vec![(105, 20.0)]
+        );
+        assert_eq!(
+            metrics.series_names(),
+            vec!["pool:tank:read_bps", "pool:tank:write_bps"],
+            "no series from arcstats or the state file"
+        );
+        assert_eq!(kstat_field("name type data\nnread 4 junk\n", "nread"), None);
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 

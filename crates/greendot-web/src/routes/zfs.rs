@@ -3,6 +3,7 @@ use crate::actual::block;
 use crate::actual::zfs::{self, DsKind};
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
+use crate::metrics::{ChartUnit, chart_svg};
 use askama::Template;
 use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
@@ -192,6 +193,10 @@ pub struct PoolDetailView {
     pub pool: Option<PoolRow>,
     /// The pool's vdev tree with per-row remove/detach actions.
     pub members: Vec<MemberRow>,
+    /// Live pool traffic/capacity charts (inline SVG; rendered unescaped).
+    pub read_svg: String,
+    pub write_svg: String,
+    pub used_svg: String,
     pub zvols: Vec<ZvolRow>,
     /// Child filesystem datasets in this pool (mount/unmount/destroy targets).
     pub fs_rows: Vec<FsRow>,
@@ -244,6 +249,10 @@ async fn gather_pool_detail(
                 view.add_devices = gather_pool_create(state, &HashSet::new(), None)
                     .await
                     .devices;
+                let series = |suffix| state.metrics.ring_series(&format!("pool:{name}:{suffix}"));
+                view.read_svg = chart_svg(&series("read_bps"), 600, 120, ChartUnit::Bytes);
+                view.write_svg = chart_svg(&series("write_bps"), 600, 120, ChartUnit::Bytes);
+                view.used_svg = chart_svg(&series("used_percent"), 600, 120, ChartUnit::Percent);
             }
             let prefix = format!("{name}/");
             view.parents = datasets
