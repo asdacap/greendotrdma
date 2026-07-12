@@ -5,19 +5,29 @@
 {% block content %}
 <h1>Charts</h1>
 <p>
-  {% for (label, active) in view.ranges %}
-  {% if *active %}<strong>{{ label }}</strong>{% else %}<a href="/charts?range={{ label }}">{{ label }}</a>{% endif %}
+  {% for r in view.ranges %}
+  {% if r.active %}<strong>{{ r.label }}</strong>{% else %}<a href="{{ r.href }}">{{ r.label }}</a>{% endif %}
   {% endfor %}
   <span class="muted small">live = last 10 minutes, 5s resolution</span>
 </p>
-{% if view.cards.is_empty() %}
-<p class="empty">No metrics collected yet — give the collector a few seconds.</p>
-{% endif %}
-<div class="chartgrid" {% if view.live %}hx-get="/charts" hx-select=".chartgrid" hx-swap="outerHTML" hx-trigger="every 5s"{% endif %}>
-  {% for c in view.cards %}
-  <div class="chartcard">
-    <div class="muted small">{{ c.title }}</div>
-    {{ c.svg|safe }}
+<p class="chips">
+  {% for c in view.chips %}
+  <a href="{{ c.href }}" class="chip{% if c.active %} active{% endif %}">{{ c.label }}</a>
+  {% endfor %}
+</p>
+<div id="chart-sections" {% if view.live %}hx-get="{{ view.refresh_url }}" hx-select="#chart-sections" hx-swap="outerHTML" hx-trigger="every 5s"{% endif %}>
+  {% if view.groups.is_empty() %}
+  <p class="empty">No charts to show — adjust the filter, or give the collector a few seconds.</p>
+  {% endif %}
+  {% for g in view.groups %}
+  <h2 class="chart-section">{{ g.heading }}</h2>
+  <div class="chartgrid">
+    {% for c in g.cards %}
+    <div class="chartcard">
+      <div class="muted small">{{ c.title }}</div>
+      {{ c.svg|safe }}
+    </div>
+    {% endfor %}
   </div>
   {% endfor %}
 </div>
