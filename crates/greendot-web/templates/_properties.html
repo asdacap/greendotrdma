@@ -1,0 +1,22 @@
+{% if !view.props.curated.is_empty() %}
+<h2>Properties</h2>
+<table>
+  <thead><tr><th>Property</th><th>Value</th></tr></thead>
+  <tbody>
+    {% for p in view.props.curated %}
+    <tr><td>{{ p.key }}</td><td>{{ p.value }}</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+<details class="props-all">
+  <summary>All {{ view.props.all.len() }} properties</summary>
+  <table>
+    <thead><tr><th>Property</th><th>Value</th></tr></thead>
+    <tbody>
+      {% for p in view.props.all %}
+      <tr><td>{{ p.key }}</td><td>{{ p.value }}</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+{% endif %}

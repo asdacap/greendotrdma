@@ -1,3 +1,4 @@
+use super::zfs::{PropertyTables, dataset_property_tables};
 use super::{AppState, page};
 use crate::actual;
 use crate::auth::{CurrentUser, nav_redirect};
@@ -232,11 +233,26 @@ async fn policy_detail(
 
 // ---- Per-snapshot page (destroy) ----
 
+/// The curated snapshot properties, in display order (snapshots are read-only,
+/// so this is a small set); [`super::zfs::curate`] keeps only reported ones.
+const SNAPSHOT_PROPS: &[&str] = &[
+    "type",
+    "creation",
+    "used",
+    "referenced",
+    "compressratio",
+    "written",
+    "defer_destroy",
+    "userrefs",
+];
+
 #[derive(Default)]
 pub struct SnapDetailView {
     /// `None` when no snapshot by this name exists on the host.
     pub snap: Option<SnapRow>,
     pub name: String,
+    /// The snapshot's properties (curated summary + full `zfs get all`).
+    pub props: PropertyTables,
     pub error: Option<String>,
     pub flash: Option<String>,
     /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
@@ -273,6 +289,9 @@ async fn gather_snap_detail(
     match actual::zfs::snapshots().await {
         Ok(Some(snaps)) => {
             view.snap = snaps.into_iter().find(|s| s.name == name).map(SnapRow::new);
+            if view.snap.is_some() {
+                view.props = dataset_property_tables(name, SNAPSHOT_PROPS).await;
+            }
         }
         // ZFS not installed — leave the snapshot unset (renders as not found).
         Ok(None) => {}

@@ -30,6 +30,8 @@
   </table>
   {% endif %}
 
+  {% include "_properties.html" %}
+
   <h2>Traffic</h2>
   <div class="chartgrid">
     <div class="chartcard"><div class="chart-title">Bytes/s</div>{{ view.traffic_svg|safe }}</div>

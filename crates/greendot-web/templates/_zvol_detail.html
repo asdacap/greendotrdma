@@ -21,6 +21,8 @@
     </tbody>
   </table>
 
+  {% include "_properties.html" %}
+
   <h2>Resize</h2>
   <form class="inline" hx-post="/zfs/zvol/resize" hx-target="#zvol-detail-content" hx-swap="outerHTML"
         hx-confirm="Resize {{ zvol.name }} to the new size?">

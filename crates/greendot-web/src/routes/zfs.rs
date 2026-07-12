@@ -220,6 +220,116 @@ fn member_rows(
         .collect()
 }
 
+/// One `(property, value)` row of a ZFS/zpool property table.
+pub struct PropRow {
+    pub key: String,
+    pub value: String,
+}
+
+/// A detail page's property tables: a curated summary plus the full set for the
+/// "show all" expander. Rendered by the shared `_properties.html` partial.
+#[derive(Default)]
+pub struct PropertyTables {
+    pub curated: Vec<PropRow>,
+    pub all: Vec<PropRow>,
+}
+
+/// The curated pool properties, in display order; only the ones the pool
+/// actually reports are shown.
+const POOL_PROPS: &[&str] = &[
+    "health",
+    "size",
+    "capacity",
+    "allocated",
+    "free",
+    "fragmentation",
+    "ashift",
+    "autotrim",
+    "autoexpand",
+    "autoreplace",
+    "dedupratio",
+    "failmode",
+    "readonly",
+    "guid",
+];
+
+/// The curated properties for a filesystem dataset or zvol — the union of both
+/// kinds' keys. [`curate`] keeps only those a given dataset reports, so a
+/// filesystem shows `recordsize`/`mountpoint` and a volume shows
+/// `volsize`/`volblocksize`.
+pub const DATASET_PROPS: &[&str] = &[
+    "type",
+    "creation",
+    "used",
+    "available",
+    "referenced",
+    "compressratio",
+    "mountpoint",
+    "mounted",
+    "quota",
+    "refquota",
+    "reservation",
+    "refreservation",
+    "recordsize",
+    "volsize",
+    "volblocksize",
+    "volmode",
+    "compression",
+    "atime",
+    "relatime",
+    "dedup",
+    "sync",
+    "encryption",
+    "keystatus",
+    "readonly",
+    "snapdir",
+    "copies",
+    "written",
+];
+
+/// Picks `keys` (in that order) out of a full property list, dropping any the
+/// entity doesn't report.
+pub fn curate(all: &[(String, String)], keys: &[&str]) -> Vec<PropRow> {
+    keys.iter()
+        .filter_map(|k| {
+            all.iter().find(|(p, _)| p == k).map(|(p, v)| PropRow {
+                key: p.clone(),
+                value: v.clone(),
+            })
+        })
+        .collect()
+}
+
+fn all_rows(all: Vec<(String, String)>) -> Vec<PropRow> {
+    all.into_iter()
+        .map(|(key, value)| PropRow { key, value })
+        .collect()
+}
+
+/// Curated + full property tables for a dataset/zvol/snapshot. Best-effort: a
+/// read failure yields empty tables so the rest of the page still renders.
+pub async fn dataset_property_tables(name: &str, curated: &[&str]) -> PropertyTables {
+    match zfs::dataset_properties(name).await {
+        Ok(Some(all)) => PropertyTables {
+            curated: curate(&all, curated),
+            all: all_rows(all),
+        },
+        _ => PropertyTables::default(),
+    }
+}
+
+/// Curated + full property tables for a pool. Best-effort like
+/// [`dataset_property_tables`].
+async fn pool_property_tables(name: &str) -> PropertyTables {
+    match zfs::pool_properties(name).await {
+        Ok(Some(all)) => PropertyTables {
+            curated: curate(&all, POOL_PROPS),
+            all: all_rows(all),
+        },
+        _ => PropertyTables::default(),
+    }
+}
+
 #[derive(Default)]
 pub struct PoolDetailView {
     pub name: String,
@@ -239,6 +349,8 @@ pub struct PoolDetailView {
     pub parents: Vec<String>,
     /// Empty raw devices offered to expand this pool (the "Add device" form).
     pub add_devices: Vec<PoolDeviceOption>,
+    /// The pool's properties (curated summary + full `zpool get all`).
+    pub props: PropertyTables,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -290,6 +402,7 @@ async fn gather_pool_detail(
             // A vdev added to the pool must be an empty raw device, so offer the
             // same candidates as pool creation (no zvols, LVs, or formatted parts).
             if view.pool.is_some() {
+                view.props = pool_property_tables(name).await;
                 view.add_devices = gather_pool_create(state, &HashSet::new(), None)
                     .await
                     .devices;
@@ -411,6 +524,8 @@ pub struct ZvolDetailView {
     pub name: String,
     /// `None` when the named zvol doesn't exist on this host.
     pub zvol: Option<ZvolRow>,
+    /// The zvol's properties (curated summary + full `zfs get all`).
+    pub props: PropertyTables,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -460,6 +575,9 @@ async fn gather_zvol_detail(
                     volsize: d.volsize.map_or(String::new(), human_bytes),
                     name: d.name,
                 });
+            if view.zvol.is_some() {
+                view.props = dataset_property_tables(&dataset, DATASET_PROPS).await;
+            }
         }
         // Absent `zfs` ⇒ ZFS isn't installed on this host.
         Ok(None) => view.not_installed = true,
@@ -534,6 +652,8 @@ pub struct DatasetDetailView {
     pub zvols: Vec<ZvolRow>,
     /// Snapshots of this dataset and its descendants.
     pub snapshots: Vec<SnapRow>,
+    /// The dataset's properties (curated summary + full `zfs get all`).
+    pub props: PropertyTables,
     pub not_installed: bool,
     pub error: Option<String>,
 }
@@ -592,6 +712,9 @@ async fn gather_dataset_detail(name: &str) -> DatasetDetailView {
                 })
                 .map(SnapRow::new)
                 .collect();
+            if view.dataset.is_some() {
+                view.props = dataset_property_tables(name, DATASET_PROPS).await;
+            }
         }
         // Either binary missing → ZFS isn't installed on this host.
         Ok(_) => view.not_installed = true,

@@ -130,6 +130,19 @@ pub fn parse_snapshot_list(out: &str) -> Result<Vec<Snapshot>> {
         .collect()
 }
 
+/// `zfs get -H -o property,value …` / `zpool get -H -o property,value …`:
+/// tab-separated `property\tvalue`, one per line, in the tool's print order.
+/// No `-p`, so values arrive human-formatted (`128K`, `lz4`, `2.00x`) exactly
+/// as ZFS renders them — the web shows them verbatim.
+pub fn parse_get(out: &str) -> Result<Vec<(String, String)>> {
+    out.lines()
+        .map(|line| {
+            let f = fields(line, 2)?;
+            Ok((f[0].to_string(), f[1].to_string()))
+        })
+        .collect()
+}
+
 /// Which allocation class a pool member belongs to, from the flush-left
 /// section labels of `zpool list -v` (`logs`, `cache`, `spare`, `special`,
 /// `dedup`; rows before any label are ordinary data vdevs).
@@ -356,6 +369,29 @@ pub async fn snapshots() -> Result<Option<Vec<Snapshot>>> {
     .transpose()
 }
 
+/// Every property of a dataset, zvol, or snapshot (`zfs get -H -o
+/// property,value all <name>`), in ZFS's print order. `None` when `zfs` isn't
+/// installed. `name` is an entity already seen in a listing, passed as a
+/// single argument (no shell).
+pub async fn dataset_properties(name: &str) -> Result<Option<Vec<(String, String)>>> {
+    run(&["zfs", "get", "-H", "-o", "property,value", "all", name])
+        .await?
+        .map(|out| parse_get(&out))
+        .transpose()
+}
+
+/// Every property of a pool (`zpool get -H -o property,value all <name>`).
+/// `ashift` here is the pool's ashift *property* (the default for new vdevs,
+/// not a per-vdev probe — that needs `zdb`, which is privileged); pools this
+/// UI creates set it explicitly, so it reflects the real value. `None` when
+/// `zpool` isn't installed.
+pub async fn pool_properties(name: &str) -> Result<Option<Vec<(String, String)>>> {
+    run(&["zpool", "get", "-H", "-o", "property,value", "all", name])
+        .await?
+        .map(|out| parse_get(&out))
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +584,29 @@ rz\t11990251733248\t2199023255552\t9791228477696\t1\tONLINE
         );
         // A command that exists but exits non-zero is still surfaced as an error.
         assert!(run(&["false"]).await.is_err());
+    }
+
+    #[test]
+    fn parses_property_value_pairs_in_order() {
+        // `zfs get -H -o property,value all` output: tab-separated pairs,
+        // human-formatted values, print order preserved (not sorted).
+        let out = "type\tvolume\nvolsize\t10G\nvolblocksize\t8K\n\
+                   compression\tlz4\ncompressratio\t1.42x\n";
+        assert_eq!(
+            parse_get(out).unwrap(),
+            vec![
+                ("type".into(), "volume".into()),
+                ("volsize".into(), "10G".into()),
+                ("volblocksize".into(), "8K".into()),
+                ("compression".into(), "lz4".into()),
+                ("compressratio".into(), "1.42x".into()),
+            ]
+        );
+        assert_eq!(parse_get("").unwrap(), vec![]);
+        assert!(
+            parse_get("ashift\t12\textra\n").is_err(),
+            "a row without exactly two fields must error"
+        );
     }
 
     #[test]
