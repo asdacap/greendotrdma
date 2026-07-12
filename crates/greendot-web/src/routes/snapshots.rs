@@ -66,7 +66,7 @@ pub struct SnapRow {
 }
 
 impl SnapRow {
-    fn new(s: actual::zfs::Snapshot) -> Self {
+    pub(crate) fn new(s: actual::zfs::Snapshot) -> Self {
         SnapRow {
             used: human_bytes(s.used),
             created: fmt_time(s.creation),
@@ -77,7 +77,6 @@ impl SnapRow {
 
 pub struct SnapshotsView {
     pub policies: Vec<PolicyRow>,
-    pub snapshots: Vec<SnapRow>,
     pub datasets: Vec<String>,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -99,7 +98,7 @@ struct SnapshotsPartial {
     view: SnapshotsView,
 }
 
-fn fmt_time(ts: i64) -> String {
+pub(crate) fn fmt_time(ts: i64) -> String {
     if ts == 0 {
         return "never".into();
     }
@@ -116,7 +115,6 @@ async fn gather(
 ) -> SnapshotsView {
     let mut view = SnapshotsView {
         policies: vec![],
-        snapshots: vec![],
         datasets: vec![],
         error: None,
         flash,
@@ -126,16 +124,6 @@ async fn gather(
     match state.db.list_policies() {
         Ok(policies) => view.policies = policies.into_iter().map(PolicyRow::new).collect(),
         Err(e) => view.error = Some(format!("could not read policies: {e:#}")),
-    }
-    match actual::zfs::snapshots().await {
-        Ok(Some(snaps)) => view.snapshots = snaps.into_iter().map(SnapRow::new).collect(),
-        // ZFS not installed — leave the snapshot list empty.
-        Ok(None) => {}
-        Err(e) => {
-            if view.error.is_none() {
-                view.error = Some(format!("could not list snapshots: {e:#}"));
-            }
-        }
     }
     view.datasets = actual::zfs::datasets()
         .await

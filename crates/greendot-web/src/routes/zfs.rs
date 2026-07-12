@@ -1,3 +1,4 @@
+use super::snapshots::SnapRow;
 use super::{AppState, page};
 use crate::actual::block;
 use crate::actual::zfs::{self, DsKind};
@@ -26,6 +27,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route(
             "/zfs/pool/{pool}/zvol/{*rest}",
             axum::routing::get(zvol_detail_page),
+        )
+        .route(
+            "/zfs/dataset/{*name}",
+            axum::routing::get(dataset_detail_page),
         )
         .route("/zfs/zvol", post(zvol_create))
         .route("/zfs/zvol/resize", post(zvol_resize))
@@ -63,6 +68,8 @@ impl PoolRow {
 
 pub struct ZvolRow {
     pub name: String,
+    /// The pool (first path component) the zvol belongs to, for the per-zvol page link.
+    pub pool: String,
     /// `name` with the `"{pool}/"` prefix stripped, for the per-zvol page link.
     pub rel: String,
     pub used: String,
@@ -197,7 +204,6 @@ pub struct PoolDetailView {
     pub read_svg: String,
     pub write_svg: String,
     pub used_svg: String,
-    pub zvols: Vec<ZvolRow>,
     /// Child filesystem datasets in this pool (mount/unmount/destroy targets).
     pub fs_rows: Vec<FsRow>,
     /// Filesystems in this pool, offered as zvol/filesystem parents.
@@ -273,16 +279,6 @@ async fn gather_pool_detail(
                     mountpoint: d.mountpoint.clone(),
                     used: human_bytes(d.used),
                     name: d.name.clone(),
-                })
-                .collect();
-            view.zvols = datasets
-                .into_iter()
-                .filter(|d| d.kind == DsKind::Volume && d.name.starts_with(&prefix))
-                .map(|d| ZvolRow {
-                    rel: d.name.strip_prefix(&prefix).unwrap_or(&d.name).to_owned(),
-                    used: human_bytes(d.used),
-                    volsize: d.volsize.map_or(String::new(), human_bytes),
-                    name: d.name,
                 })
                 .collect();
         }
@@ -404,6 +400,7 @@ async fn gather_zvol_detail(
                 .into_iter()
                 .find(|d| d.kind == DsKind::Volume && d.name == dataset)
                 .map(|d| ZvolRow {
+                    pool: pool.to_owned(),
                     rel: rest.to_owned(),
                     used: human_bytes(d.used),
                     volsize: d.volsize.map_or(String::new(), human_bytes),
@@ -458,6 +455,106 @@ fn zvol_rel<'a>(pool: &str, dataset: &'a str) -> &'a str {
     dataset
         .strip_prefix(pool)
         .map_or(dataset, |s| s.trim_start_matches('/'))
+}
+
+// ---- Per-dataset page (zvols + snapshots under a dataset) ----
+
+pub struct DatasetRow {
+    pub name: String,
+    /// `"filesystem"` or `"volume"`.
+    pub kind: String,
+    pub used: String,
+    pub avail: String,
+    pub mountpoint: String,
+    pub mounted: bool,
+}
+
+#[derive(Default)]
+pub struct DatasetDetailView {
+    pub name: String,
+    /// The pool (first path component) this dataset belongs to, for the back link.
+    pub pool: String,
+    /// `None` when the named dataset doesn't exist on this host.
+    pub dataset: Option<DatasetRow>,
+    /// Zvols nested under this dataset.
+    pub zvols: Vec<ZvolRow>,
+    /// Snapshots of this dataset and its descendants.
+    pub snapshots: Vec<SnapRow>,
+    pub not_installed: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Template)]
+#[template(path = "dataset_detail.html")]
+struct DatasetDetailTemplate {
+    user: CurrentUser,
+    view: DatasetDetailView,
+}
+
+async fn gather_dataset_detail(name: &str) -> DatasetDetailView {
+    let mut view = DatasetDetailView {
+        name: name.to_owned(),
+        pool: pool_of(name).to_owned(),
+        ..Default::default()
+    };
+    match tokio::try_join!(zfs::datasets(), zfs::snapshots()) {
+        Ok((Some(datasets), Some(snapshots))) => {
+            let child = format!("{name}/");
+            view.dataset = datasets
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| DatasetRow {
+                    kind: match d.kind {
+                        DsKind::Filesystem => "filesystem",
+                        DsKind::Volume => "volume",
+                    }
+                    .to_owned(),
+                    used: human_bytes(d.used),
+                    avail: human_bytes(d.avail),
+                    mountpoint: d.mountpoint.clone(),
+                    mounted: d.mounted,
+                    name: d.name.clone(),
+                });
+            view.zvols = datasets
+                .into_iter()
+                .filter(|d| d.kind == DsKind::Volume && d.name.starts_with(&child))
+                .map(|d| {
+                    let pool = pool_of(&d.name).to_owned();
+                    let rel = zvol_rel(&pool, &d.name).to_owned();
+                    ZvolRow {
+                        pool,
+                        rel,
+                        used: human_bytes(d.used),
+                        volsize: d.volsize.map_or(String::new(), human_bytes),
+                        name: d.name,
+                    }
+                })
+                .collect();
+            view.snapshots = snapshots
+                .into_iter()
+                .filter(|s| {
+                    let ds = s.name.split('@').next().unwrap_or(&s.name);
+                    ds == name || ds.starts_with(&child)
+                })
+                .map(SnapRow::new)
+                .collect();
+        }
+        // Either binary missing → ZFS isn't installed on this host.
+        Ok(_) => view.not_installed = true,
+        Err(e) => view.error = Some(format!("could not read ZFS state: {e:#}")),
+    }
+    view
+}
+
+async fn dataset_detail_page(
+    State(_): State<Arc<AppState>>,
+    Extension(user): Extension<CurrentUser>,
+    Path(name): Path<String>,
+) -> Response {
+    page(DatasetDetailTemplate {
+        user,
+        view: gather_dataset_detail(&name).await,
+    })
 }
 
 #[derive(Deserialize)]
@@ -1256,6 +1353,29 @@ mod tests {
             let req = auth(form_post("/zfs/pool/tank/detach-device", "device=mirror-0"));
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("invalid device"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn dataset_page_renders() {
+            let app = test_app();
+            let (cookie, _) = login(&app).await;
+            // Both the pool-root dataset and a nested dataset render the page.
+            for path in ["/zfs/dataset/tank", "/zfs/dataset/tank/data"] {
+                let req = HttpRequest::get(path)
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .unwrap();
+                let (status, _, body) = send(&app, req).await;
+                assert_eq!(status, StatusCode::OK);
+                // The dataset page shows the Zvols/Snapshots sections, or a
+                // graceful empty state when ZFS is absent from the test host.
+                assert!(
+                    (body.contains("Zvols") && body.contains("Snapshots"))
+                        || body.contains("ZFS is not installed")
+                        || body.contains("not found"),
+                    "{body}"
+                );
+            }
         }
     }
 }

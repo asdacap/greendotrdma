@@ -73,22 +73,5 @@
   </article>
   </dialog>
 
-  <h2>Existing snapshots</h2>
-  {% if view.snapshots.is_empty() %}
-  <p class="empty">No snapshots.</p>
-  {% else %}
-  <table>
-    <thead><tr><th>Snapshot</th><th>Used</th><th>Created</th><th></th></tr></thead>
-    <tbody>
-      {% for s in view.snapshots %}
-      <tr>
-        <td>{{ s.name }}</td>
-        <td>{{ s.used }}</td>
-        <td>{{ s.created }}</td>
-        <td><a href="/snapshots/snap/{{ s.name }}">Manage</a></td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+  <p class="muted small">Snapshots are listed per-dataset on each <a href="/zfs">ZFS dataset</a> page.</p>
 </div>
