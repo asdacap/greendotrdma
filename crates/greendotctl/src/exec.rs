@@ -68,6 +68,19 @@ pub trait ReadOp: TryFrom<Self::Wire, Error = ConvertError> + Send + Sized + 'st
     fn read(self, ctx: &Ctx) -> Self::Reply;
 }
 
+/// Captures `ip <args>` stdout for a read op. Read-only, so it runs directly
+/// (no task record); a missing binary or non-zero exit yields an empty string,
+/// which the pure parser turns into an empty result.
+fn run_ip(args: &[&str]) -> String {
+    std::process::Command::new("ip")
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default()
+}
+
 /// Runs one command as this op's whole task.
 fn run_spec(task: &mut Task, spec: TaskSpec) -> io::Result<()> {
     cmd::run(task, spec.command.clone(), &spec)?;
@@ -370,6 +383,20 @@ impl ReadOp for ops::NicInterfaces {
             &roce_hw,
         )
         .into()
+    }
+}
+
+impl ReadOp for ops::NicNetwork {
+    type Wire = pb::Empty;
+    type Reply = pb::NicNetworkReply;
+    /// Vendor-neutral network config from iproute2: the link/address inventory
+    /// (`ip -j addr`) joined with the default routes (`ip -j route show
+    /// default`) for the per-interface gateway. Read-only; a missing `ip` or a
+    /// parse failure degrades to an empty list.
+    fn read(self, _ctx: &Ctx) -> Self::Reply {
+        let addr = run_ip(&["-j", "addr"]);
+        let route = run_ip(&["-j", "route", "show", "default"]);
+        greendot_proto::actual::nic::networks_from_json(&addr, &route).into()
     }
 }
 

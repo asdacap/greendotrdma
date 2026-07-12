@@ -29,3 +29,15 @@ pub async fn pci_addrs(helper: &HelperClient) -> HashMap<String, Vec<IpAddr>> {
 pub async fn rdma_advice(helper: &HelperClient) -> HashMap<String, NicAdvice> {
     helper.nic_rdma_advice().await
 }
+
+/// Per-NIC network configuration (DHCP/addresses/gateway/MTU/MAC/link state) as
+/// `netdev → config`, read by the daemon from iproute2. Display-only; a
+/// transport failure yields an empty map.
+pub async fn networks(helper: &HelperClient) -> HashMap<String, NicNetwork> {
+    helper
+        .nic_network()
+        .await
+        .into_iter()
+        .map(|n| (n.netdev.clone(), n))
+        .collect()
+}

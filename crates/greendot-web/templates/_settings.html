@@ -73,27 +73,5 @@
   {% endif %}
 
   <h2>Network interfaces</h2>
-  <p class="muted">RDMA status per NIC — green only when RDMA is actually serving. Enable RoCE on capable hardware, or Soft-RoCE (rxe) on a plain NIC.</p>
-  {% if view.nics.is_empty() %}
-  <p class="empty">No network interfaces detected.</p>
-  {% else %}
-  <table>
-    <thead><tr><th></th><th>Interface</th><th>RDMA device</th><th>Addresses</th><th>Status</th><th></th></tr></thead>
-    <tbody>
-      {% for n in view.nics %}
-      <tr>
-        <td><span class="dot {{ n.dot }}"></span></td>
-        <td>{{ n.netdev }}</td>
-        <td class="small">{{ n.rdma }}</td>
-        <td class="small">{{ n.addrs }}</td>
-        <td class="small">{{ n.status }}</td>
-        <td>
-          {% if n.roce || n.soft_roce %}<a href="/settings/nic/{{ n.netdev }}">Manage</a>{% endif %}
-          {% if n.diagnose %}<a href="/settings/nic/{{ n.netdev }}/diagnose">Diagnose</a>{% endif %}
-        </td>
-      </tr>
-      {% endfor %}
-    </tbody>
-  </table>
-  {% endif %}
+  <p class="muted">Per-NIC RDMA status, network configuration, traffic, temperature, and RoCE actions live on the <a href="/nic">NIC page</a>.</p>
 </div>

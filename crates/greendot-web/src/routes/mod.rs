@@ -8,6 +8,7 @@ pub mod docs;
 pub mod iscsi;
 pub mod lvm;
 pub mod nfs;
+pub mod nic;
 pub mod nvme;
 pub mod settings;
 pub mod snapshots;
@@ -66,6 +67,7 @@ pub fn app(state: Arc<AppState>) -> Router {
         .merge(nvme::router())
         .merge(iscsi::router())
         .merge(nfs::router())
+        .merge(nic::router())
         .merge(settings::router())
         .merge(disks::router())
         .merge(snapshots::router())
@@ -132,7 +134,7 @@ pub fn page<T: Template>(template: T) -> Response {
 struct DashboardTemplate {
     user: CurrentUser,
     /// RDMA-capable NICs and their status (empty → "not available").
-    nics: Vec<settings::NicRow>,
+    nics: Vec<nic::NicRow>,
 }
 
 async fn dashboard(
@@ -144,7 +146,7 @@ async fn dashboard(
     let nics = crate::actual::nic::interfaces(&state.helper)
         .await
         .into_iter()
-        .filter_map(settings::nic_row)
+        .filter_map(nic::nic_row)
         .collect();
     page(DashboardTemplate { user, nics })
 }
@@ -393,6 +395,7 @@ pub(crate) mod testutil {
             rdma_devices, pb::Empty, pb::RdmaDevicesReply;
             nic_pci_addrs, pb::Empty, pb::NicPciAddrsReply;
             nic_interfaces, pb::Empty, pb::NicInterfacesReply;
+            nic_network, pb::Empty, pb::NicNetworkReply;
             nic_rdma_advice, pb::Empty, pb::NicRdmaAdviceReply;
             reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
             zvol_info, pb::ZvolInfo, pb::ZvolInfoReply;

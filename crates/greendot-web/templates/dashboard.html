@@ -17,7 +17,7 @@
     {% for n in nics %}
     <tr>
       <td><span class="dot {{ n.dot }}"></span></td>
-      <td>{{ n.netdev }}</td>
+      <td><a href="/nic/{{ n.netdev }}">{{ n.netdev }}</a></td>
       <td class="small">{{ n.rdma }}</td>
       <td class="small">{{ n.addrs }}</td>
       <td class="small">{{ n.status }}</td>
@@ -25,6 +25,6 @@
     {% endfor %}
   </tbody>
 </table>
-<p class="muted small">Enable RoCE or Soft-RoCE from <a href="/settings">Settings</a>.</p>
+<p class="muted small">Per-NIC config, traffic, and RoCE actions are on the <a href="/nic">NIC page</a>.</p>
 {% endif %}
 {% endblock %}

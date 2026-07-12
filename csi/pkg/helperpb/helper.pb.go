@@ -5230,6 +5230,202 @@ func (x *NicStatusMsg) GetVendor() string {
 	return ""
 }
 
+type NicNetworkReply struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Nics          []*NicNetworkMsg       `protobuf:"bytes,1,rep,name=nics,proto3" json:"nics,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NicNetworkReply) Reset() {
+	*x = NicNetworkReply{}
+	mi := &file_helper_proto_msgTypes[85]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NicNetworkReply) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NicNetworkReply) ProtoMessage() {}
+
+func (x *NicNetworkReply) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[85]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NicNetworkReply.ProtoReflect.Descriptor instead.
+func (*NicNetworkReply) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{85}
+}
+
+func (x *NicNetworkReply) GetNics() []*NicNetworkMsg {
+	if x != nil {
+		return x.Nics
+	}
+	return nil
+}
+
+type NicNetworkMsg struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Netdev        string                 `protobuf:"bytes,1,opt,name=netdev,proto3" json:"netdev,omitempty"`
+	Mac           *string                `protobuf:"bytes,2,opt,name=mac,proto3,oneof" json:"mac,omitempty"`
+	Mtu           *uint32                `protobuf:"varint,3,opt,name=mtu,proto3,oneof" json:"mtu,omitempty"`
+	Operstate     string                 `protobuf:"bytes,4,opt,name=operstate,proto3" json:"operstate,omitempty"`
+	Dhcp          bool                   `protobuf:"varint,5,opt,name=dhcp,proto3" json:"dhcp,omitempty"`
+	Addrs         []*NicAddrMsg          `protobuf:"bytes,6,rep,name=addrs,proto3" json:"addrs,omitempty"`
+	Gateway       *string                `protobuf:"bytes,7,opt,name=gateway,proto3,oneof" json:"gateway,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NicNetworkMsg) Reset() {
+	*x = NicNetworkMsg{}
+	mi := &file_helper_proto_msgTypes[86]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NicNetworkMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NicNetworkMsg) ProtoMessage() {}
+
+func (x *NicNetworkMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[86]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NicNetworkMsg.ProtoReflect.Descriptor instead.
+func (*NicNetworkMsg) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{86}
+}
+
+func (x *NicNetworkMsg) GetNetdev() string {
+	if x != nil {
+		return x.Netdev
+	}
+	return ""
+}
+
+func (x *NicNetworkMsg) GetMac() string {
+	if x != nil && x.Mac != nil {
+		return *x.Mac
+	}
+	return ""
+}
+
+func (x *NicNetworkMsg) GetMtu() uint32 {
+	if x != nil && x.Mtu != nil {
+		return *x.Mtu
+	}
+	return 0
+}
+
+func (x *NicNetworkMsg) GetOperstate() string {
+	if x != nil {
+		return x.Operstate
+	}
+	return ""
+}
+
+func (x *NicNetworkMsg) GetDhcp() bool {
+	if x != nil {
+		return x.Dhcp
+	}
+	return false
+}
+
+func (x *NicNetworkMsg) GetAddrs() []*NicAddrMsg {
+	if x != nil {
+		return x.Addrs
+	}
+	return nil
+}
+
+func (x *NicNetworkMsg) GetGateway() string {
+	if x != nil && x.Gateway != nil {
+		return *x.Gateway
+	}
+	return ""
+}
+
+type NicAddrMsg struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Addr          string                 `protobuf:"bytes,1,opt,name=addr,proto3" json:"addr,omitempty"`        // IpAddr
+	Prefix        uint32                 `protobuf:"varint,2,opt,name=prefix,proto3" json:"prefix,omitempty"`   // prefix length
+	Dynamic       bool                   `protobuf:"varint,3,opt,name=dynamic,proto3" json:"dynamic,omitempty"` // DHCP-assigned
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *NicAddrMsg) Reset() {
+	*x = NicAddrMsg{}
+	mi := &file_helper_proto_msgTypes[87]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *NicAddrMsg) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*NicAddrMsg) ProtoMessage() {}
+
+func (x *NicAddrMsg) ProtoReflect() protoreflect.Message {
+	mi := &file_helper_proto_msgTypes[87]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use NicAddrMsg.ProtoReflect.Descriptor instead.
+func (*NicAddrMsg) Descriptor() ([]byte, []int) {
+	return file_helper_proto_rawDescGZIP(), []int{87}
+}
+
+func (x *NicAddrMsg) GetAddr() string {
+	if x != nil {
+		return x.Addr
+	}
+	return ""
+}
+
+func (x *NicAddrMsg) GetPrefix() uint32 {
+	if x != nil {
+		return x.Prefix
+	}
+	return 0
+}
+
+func (x *NicAddrMsg) GetDynamic() bool {
+	if x != nil {
+		return x.Dynamic
+	}
+	return false
+}
+
 type RoceCapableNicsReply struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Nics          []*RoceCapableNic      `protobuf:"bytes,1,rep,name=nics,proto3" json:"nics,omitempty"`
@@ -5239,7 +5435,7 @@ type RoceCapableNicsReply struct {
 
 func (x *RoceCapableNicsReply) Reset() {
 	*x = RoceCapableNicsReply{}
-	mi := &file_helper_proto_msgTypes[85]
+	mi := &file_helper_proto_msgTypes[88]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5251,7 +5447,7 @@ func (x *RoceCapableNicsReply) String() string {
 func (*RoceCapableNicsReply) ProtoMessage() {}
 
 func (x *RoceCapableNicsReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[85]
+	mi := &file_helper_proto_msgTypes[88]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5264,7 +5460,7 @@ func (x *RoceCapableNicsReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoceCapableNicsReply.ProtoReflect.Descriptor instead.
 func (*RoceCapableNicsReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{85}
+	return file_helper_proto_rawDescGZIP(), []int{88}
 }
 
 func (x *RoceCapableNicsReply) GetNics() []*RoceCapableNic {
@@ -5284,7 +5480,7 @@ type RoceCapableNic struct {
 
 func (x *RoceCapableNic) Reset() {
 	*x = RoceCapableNic{}
-	mi := &file_helper_proto_msgTypes[86]
+	mi := &file_helper_proto_msgTypes[89]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5296,7 +5492,7 @@ func (x *RoceCapableNic) String() string {
 func (*RoceCapableNic) ProtoMessage() {}
 
 func (x *RoceCapableNic) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[86]
+	mi := &file_helper_proto_msgTypes[89]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5309,7 +5505,7 @@ func (x *RoceCapableNic) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoceCapableNic.ProtoReflect.Descriptor instead.
 func (*RoceCapableNic) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{86}
+	return file_helper_proto_rawDescGZIP(), []int{89}
 }
 
 func (x *RoceCapableNic) GetNetdev() string {
@@ -5335,7 +5531,7 @@ type NicRdmaAdviceReply struct {
 
 func (x *NicRdmaAdviceReply) Reset() {
 	*x = NicRdmaAdviceReply{}
-	mi := &file_helper_proto_msgTypes[87]
+	mi := &file_helper_proto_msgTypes[90]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5347,7 +5543,7 @@ func (x *NicRdmaAdviceReply) String() string {
 func (*NicRdmaAdviceReply) ProtoMessage() {}
 
 func (x *NicRdmaAdviceReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[87]
+	mi := &file_helper_proto_msgTypes[90]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5360,7 +5556,7 @@ func (x *NicRdmaAdviceReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicRdmaAdviceReply.ProtoReflect.Descriptor instead.
 func (*NicRdmaAdviceReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{87}
+	return file_helper_proto_rawDescGZIP(), []int{90}
 }
 
 func (x *NicRdmaAdviceReply) GetAdvice() []*NicAdviceMsg {
@@ -5381,7 +5577,7 @@ type NicAdviceMsg struct {
 
 func (x *NicAdviceMsg) Reset() {
 	*x = NicAdviceMsg{}
-	mi := &file_helper_proto_msgTypes[88]
+	mi := &file_helper_proto_msgTypes[91]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5393,7 +5589,7 @@ func (x *NicAdviceMsg) String() string {
 func (*NicAdviceMsg) ProtoMessage() {}
 
 func (x *NicAdviceMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[88]
+	mi := &file_helper_proto_msgTypes[91]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5406,7 +5602,7 @@ func (x *NicAdviceMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use NicAdviceMsg.ProtoReflect.Descriptor instead.
 func (*NicAdviceMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{88}
+	return file_helper_proto_rawDescGZIP(), []int{91}
 }
 
 func (x *NicAdviceMsg) GetNetdev() string {
@@ -5439,7 +5635,7 @@ type SmartHealthReply struct {
 
 func (x *SmartHealthReply) Reset() {
 	*x = SmartHealthReply{}
-	mi := &file_helper_proto_msgTypes[89]
+	mi := &file_helper_proto_msgTypes[92]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5451,7 +5647,7 @@ func (x *SmartHealthReply) String() string {
 func (*SmartHealthReply) ProtoMessage() {}
 
 func (x *SmartHealthReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[89]
+	mi := &file_helper_proto_msgTypes[92]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5464,7 +5660,7 @@ func (x *SmartHealthReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartHealthReply.ProtoReflect.Descriptor instead.
 func (*SmartHealthReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{89}
+	return file_helper_proto_rawDescGZIP(), []int{92}
 }
 
 func (x *SmartHealthReply) GetDevices() []*SmartHealthMsg {
@@ -5485,7 +5681,7 @@ type SmartHealthMsg struct {
 
 func (x *SmartHealthMsg) Reset() {
 	*x = SmartHealthMsg{}
-	mi := &file_helper_proto_msgTypes[90]
+	mi := &file_helper_proto_msgTypes[93]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5497,7 +5693,7 @@ func (x *SmartHealthMsg) String() string {
 func (*SmartHealthMsg) ProtoMessage() {}
 
 func (x *SmartHealthMsg) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[90]
+	mi := &file_helper_proto_msgTypes[93]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5510,7 +5706,7 @@ func (x *SmartHealthMsg) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SmartHealthMsg.ProtoReflect.Descriptor instead.
 func (*SmartHealthMsg) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{90}
+	return file_helper_proto_rawDescGZIP(), []int{93}
 }
 
 func (x *SmartHealthMsg) GetDevice() string {
@@ -5545,7 +5741,7 @@ type ReconcileDryRunReply struct {
 
 func (x *ReconcileDryRunReply) Reset() {
 	*x = ReconcileDryRunReply{}
-	mi := &file_helper_proto_msgTypes[91]
+	mi := &file_helper_proto_msgTypes[94]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5557,7 +5753,7 @@ func (x *ReconcileDryRunReply) String() string {
 func (*ReconcileDryRunReply) ProtoMessage() {}
 
 func (x *ReconcileDryRunReply) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[91]
+	mi := &file_helper_proto_msgTypes[94]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5570,7 +5766,7 @@ func (x *ReconcileDryRunReply) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReconcileDryRunReply.ProtoReflect.Descriptor instead.
 func (*ReconcileDryRunReply) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{91}
+	return file_helper_proto_rawDescGZIP(), []int{94}
 }
 
 func (x *ReconcileDryRunReply) GetNvmetOk() bool {
@@ -5606,7 +5802,7 @@ type SubtaskStarted struct {
 
 func (x *SubtaskStarted) Reset() {
 	*x = SubtaskStarted{}
-	mi := &file_helper_proto_msgTypes[92]
+	mi := &file_helper_proto_msgTypes[95]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5618,7 +5814,7 @@ func (x *SubtaskStarted) String() string {
 func (*SubtaskStarted) ProtoMessage() {}
 
 func (x *SubtaskStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[92]
+	mi := &file_helper_proto_msgTypes[95]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5631,7 +5827,7 @@ func (x *SubtaskStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubtaskStarted.ProtoReflect.Descriptor instead.
 func (*SubtaskStarted) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{92}
+	return file_helper_proto_rawDescGZIP(), []int{95}
 }
 
 func (x *SubtaskStarted) GetName() string {
@@ -5671,7 +5867,7 @@ type Output struct {
 
 func (x *Output) Reset() {
 	*x = Output{}
-	mi := &file_helper_proto_msgTypes[93]
+	mi := &file_helper_proto_msgTypes[96]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5683,7 +5879,7 @@ func (x *Output) String() string {
 func (*Output) ProtoMessage() {}
 
 func (x *Output) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[93]
+	mi := &file_helper_proto_msgTypes[96]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5696,7 +5892,7 @@ func (x *Output) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Output.ProtoReflect.Descriptor instead.
 func (*Output) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{93}
+	return file_helper_proto_rawDescGZIP(), []int{96}
 }
 
 func (x *Output) GetData() string {
@@ -5717,7 +5913,7 @@ type SubtaskFinished struct {
 
 func (x *SubtaskFinished) Reset() {
 	*x = SubtaskFinished{}
-	mi := &file_helper_proto_msgTypes[94]
+	mi := &file_helper_proto_msgTypes[97]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5729,7 +5925,7 @@ func (x *SubtaskFinished) String() string {
 func (*SubtaskFinished) ProtoMessage() {}
 
 func (x *SubtaskFinished) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[94]
+	mi := &file_helper_proto_msgTypes[97]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5742,7 +5938,7 @@ func (x *SubtaskFinished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubtaskFinished.ProtoReflect.Descriptor instead.
 func (*SubtaskFinished) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{94}
+	return file_helper_proto_rawDescGZIP(), []int{97}
 }
 
 func (x *SubtaskFinished) GetStatus() SubStatus {
@@ -5776,7 +5972,7 @@ type Finished struct {
 
 func (x *Finished) Reset() {
 	*x = Finished{}
-	mi := &file_helper_proto_msgTypes[95]
+	mi := &file_helper_proto_msgTypes[98]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5788,7 +5984,7 @@ func (x *Finished) String() string {
 func (*Finished) ProtoMessage() {}
 
 func (x *Finished) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[95]
+	mi := &file_helper_proto_msgTypes[98]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5801,7 +5997,7 @@ func (x *Finished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Finished.ProtoReflect.Descriptor instead.
 func (*Finished) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{95}
+	return file_helper_proto_rawDescGZIP(), []int{98}
 }
 
 func (x *Finished) GetStatus() SubStatus {
@@ -5834,7 +6030,7 @@ type TaskEvent struct {
 
 func (x *TaskEvent) Reset() {
 	*x = TaskEvent{}
-	mi := &file_helper_proto_msgTypes[96]
+	mi := &file_helper_proto_msgTypes[99]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -5846,7 +6042,7 @@ func (x *TaskEvent) String() string {
 func (*TaskEvent) ProtoMessage() {}
 
 func (x *TaskEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_helper_proto_msgTypes[96]
+	mi := &file_helper_proto_msgTypes[99]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -5859,7 +6055,7 @@ func (x *TaskEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskEvent.ProtoReflect.Descriptor instead.
 func (*TaskEvent) Descriptor() ([]byte, []int) {
-	return file_helper_proto_rawDescGZIP(), []int{96}
+	return file_helper_proto_rawDescGZIP(), []int{99}
 }
 
 func (x *TaskEvent) GetEvent() isTaskEvent_Event {
@@ -6309,7 +6505,26 @@ const file_helper_proto_rawDesc = "" +
 	"\x06vendor\x18\x06 \x01(\tH\x02R\x06vendor\x88\x01\x01B\a\n" +
 	"\x05_rdmaB\x06\n" +
 	"\x04_pciB\t\n" +
-	"\a_vendor\"N\n" +
+	"\a_vendor\"H\n" +
+	"\x0fNicNetworkReply\x125\n" +
+	"\x04nics\x18\x01 \x03(\v2!.greendot.helper.v1.NicNetworkMsgR\x04nics\"\xf8\x01\n" +
+	"\rNicNetworkMsg\x12\x16\n" +
+	"\x06netdev\x18\x01 \x01(\tR\x06netdev\x12\x15\n" +
+	"\x03mac\x18\x02 \x01(\tH\x00R\x03mac\x88\x01\x01\x12\x15\n" +
+	"\x03mtu\x18\x03 \x01(\rH\x01R\x03mtu\x88\x01\x01\x12\x1c\n" +
+	"\toperstate\x18\x04 \x01(\tR\toperstate\x12\x12\n" +
+	"\x04dhcp\x18\x05 \x01(\bR\x04dhcp\x124\n" +
+	"\x05addrs\x18\x06 \x03(\v2\x1e.greendot.helper.v1.NicAddrMsgR\x05addrs\x12\x1d\n" +
+	"\agateway\x18\a \x01(\tH\x02R\agateway\x88\x01\x01B\x06\n" +
+	"\x04_macB\x06\n" +
+	"\x04_mtuB\n" +
+	"\n" +
+	"\b_gateway\"R\n" +
+	"\n" +
+	"NicAddrMsg\x12\x12\n" +
+	"\x04addr\x18\x01 \x01(\tR\x04addr\x12\x16\n" +
+	"\x06prefix\x18\x02 \x01(\rR\x06prefix\x12\x18\n" +
+	"\adynamic\x18\x03 \x01(\bR\adynamic\"N\n" +
 	"\x14RoceCapableNicsReply\x126\n" +
 	"\x04nics\x18\x01 \x03(\v2\".greendot.helper.v1.RoceCapableNicR\x04nics\"@\n" +
 	"\x0eRoceCapableNic\x12\x16\n" +
@@ -6397,7 +6612,7 @@ const file_helper_proto_rawDesc = "" +
 	"\x16NIC_RDMA_KIND_INACTIVE\x10\x02\x12\"\n" +
 	"\x1eNIC_RDMA_KIND_CAPABLE_DISABLED\x10\x03\x12\x1f\n" +
 	"\x1bNIC_RDMA_KIND_SOFT_ROCEABLE\x10\x04\x12\x1d\n" +
-	"\x19NIC_RDMA_KIND_UNSUPPORTED\x10\x052\xca%\n" +
+	"\x19NIC_RDMA_KIND_UNSUPPORTED\x10\x052\x98&\n" +
 	"\x06Helper\x12<\n" +
 	"\x04Ping\x12\x19.greendot.helper.v1.Empty\x1a\x19.greendot.helper.v1.Empty\x12O\n" +
 	"\fAuthenticate\x12 .greendot.helper.v1.Authenticate\x1a\x1d.greendot.helper.v1.AuthReply\x12M\n" +
@@ -6459,7 +6674,9 @@ const file_helper_proto_rawDesc = "" +
 	"\vLioSessions\x12\x19.greendot.helper.v1.Empty\x1a$.greendot.helper.v1.LioSessionsReply\x12N\n" +
 	"\vRdmaDevices\x12\x19.greendot.helper.v1.Empty\x1a$.greendot.helper.v1.RdmaDevicesReply\x12N\n" +
 	"\vNicPciAddrs\x12\x19.greendot.helper.v1.Empty\x1a$.greendot.helper.v1.NicPciAddrsReply\x12R\n" +
-	"\rNicInterfaces\x12\x19.greendot.helper.v1.Empty\x1a&.greendot.helper.v1.NicInterfacesReply\x12V\n" +
+	"\rNicInterfaces\x12\x19.greendot.helper.v1.Empty\x1a&.greendot.helper.v1.NicInterfacesReply\x12L\n" +
+	"\n" +
+	"NicNetwork\x12\x19.greendot.helper.v1.Empty\x1a#.greendot.helper.v1.NicNetworkReply\x12V\n" +
 	"\x0fRoceCapableNics\x12\x19.greendot.helper.v1.Empty\x1a(.greendot.helper.v1.RoceCapableNicsReply\x12R\n" +
 	"\rNicRdmaAdvice\x12\x19.greendot.helper.v1.Empty\x1a&.greendot.helper.v1.NicRdmaAdviceReply\x12T\n" +
 	"\vSmartHealth\x12\x1f.greendot.helper.v1.SmartHealth\x1a$.greendot.helper.v1.SmartHealthReply\x12V\n" +
@@ -6480,7 +6697,7 @@ func file_helper_proto_rawDescGZIP() []byte {
 }
 
 var file_helper_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_helper_proto_msgTypes = make([]protoimpl.MessageInfo, 97)
+var file_helper_proto_msgTypes = make([]protoimpl.MessageInfo, 100)
 var file_helper_proto_goTypes = []any{
 	(Transport)(0),                // 0: greendot.helper.v1.Transport
 	(VdevLayout)(0),               // 1: greendot.helper.v1.VdevLayout
@@ -6573,18 +6790,21 @@ var file_helper_proto_goTypes = []any{
 	(*PciAddrIps)(nil),            // 88: greendot.helper.v1.PciAddrIps
 	(*NicInterfacesReply)(nil),    // 89: greendot.helper.v1.NicInterfacesReply
 	(*NicStatusMsg)(nil),          // 90: greendot.helper.v1.NicStatusMsg
-	(*RoceCapableNicsReply)(nil),  // 91: greendot.helper.v1.RoceCapableNicsReply
-	(*RoceCapableNic)(nil),        // 92: greendot.helper.v1.RoceCapableNic
-	(*NicRdmaAdviceReply)(nil),    // 93: greendot.helper.v1.NicRdmaAdviceReply
-	(*NicAdviceMsg)(nil),          // 94: greendot.helper.v1.NicAdviceMsg
-	(*SmartHealthReply)(nil),      // 95: greendot.helper.v1.SmartHealthReply
-	(*SmartHealthMsg)(nil),        // 96: greendot.helper.v1.SmartHealthMsg
-	(*ReconcileDryRunReply)(nil),  // 97: greendot.helper.v1.ReconcileDryRunReply
-	(*SubtaskStarted)(nil),        // 98: greendot.helper.v1.SubtaskStarted
-	(*Output)(nil),                // 99: greendot.helper.v1.Output
-	(*SubtaskFinished)(nil),       // 100: greendot.helper.v1.SubtaskFinished
-	(*Finished)(nil),              // 101: greendot.helper.v1.Finished
-	(*TaskEvent)(nil),             // 102: greendot.helper.v1.TaskEvent
+	(*NicNetworkReply)(nil),       // 91: greendot.helper.v1.NicNetworkReply
+	(*NicNetworkMsg)(nil),         // 92: greendot.helper.v1.NicNetworkMsg
+	(*NicAddrMsg)(nil),            // 93: greendot.helper.v1.NicAddrMsg
+	(*RoceCapableNicsReply)(nil),  // 94: greendot.helper.v1.RoceCapableNicsReply
+	(*RoceCapableNic)(nil),        // 95: greendot.helper.v1.RoceCapableNic
+	(*NicRdmaAdviceReply)(nil),    // 96: greendot.helper.v1.NicRdmaAdviceReply
+	(*NicAdviceMsg)(nil),          // 97: greendot.helper.v1.NicAdviceMsg
+	(*SmartHealthReply)(nil),      // 98: greendot.helper.v1.SmartHealthReply
+	(*SmartHealthMsg)(nil),        // 99: greendot.helper.v1.SmartHealthMsg
+	(*ReconcileDryRunReply)(nil),  // 100: greendot.helper.v1.ReconcileDryRunReply
+	(*SubtaskStarted)(nil),        // 101: greendot.helper.v1.SubtaskStarted
+	(*Output)(nil),                // 102: greendot.helper.v1.Output
+	(*SubtaskFinished)(nil),       // 103: greendot.helper.v1.SubtaskFinished
+	(*Finished)(nil),              // 104: greendot.helper.v1.Finished
+	(*TaskEvent)(nil),             // 105: greendot.helper.v1.TaskEvent
 }
 var file_helper_proto_depIdxs = []int32{
 	8,   // 0: greendot.helper.v1.NvmetDesired.subsystems:type_name -> greendot.helper.v1.NvmetSubsysSpec
@@ -6618,139 +6838,143 @@ var file_helper_proto_depIdxs = []int32{
 	88,  // 28: greendot.helper.v1.NicPciAddrsReply.entries:type_name -> greendot.helper.v1.PciAddrIps
 	90,  // 29: greendot.helper.v1.NicInterfacesReply.nics:type_name -> greendot.helper.v1.NicStatusMsg
 	5,   // 30: greendot.helper.v1.NicStatusMsg.kind:type_name -> greendot.helper.v1.NicRdmaKind
-	92,  // 31: greendot.helper.v1.RoceCapableNicsReply.nics:type_name -> greendot.helper.v1.RoceCapableNic
-	94,  // 32: greendot.helper.v1.NicRdmaAdviceReply.advice:type_name -> greendot.helper.v1.NicAdviceMsg
-	96,  // 33: greendot.helper.v1.SmartHealthReply.devices:type_name -> greendot.helper.v1.SmartHealthMsg
-	4,   // 34: greendot.helper.v1.SubtaskFinished.status:type_name -> greendot.helper.v1.SubStatus
-	4,   // 35: greendot.helper.v1.Finished.status:type_name -> greendot.helper.v1.SubStatus
-	98,  // 36: greendot.helper.v1.TaskEvent.subtask_started:type_name -> greendot.helper.v1.SubtaskStarted
-	99,  // 37: greendot.helper.v1.TaskEvent.stdout:type_name -> greendot.helper.v1.Output
-	99,  // 38: greendot.helper.v1.TaskEvent.stderr:type_name -> greendot.helper.v1.Output
-	100, // 39: greendot.helper.v1.TaskEvent.subtask_finished:type_name -> greendot.helper.v1.SubtaskFinished
-	101, // 40: greendot.helper.v1.TaskEvent.finished:type_name -> greendot.helper.v1.Finished
-	6,   // 41: greendot.helper.v1.Helper.Ping:input_type -> greendot.helper.v1.Empty
-	19,  // 42: greendot.helper.v1.Helper.Authenticate:input_type -> greendot.helper.v1.Authenticate
-	23,  // 43: greendot.helper.v1.Helper.ZvolCreate:input_type -> greendot.helper.v1.ZvolCreate
-	24,  // 44: greendot.helper.v1.Helper.ZvolDelete:input_type -> greendot.helper.v1.ZvolDelete
-	25,  // 45: greendot.helper.v1.Helper.ZvolResize:input_type -> greendot.helper.v1.ZvolResize
-	26,  // 46: greendot.helper.v1.Helper.SnapshotCreate:input_type -> greendot.helper.v1.SnapshotCreate
-	27,  // 47: greendot.helper.v1.Helper.SnapshotDestroy:input_type -> greendot.helper.v1.SnapshotDestroy
-	28,  // 48: greendot.helper.v1.Helper.ZfsFsCreate:input_type -> greendot.helper.v1.ZfsFsCreate
-	29,  // 49: greendot.helper.v1.Helper.ZfsSetMountpoint:input_type -> greendot.helper.v1.ZfsSetMountpoint
-	30,  // 50: greendot.helper.v1.Helper.ZfsMount:input_type -> greendot.helper.v1.ZfsMount
-	31,  // 51: greendot.helper.v1.Helper.ZfsUnmount:input_type -> greendot.helper.v1.ZfsUnmount
-	32,  // 52: greendot.helper.v1.Helper.ZfsDestroy:input_type -> greendot.helper.v1.ZfsDestroy
-	37,  // 53: greendot.helper.v1.Helper.PoolCreate:input_type -> greendot.helper.v1.PoolCreate
-	38,  // 54: greendot.helper.v1.Helper.PoolDeviceAdd:input_type -> greendot.helper.v1.PoolDeviceAdd
-	39,  // 55: greendot.helper.v1.Helper.PoolDeviceRemove:input_type -> greendot.helper.v1.PoolDeviceRemove
-	40,  // 56: greendot.helper.v1.Helper.PoolDeviceDetach:input_type -> greendot.helper.v1.PoolDeviceDetach
-	33,  // 57: greendot.helper.v1.Helper.PartitionTableCreate:input_type -> greendot.helper.v1.PartitionTableCreate
-	34,  // 58: greendot.helper.v1.Helper.PartitionCreate:input_type -> greendot.helper.v1.PartitionCreate
-	35,  // 59: greendot.helper.v1.Helper.PartitionDelete:input_type -> greendot.helper.v1.PartitionDelete
-	36,  // 60: greendot.helper.v1.Helper.PartitionShrink:input_type -> greendot.helper.v1.PartitionShrink
-	43,  // 61: greendot.helper.v1.Helper.LvmReport:input_type -> greendot.helper.v1.LvmReport
-	44,  // 62: greendot.helper.v1.Helper.VgCreate:input_type -> greendot.helper.v1.VgCreate
-	45,  // 63: greendot.helper.v1.Helper.VgExtend:input_type -> greendot.helper.v1.VgExtend
-	46,  // 64: greendot.helper.v1.Helper.VgReduce:input_type -> greendot.helper.v1.VgReduce
-	47,  // 65: greendot.helper.v1.Helper.VgRemove:input_type -> greendot.helper.v1.VgRemove
-	48,  // 66: greendot.helper.v1.Helper.LvCreate:input_type -> greendot.helper.v1.LvCreate
-	49,  // 67: greendot.helper.v1.Helper.ThinPoolCreate:input_type -> greendot.helper.v1.ThinPoolCreate
-	50,  // 68: greendot.helper.v1.Helper.ThinLvCreate:input_type -> greendot.helper.v1.ThinLvCreate
-	51,  // 69: greendot.helper.v1.Helper.LvResize:input_type -> greendot.helper.v1.LvResize
-	52,  // 70: greendot.helper.v1.Helper.LvShrink:input_type -> greendot.helper.v1.LvShrink
-	53,  // 71: greendot.helper.v1.Helper.LvRename:input_type -> greendot.helper.v1.LvRename
-	54,  // 72: greendot.helper.v1.Helper.LvDelete:input_type -> greendot.helper.v1.LvDelete
-	55,  // 73: greendot.helper.v1.Helper.Reconcile:input_type -> greendot.helper.v1.Reconcile
-	56,  // 74: greendot.helper.v1.Helper.CsiNvmeApply:input_type -> greendot.helper.v1.CsiNvmeApply
-	57,  // 75: greendot.helper.v1.Helper.CsiNvmeDelete:input_type -> greendot.helper.v1.CsiNvmeDelete
-	58,  // 76: greendot.helper.v1.Helper.CsiHostGrant:input_type -> greendot.helper.v1.CsiHostGrant
-	59,  // 77: greendot.helper.v1.Helper.CsiHostRevoke:input_type -> greendot.helper.v1.CsiHostRevoke
-	60,  // 78: greendot.helper.v1.Helper.CsiVolumeExpand:input_type -> greendot.helper.v1.CsiVolumeExpand
-	66,  // 79: greendot.helper.v1.Helper.ZfsClone:input_type -> greendot.helper.v1.ZfsClone
-	61,  // 80: greendot.helper.v1.Helper.PipeKeyAdd:input_type -> greendot.helper.v1.PipeKeyAdd
-	62,  // 81: greendot.helper.v1.Helper.PipeKeyRevoke:input_type -> greendot.helper.v1.PipeKeyRevoke
-	69,  // 82: greendot.helper.v1.Helper.RxeAdd:input_type -> greendot.helper.v1.RxeAdd
-	70,  // 83: greendot.helper.v1.Helper.EnableRoce:input_type -> greendot.helper.v1.EnableRoce
-	71,  // 84: greendot.helper.v1.Helper.InstallPackages:input_type -> greendot.helper.v1.InstallPackages
-	41,  // 85: greendot.helper.v1.Helper.SmartReport:input_type -> greendot.helper.v1.SmartReport
-	6,   // 86: greendot.helper.v1.Helper.RdmaResources:input_type -> greendot.helper.v1.Empty
-	6,   // 87: greendot.helper.v1.Helper.NfsReport:input_type -> greendot.helper.v1.Empty
-	6,   // 88: greendot.helper.v1.Helper.NvmetReport:input_type -> greendot.helper.v1.Empty
-	6,   // 89: greendot.helper.v1.Helper.LioReport:input_type -> greendot.helper.v1.Empty
-	6,   // 90: greendot.helper.v1.Helper.LioSessions:input_type -> greendot.helper.v1.Empty
-	6,   // 91: greendot.helper.v1.Helper.RdmaDevices:input_type -> greendot.helper.v1.Empty
-	6,   // 92: greendot.helper.v1.Helper.NicPciAddrs:input_type -> greendot.helper.v1.Empty
-	6,   // 93: greendot.helper.v1.Helper.NicInterfaces:input_type -> greendot.helper.v1.Empty
-	6,   // 94: greendot.helper.v1.Helper.RoceCapableNics:input_type -> greendot.helper.v1.Empty
-	6,   // 95: greendot.helper.v1.Helper.NicRdmaAdvice:input_type -> greendot.helper.v1.Empty
-	42,  // 96: greendot.helper.v1.Helper.SmartHealth:input_type -> greendot.helper.v1.SmartHealth
-	6,   // 97: greendot.helper.v1.Helper.ReconcileDryRun:input_type -> greendot.helper.v1.Empty
-	67,  // 98: greendot.helper.v1.Helper.ZvolInfo:input_type -> greendot.helper.v1.ZvolInfo
-	6,   // 99: greendot.helper.v1.Helper.PipeAccessReport:input_type -> greendot.helper.v1.Empty
-	6,   // 100: greendot.helper.v1.Helper.Ping:output_type -> greendot.helper.v1.Empty
-	22,  // 101: greendot.helper.v1.Helper.Authenticate:output_type -> greendot.helper.v1.AuthReply
-	102, // 102: greendot.helper.v1.Helper.ZvolCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 103: greendot.helper.v1.Helper.ZvolDelete:output_type -> greendot.helper.v1.TaskEvent
-	102, // 104: greendot.helper.v1.Helper.ZvolResize:output_type -> greendot.helper.v1.TaskEvent
-	102, // 105: greendot.helper.v1.Helper.SnapshotCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 106: greendot.helper.v1.Helper.SnapshotDestroy:output_type -> greendot.helper.v1.TaskEvent
-	102, // 107: greendot.helper.v1.Helper.ZfsFsCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 108: greendot.helper.v1.Helper.ZfsSetMountpoint:output_type -> greendot.helper.v1.TaskEvent
-	102, // 109: greendot.helper.v1.Helper.ZfsMount:output_type -> greendot.helper.v1.TaskEvent
-	102, // 110: greendot.helper.v1.Helper.ZfsUnmount:output_type -> greendot.helper.v1.TaskEvent
-	102, // 111: greendot.helper.v1.Helper.ZfsDestroy:output_type -> greendot.helper.v1.TaskEvent
-	102, // 112: greendot.helper.v1.Helper.PoolCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 113: greendot.helper.v1.Helper.PoolDeviceAdd:output_type -> greendot.helper.v1.TaskEvent
-	102, // 114: greendot.helper.v1.Helper.PoolDeviceRemove:output_type -> greendot.helper.v1.TaskEvent
-	102, // 115: greendot.helper.v1.Helper.PoolDeviceDetach:output_type -> greendot.helper.v1.TaskEvent
-	102, // 116: greendot.helper.v1.Helper.PartitionTableCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 117: greendot.helper.v1.Helper.PartitionCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 118: greendot.helper.v1.Helper.PartitionDelete:output_type -> greendot.helper.v1.TaskEvent
-	102, // 119: greendot.helper.v1.Helper.PartitionShrink:output_type -> greendot.helper.v1.TaskEvent
-	102, // 120: greendot.helper.v1.Helper.LvmReport:output_type -> greendot.helper.v1.TaskEvent
-	102, // 121: greendot.helper.v1.Helper.VgCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 122: greendot.helper.v1.Helper.VgExtend:output_type -> greendot.helper.v1.TaskEvent
-	102, // 123: greendot.helper.v1.Helper.VgReduce:output_type -> greendot.helper.v1.TaskEvent
-	102, // 124: greendot.helper.v1.Helper.VgRemove:output_type -> greendot.helper.v1.TaskEvent
-	102, // 125: greendot.helper.v1.Helper.LvCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 126: greendot.helper.v1.Helper.ThinPoolCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 127: greendot.helper.v1.Helper.ThinLvCreate:output_type -> greendot.helper.v1.TaskEvent
-	102, // 128: greendot.helper.v1.Helper.LvResize:output_type -> greendot.helper.v1.TaskEvent
-	102, // 129: greendot.helper.v1.Helper.LvShrink:output_type -> greendot.helper.v1.TaskEvent
-	102, // 130: greendot.helper.v1.Helper.LvRename:output_type -> greendot.helper.v1.TaskEvent
-	102, // 131: greendot.helper.v1.Helper.LvDelete:output_type -> greendot.helper.v1.TaskEvent
-	102, // 132: greendot.helper.v1.Helper.Reconcile:output_type -> greendot.helper.v1.TaskEvent
-	102, // 133: greendot.helper.v1.Helper.CsiNvmeApply:output_type -> greendot.helper.v1.TaskEvent
-	102, // 134: greendot.helper.v1.Helper.CsiNvmeDelete:output_type -> greendot.helper.v1.TaskEvent
-	102, // 135: greendot.helper.v1.Helper.CsiHostGrant:output_type -> greendot.helper.v1.TaskEvent
-	102, // 136: greendot.helper.v1.Helper.CsiHostRevoke:output_type -> greendot.helper.v1.TaskEvent
-	102, // 137: greendot.helper.v1.Helper.CsiVolumeExpand:output_type -> greendot.helper.v1.TaskEvent
-	102, // 138: greendot.helper.v1.Helper.ZfsClone:output_type -> greendot.helper.v1.TaskEvent
-	102, // 139: greendot.helper.v1.Helper.PipeKeyAdd:output_type -> greendot.helper.v1.TaskEvent
-	102, // 140: greendot.helper.v1.Helper.PipeKeyRevoke:output_type -> greendot.helper.v1.TaskEvent
-	102, // 141: greendot.helper.v1.Helper.RxeAdd:output_type -> greendot.helper.v1.TaskEvent
-	102, // 142: greendot.helper.v1.Helper.EnableRoce:output_type -> greendot.helper.v1.TaskEvent
-	102, // 143: greendot.helper.v1.Helper.InstallPackages:output_type -> greendot.helper.v1.TaskEvent
-	102, // 144: greendot.helper.v1.Helper.SmartReport:output_type -> greendot.helper.v1.TaskEvent
-	102, // 145: greendot.helper.v1.Helper.RdmaResources:output_type -> greendot.helper.v1.TaskEvent
-	72,  // 146: greendot.helper.v1.Helper.NfsReport:output_type -> greendot.helper.v1.NfsReportReply
-	75,  // 147: greendot.helper.v1.Helper.NvmetReport:output_type -> greendot.helper.v1.NvmetReportReply
-	79,  // 148: greendot.helper.v1.Helper.LioReport:output_type -> greendot.helper.v1.LioReportReply
-	83,  // 149: greendot.helper.v1.Helper.LioSessions:output_type -> greendot.helper.v1.LioSessionsReply
-	85,  // 150: greendot.helper.v1.Helper.RdmaDevices:output_type -> greendot.helper.v1.RdmaDevicesReply
-	87,  // 151: greendot.helper.v1.Helper.NicPciAddrs:output_type -> greendot.helper.v1.NicPciAddrsReply
-	89,  // 152: greendot.helper.v1.Helper.NicInterfaces:output_type -> greendot.helper.v1.NicInterfacesReply
-	91,  // 153: greendot.helper.v1.Helper.RoceCapableNics:output_type -> greendot.helper.v1.RoceCapableNicsReply
-	93,  // 154: greendot.helper.v1.Helper.NicRdmaAdvice:output_type -> greendot.helper.v1.NicRdmaAdviceReply
-	95,  // 155: greendot.helper.v1.Helper.SmartHealth:output_type -> greendot.helper.v1.SmartHealthReply
-	97,  // 156: greendot.helper.v1.Helper.ReconcileDryRun:output_type -> greendot.helper.v1.ReconcileDryRunReply
-	68,  // 157: greendot.helper.v1.Helper.ZvolInfo:output_type -> greendot.helper.v1.ZvolInfoReply
-	63,  // 158: greendot.helper.v1.Helper.PipeAccessReport:output_type -> greendot.helper.v1.PipeAccessReportReply
-	100, // [100:159] is the sub-list for method output_type
-	41,  // [41:100] is the sub-list for method input_type
-	41,  // [41:41] is the sub-list for extension type_name
-	41,  // [41:41] is the sub-list for extension extendee
-	0,   // [0:41] is the sub-list for field type_name
+	92,  // 31: greendot.helper.v1.NicNetworkReply.nics:type_name -> greendot.helper.v1.NicNetworkMsg
+	93,  // 32: greendot.helper.v1.NicNetworkMsg.addrs:type_name -> greendot.helper.v1.NicAddrMsg
+	95,  // 33: greendot.helper.v1.RoceCapableNicsReply.nics:type_name -> greendot.helper.v1.RoceCapableNic
+	97,  // 34: greendot.helper.v1.NicRdmaAdviceReply.advice:type_name -> greendot.helper.v1.NicAdviceMsg
+	99,  // 35: greendot.helper.v1.SmartHealthReply.devices:type_name -> greendot.helper.v1.SmartHealthMsg
+	4,   // 36: greendot.helper.v1.SubtaskFinished.status:type_name -> greendot.helper.v1.SubStatus
+	4,   // 37: greendot.helper.v1.Finished.status:type_name -> greendot.helper.v1.SubStatus
+	101, // 38: greendot.helper.v1.TaskEvent.subtask_started:type_name -> greendot.helper.v1.SubtaskStarted
+	102, // 39: greendot.helper.v1.TaskEvent.stdout:type_name -> greendot.helper.v1.Output
+	102, // 40: greendot.helper.v1.TaskEvent.stderr:type_name -> greendot.helper.v1.Output
+	103, // 41: greendot.helper.v1.TaskEvent.subtask_finished:type_name -> greendot.helper.v1.SubtaskFinished
+	104, // 42: greendot.helper.v1.TaskEvent.finished:type_name -> greendot.helper.v1.Finished
+	6,   // 43: greendot.helper.v1.Helper.Ping:input_type -> greendot.helper.v1.Empty
+	19,  // 44: greendot.helper.v1.Helper.Authenticate:input_type -> greendot.helper.v1.Authenticate
+	23,  // 45: greendot.helper.v1.Helper.ZvolCreate:input_type -> greendot.helper.v1.ZvolCreate
+	24,  // 46: greendot.helper.v1.Helper.ZvolDelete:input_type -> greendot.helper.v1.ZvolDelete
+	25,  // 47: greendot.helper.v1.Helper.ZvolResize:input_type -> greendot.helper.v1.ZvolResize
+	26,  // 48: greendot.helper.v1.Helper.SnapshotCreate:input_type -> greendot.helper.v1.SnapshotCreate
+	27,  // 49: greendot.helper.v1.Helper.SnapshotDestroy:input_type -> greendot.helper.v1.SnapshotDestroy
+	28,  // 50: greendot.helper.v1.Helper.ZfsFsCreate:input_type -> greendot.helper.v1.ZfsFsCreate
+	29,  // 51: greendot.helper.v1.Helper.ZfsSetMountpoint:input_type -> greendot.helper.v1.ZfsSetMountpoint
+	30,  // 52: greendot.helper.v1.Helper.ZfsMount:input_type -> greendot.helper.v1.ZfsMount
+	31,  // 53: greendot.helper.v1.Helper.ZfsUnmount:input_type -> greendot.helper.v1.ZfsUnmount
+	32,  // 54: greendot.helper.v1.Helper.ZfsDestroy:input_type -> greendot.helper.v1.ZfsDestroy
+	37,  // 55: greendot.helper.v1.Helper.PoolCreate:input_type -> greendot.helper.v1.PoolCreate
+	38,  // 56: greendot.helper.v1.Helper.PoolDeviceAdd:input_type -> greendot.helper.v1.PoolDeviceAdd
+	39,  // 57: greendot.helper.v1.Helper.PoolDeviceRemove:input_type -> greendot.helper.v1.PoolDeviceRemove
+	40,  // 58: greendot.helper.v1.Helper.PoolDeviceDetach:input_type -> greendot.helper.v1.PoolDeviceDetach
+	33,  // 59: greendot.helper.v1.Helper.PartitionTableCreate:input_type -> greendot.helper.v1.PartitionTableCreate
+	34,  // 60: greendot.helper.v1.Helper.PartitionCreate:input_type -> greendot.helper.v1.PartitionCreate
+	35,  // 61: greendot.helper.v1.Helper.PartitionDelete:input_type -> greendot.helper.v1.PartitionDelete
+	36,  // 62: greendot.helper.v1.Helper.PartitionShrink:input_type -> greendot.helper.v1.PartitionShrink
+	43,  // 63: greendot.helper.v1.Helper.LvmReport:input_type -> greendot.helper.v1.LvmReport
+	44,  // 64: greendot.helper.v1.Helper.VgCreate:input_type -> greendot.helper.v1.VgCreate
+	45,  // 65: greendot.helper.v1.Helper.VgExtend:input_type -> greendot.helper.v1.VgExtend
+	46,  // 66: greendot.helper.v1.Helper.VgReduce:input_type -> greendot.helper.v1.VgReduce
+	47,  // 67: greendot.helper.v1.Helper.VgRemove:input_type -> greendot.helper.v1.VgRemove
+	48,  // 68: greendot.helper.v1.Helper.LvCreate:input_type -> greendot.helper.v1.LvCreate
+	49,  // 69: greendot.helper.v1.Helper.ThinPoolCreate:input_type -> greendot.helper.v1.ThinPoolCreate
+	50,  // 70: greendot.helper.v1.Helper.ThinLvCreate:input_type -> greendot.helper.v1.ThinLvCreate
+	51,  // 71: greendot.helper.v1.Helper.LvResize:input_type -> greendot.helper.v1.LvResize
+	52,  // 72: greendot.helper.v1.Helper.LvShrink:input_type -> greendot.helper.v1.LvShrink
+	53,  // 73: greendot.helper.v1.Helper.LvRename:input_type -> greendot.helper.v1.LvRename
+	54,  // 74: greendot.helper.v1.Helper.LvDelete:input_type -> greendot.helper.v1.LvDelete
+	55,  // 75: greendot.helper.v1.Helper.Reconcile:input_type -> greendot.helper.v1.Reconcile
+	56,  // 76: greendot.helper.v1.Helper.CsiNvmeApply:input_type -> greendot.helper.v1.CsiNvmeApply
+	57,  // 77: greendot.helper.v1.Helper.CsiNvmeDelete:input_type -> greendot.helper.v1.CsiNvmeDelete
+	58,  // 78: greendot.helper.v1.Helper.CsiHostGrant:input_type -> greendot.helper.v1.CsiHostGrant
+	59,  // 79: greendot.helper.v1.Helper.CsiHostRevoke:input_type -> greendot.helper.v1.CsiHostRevoke
+	60,  // 80: greendot.helper.v1.Helper.CsiVolumeExpand:input_type -> greendot.helper.v1.CsiVolumeExpand
+	66,  // 81: greendot.helper.v1.Helper.ZfsClone:input_type -> greendot.helper.v1.ZfsClone
+	61,  // 82: greendot.helper.v1.Helper.PipeKeyAdd:input_type -> greendot.helper.v1.PipeKeyAdd
+	62,  // 83: greendot.helper.v1.Helper.PipeKeyRevoke:input_type -> greendot.helper.v1.PipeKeyRevoke
+	69,  // 84: greendot.helper.v1.Helper.RxeAdd:input_type -> greendot.helper.v1.RxeAdd
+	70,  // 85: greendot.helper.v1.Helper.EnableRoce:input_type -> greendot.helper.v1.EnableRoce
+	71,  // 86: greendot.helper.v1.Helper.InstallPackages:input_type -> greendot.helper.v1.InstallPackages
+	41,  // 87: greendot.helper.v1.Helper.SmartReport:input_type -> greendot.helper.v1.SmartReport
+	6,   // 88: greendot.helper.v1.Helper.RdmaResources:input_type -> greendot.helper.v1.Empty
+	6,   // 89: greendot.helper.v1.Helper.NfsReport:input_type -> greendot.helper.v1.Empty
+	6,   // 90: greendot.helper.v1.Helper.NvmetReport:input_type -> greendot.helper.v1.Empty
+	6,   // 91: greendot.helper.v1.Helper.LioReport:input_type -> greendot.helper.v1.Empty
+	6,   // 92: greendot.helper.v1.Helper.LioSessions:input_type -> greendot.helper.v1.Empty
+	6,   // 93: greendot.helper.v1.Helper.RdmaDevices:input_type -> greendot.helper.v1.Empty
+	6,   // 94: greendot.helper.v1.Helper.NicPciAddrs:input_type -> greendot.helper.v1.Empty
+	6,   // 95: greendot.helper.v1.Helper.NicInterfaces:input_type -> greendot.helper.v1.Empty
+	6,   // 96: greendot.helper.v1.Helper.NicNetwork:input_type -> greendot.helper.v1.Empty
+	6,   // 97: greendot.helper.v1.Helper.RoceCapableNics:input_type -> greendot.helper.v1.Empty
+	6,   // 98: greendot.helper.v1.Helper.NicRdmaAdvice:input_type -> greendot.helper.v1.Empty
+	42,  // 99: greendot.helper.v1.Helper.SmartHealth:input_type -> greendot.helper.v1.SmartHealth
+	6,   // 100: greendot.helper.v1.Helper.ReconcileDryRun:input_type -> greendot.helper.v1.Empty
+	67,  // 101: greendot.helper.v1.Helper.ZvolInfo:input_type -> greendot.helper.v1.ZvolInfo
+	6,   // 102: greendot.helper.v1.Helper.PipeAccessReport:input_type -> greendot.helper.v1.Empty
+	6,   // 103: greendot.helper.v1.Helper.Ping:output_type -> greendot.helper.v1.Empty
+	22,  // 104: greendot.helper.v1.Helper.Authenticate:output_type -> greendot.helper.v1.AuthReply
+	105, // 105: greendot.helper.v1.Helper.ZvolCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 106: greendot.helper.v1.Helper.ZvolDelete:output_type -> greendot.helper.v1.TaskEvent
+	105, // 107: greendot.helper.v1.Helper.ZvolResize:output_type -> greendot.helper.v1.TaskEvent
+	105, // 108: greendot.helper.v1.Helper.SnapshotCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 109: greendot.helper.v1.Helper.SnapshotDestroy:output_type -> greendot.helper.v1.TaskEvent
+	105, // 110: greendot.helper.v1.Helper.ZfsFsCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 111: greendot.helper.v1.Helper.ZfsSetMountpoint:output_type -> greendot.helper.v1.TaskEvent
+	105, // 112: greendot.helper.v1.Helper.ZfsMount:output_type -> greendot.helper.v1.TaskEvent
+	105, // 113: greendot.helper.v1.Helper.ZfsUnmount:output_type -> greendot.helper.v1.TaskEvent
+	105, // 114: greendot.helper.v1.Helper.ZfsDestroy:output_type -> greendot.helper.v1.TaskEvent
+	105, // 115: greendot.helper.v1.Helper.PoolCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 116: greendot.helper.v1.Helper.PoolDeviceAdd:output_type -> greendot.helper.v1.TaskEvent
+	105, // 117: greendot.helper.v1.Helper.PoolDeviceRemove:output_type -> greendot.helper.v1.TaskEvent
+	105, // 118: greendot.helper.v1.Helper.PoolDeviceDetach:output_type -> greendot.helper.v1.TaskEvent
+	105, // 119: greendot.helper.v1.Helper.PartitionTableCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 120: greendot.helper.v1.Helper.PartitionCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 121: greendot.helper.v1.Helper.PartitionDelete:output_type -> greendot.helper.v1.TaskEvent
+	105, // 122: greendot.helper.v1.Helper.PartitionShrink:output_type -> greendot.helper.v1.TaskEvent
+	105, // 123: greendot.helper.v1.Helper.LvmReport:output_type -> greendot.helper.v1.TaskEvent
+	105, // 124: greendot.helper.v1.Helper.VgCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 125: greendot.helper.v1.Helper.VgExtend:output_type -> greendot.helper.v1.TaskEvent
+	105, // 126: greendot.helper.v1.Helper.VgReduce:output_type -> greendot.helper.v1.TaskEvent
+	105, // 127: greendot.helper.v1.Helper.VgRemove:output_type -> greendot.helper.v1.TaskEvent
+	105, // 128: greendot.helper.v1.Helper.LvCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 129: greendot.helper.v1.Helper.ThinPoolCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 130: greendot.helper.v1.Helper.ThinLvCreate:output_type -> greendot.helper.v1.TaskEvent
+	105, // 131: greendot.helper.v1.Helper.LvResize:output_type -> greendot.helper.v1.TaskEvent
+	105, // 132: greendot.helper.v1.Helper.LvShrink:output_type -> greendot.helper.v1.TaskEvent
+	105, // 133: greendot.helper.v1.Helper.LvRename:output_type -> greendot.helper.v1.TaskEvent
+	105, // 134: greendot.helper.v1.Helper.LvDelete:output_type -> greendot.helper.v1.TaskEvent
+	105, // 135: greendot.helper.v1.Helper.Reconcile:output_type -> greendot.helper.v1.TaskEvent
+	105, // 136: greendot.helper.v1.Helper.CsiNvmeApply:output_type -> greendot.helper.v1.TaskEvent
+	105, // 137: greendot.helper.v1.Helper.CsiNvmeDelete:output_type -> greendot.helper.v1.TaskEvent
+	105, // 138: greendot.helper.v1.Helper.CsiHostGrant:output_type -> greendot.helper.v1.TaskEvent
+	105, // 139: greendot.helper.v1.Helper.CsiHostRevoke:output_type -> greendot.helper.v1.TaskEvent
+	105, // 140: greendot.helper.v1.Helper.CsiVolumeExpand:output_type -> greendot.helper.v1.TaskEvent
+	105, // 141: greendot.helper.v1.Helper.ZfsClone:output_type -> greendot.helper.v1.TaskEvent
+	105, // 142: greendot.helper.v1.Helper.PipeKeyAdd:output_type -> greendot.helper.v1.TaskEvent
+	105, // 143: greendot.helper.v1.Helper.PipeKeyRevoke:output_type -> greendot.helper.v1.TaskEvent
+	105, // 144: greendot.helper.v1.Helper.RxeAdd:output_type -> greendot.helper.v1.TaskEvent
+	105, // 145: greendot.helper.v1.Helper.EnableRoce:output_type -> greendot.helper.v1.TaskEvent
+	105, // 146: greendot.helper.v1.Helper.InstallPackages:output_type -> greendot.helper.v1.TaskEvent
+	105, // 147: greendot.helper.v1.Helper.SmartReport:output_type -> greendot.helper.v1.TaskEvent
+	105, // 148: greendot.helper.v1.Helper.RdmaResources:output_type -> greendot.helper.v1.TaskEvent
+	72,  // 149: greendot.helper.v1.Helper.NfsReport:output_type -> greendot.helper.v1.NfsReportReply
+	75,  // 150: greendot.helper.v1.Helper.NvmetReport:output_type -> greendot.helper.v1.NvmetReportReply
+	79,  // 151: greendot.helper.v1.Helper.LioReport:output_type -> greendot.helper.v1.LioReportReply
+	83,  // 152: greendot.helper.v1.Helper.LioSessions:output_type -> greendot.helper.v1.LioSessionsReply
+	85,  // 153: greendot.helper.v1.Helper.RdmaDevices:output_type -> greendot.helper.v1.RdmaDevicesReply
+	87,  // 154: greendot.helper.v1.Helper.NicPciAddrs:output_type -> greendot.helper.v1.NicPciAddrsReply
+	89,  // 155: greendot.helper.v1.Helper.NicInterfaces:output_type -> greendot.helper.v1.NicInterfacesReply
+	91,  // 156: greendot.helper.v1.Helper.NicNetwork:output_type -> greendot.helper.v1.NicNetworkReply
+	94,  // 157: greendot.helper.v1.Helper.RoceCapableNics:output_type -> greendot.helper.v1.RoceCapableNicsReply
+	96,  // 158: greendot.helper.v1.Helper.NicRdmaAdvice:output_type -> greendot.helper.v1.NicRdmaAdviceReply
+	98,  // 159: greendot.helper.v1.Helper.SmartHealth:output_type -> greendot.helper.v1.SmartHealthReply
+	100, // 160: greendot.helper.v1.Helper.ReconcileDryRun:output_type -> greendot.helper.v1.ReconcileDryRunReply
+	68,  // 161: greendot.helper.v1.Helper.ZvolInfo:output_type -> greendot.helper.v1.ZvolInfoReply
+	63,  // 162: greendot.helper.v1.Helper.PipeAccessReport:output_type -> greendot.helper.v1.PipeAccessReportReply
+	103, // [103:163] is the sub-list for method output_type
+	43,  // [43:103] is the sub-list for method input_type
+	43,  // [43:43] is the sub-list for extension type_name
+	43,  // [43:43] is the sub-list for extension extendee
+	0,   // [0:43] is the sub-list for field type_name
 }
 
 func init() { file_helper_proto_init() }
@@ -6770,11 +6994,12 @@ func file_helper_proto_init() {
 	file_helper_proto_msgTypes[66].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[80].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[84].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[90].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[92].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[94].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[86].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[93].OneofWrappers = []any{}
 	file_helper_proto_msgTypes[95].OneofWrappers = []any{}
-	file_helper_proto_msgTypes[96].OneofWrappers = []any{
+	file_helper_proto_msgTypes[97].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[98].OneofWrappers = []any{}
+	file_helper_proto_msgTypes[99].OneofWrappers = []any{
 		(*TaskEvent_SubtaskStarted)(nil),
 		(*TaskEvent_Stdout)(nil),
 		(*TaskEvent_Stderr)(nil),
@@ -6787,7 +7012,7 @@ func file_helper_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_helper_proto_rawDesc), len(file_helper_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   97,
+			NumMessages:   100,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
