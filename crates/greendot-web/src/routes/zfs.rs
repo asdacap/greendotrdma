@@ -12,7 +12,7 @@ use axum::response::Response;
 use axum::{Extension, Router, routing::post};
 use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, VdevLayout, VdevTarget, ops};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -130,6 +130,10 @@ async fn zfs_page(
 /// dumb; the helper re-validates regardless).
 pub struct MemberRow {
     pub name: String,
+    /// Disk/partition detail-page URL for a leaf device, so the name links to
+    /// its device page. `None` for vdev containers (`mirror-0`, …) and for
+    /// devices lsblk didn't report (a missing member) — those render unlinked.
+    pub detail_url: Option<String>,
     /// Allocation-class tag next to the name (`log`, `cache`, …; empty for data).
     pub class: String,
     /// A leaf inside a mirror/raidz container — indented in the table.
@@ -140,13 +144,35 @@ pub struct MemberRow {
     pub can_detach: bool,
 }
 
+/// Maps each block device's `/dev/<name>` path to its detail-page URL, so a pool
+/// member — which zpool reports as a `/dev/...` leaf path (by-id links resolved
+/// to kernel names by `-L`) — can link to the disk or partition page.
+fn device_detail_urls(disks: Vec<block::Disk>) -> HashMap<String, String> {
+    let mut urls = HashMap::new();
+    for d in disks {
+        urls.insert(format!("/dev/{}", d.name), format!("/disks/{}", d.name));
+        for p in d.partitions {
+            if let Some(n) = p.number {
+                urls.insert(
+                    format!("/dev/{}", p.name),
+                    format!("/disks/{}/part/{n}", d.name),
+                );
+            }
+        }
+    }
+    urls
+}
+
 /// Decides per-member actions. Detach applies to leaves inside a mirror.
 /// Remove is offered where `zpool remove` can succeed: any log/cache/spare
 /// member, and top-level data/special/dedup vdevs when the pool has no
 /// raidz (which blocks device evacuation) and more than one data vdev
 /// remains. These gates only hide doomed buttons — zpool re-checks anyway
 /// and the recorded task shows its stderr verbatim.
-fn member_rows(members: Vec<zfs::PoolMember>) -> Vec<MemberRow> {
+fn member_rows(
+    members: Vec<zfs::PoolMember>,
+    dev_urls: &HashMap<String, String>,
+) -> Vec<MemberRow> {
     use zfs::MemberClass as C;
     let toplevel_data = |m: &&zfs::PoolMember| m.class == C::Data && m.parent.is_none();
     let pool_has_raidz = members
@@ -173,6 +199,7 @@ fn member_rows(members: Vec<zfs::PoolMember>) -> Vec<MemberRow> {
                     C::Special | C::Dedup => !pool_has_raidz,
                 };
             MemberRow {
+                detail_url: dev_urls.get(&m.name).cloned(),
                 can_detach: m.is_leaf && in_mirror && DevicePath::new(&m.name).is_ok(),
                 can_remove,
                 is_child: m.parent.is_some(),
@@ -248,7 +275,16 @@ async fn gather_pool_detail(
     match tokio::try_join!(zfs::pools(), zfs::datasets(), zfs::pool_vdevs()) {
         Ok((Some(pools), Some(datasets), Some(vdevs))) => {
             view.pool = pools.into_iter().find(|p| p.name == name).map(PoolRow::new);
-            view.members = member_rows(vdevs.into_iter().filter(|m| m.pool == name).collect());
+            // Best-effort device→page map so members link to their disk page;
+            // a disk-listing failure just leaves the names unlinked.
+            let dev_urls = block::disks()
+                .await
+                .map(device_detail_urls)
+                .unwrap_or_default();
+            view.members = member_rows(
+                vdevs.into_iter().filter(|m| m.pool == name).collect(),
+                &dev_urls,
+            );
             // A vdev added to the pool must be an empty raw device, so offer the
             // same candidates as pool creation (no zvols, LVs, or formatted parts).
             if view.pool.is_some() {
@@ -1082,6 +1118,43 @@ mod tests {
     #[case::overflow("99999999999", "TiB", None)]
     fn size_parsing(#[case] value: &str, #[case] unit: &str, #[case] expected: Option<u64>) {
         assert_eq!(parse_size(value, unit), expected);
+    }
+
+    #[test]
+    fn device_detail_urls_maps_disks_and_numbered_partitions() {
+        let disk = |name: &str, parts: Vec<block::Partition>| block::Disk {
+            name: name.into(),
+            size: 0,
+            model: None,
+            serial: None,
+            transport: None,
+            id_link: None,
+            mountpoint: None,
+            fstype: None,
+            partitions: parts,
+        };
+        let part = |name: &str, number: Option<u32>| block::Partition {
+            name: name.into(),
+            number,
+            size: 0,
+            label: None,
+            mountpoint: None,
+            fstype: None,
+        };
+        let urls = device_detail_urls(vec![
+            disk("sdb", vec![part("sdb1", Some(1))]),
+            disk("sdg", vec![]),
+            // A partition lsblk reported without a number can't address a page.
+            disk("sdh", vec![part("sdh1", None)]),
+        ]);
+        // Whole disk and numbered partition each map to their page; the members
+        // table stores full `/dev/...` paths, so keys are `/dev/...` too.
+        assert_eq!(
+            urls.get("/dev/sdb1").map(String::as_str),
+            Some("/disks/sdb/part/1")
+        );
+        assert_eq!(urls.get("/dev/sdg").map(String::as_str), Some("/disks/sdg"));
+        assert_eq!(urls.get("/dev/sdh1"), None);
     }
 
     #[rstest]

@@ -49,7 +49,7 @@
       {% for m in view.members %}
       <tr>
         <td>
-          {% if m.is_child %}<span class="muted">└</span> {% endif %}{{ m.name }}
+          {% if m.is_child %}<span class="muted">└</span> {% endif %}{% if let Some(url) = m.detail_url %}<a href="{{ url }}">{{ m.name }}</a>{% else %}{{ m.name }}{% endif %}
           {% if !m.class.is_empty() %}<span class="muted small">{{ m.class }}</span>{% endif %}
         </td>
         <td>{{ m.size }}</td>
