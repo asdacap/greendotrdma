@@ -1346,6 +1346,10 @@ unit_op!(
     /// combined daemon-side so the web stays vendor-free), typed reply.
     NicInterfaces, pb::Empty);
 unit_op!(
+    /// Per-NIC network configuration (`ip addr`/`ip route`; vendor-neutral),
+    /// display-only typed reply.
+    NicNetwork, pb::Empty);
+unit_op!(
     /// The RoCE-capable NIC inventory (vendor classification), typed reply.
     RoceCapableNics, pb::Empty);
 unit_op!(

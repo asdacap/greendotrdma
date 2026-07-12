@@ -224,6 +224,7 @@ impl HelperClient {
         rdma_devices -> Vec<rdma::RdmaDev>;
         nic_pci_addrs -> HashMap<String, Vec<IpAddr>>;
         nic_interfaces -> Vec<nic::NicStatus>;
+        nic_network -> Vec<nic::NicNetwork>;
         roce_capable_nics -> HashMap<String, String>;
         nic_rdma_advice -> HashMap<String, nic::NicAdvice>;
         reconcile_dry_run -> pb::ReconcileDryRunReply;

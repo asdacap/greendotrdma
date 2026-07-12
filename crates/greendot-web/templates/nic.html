@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+
+{% block title %}NICs — GreenDotRDMA{% endblock %}
+
+{% block content %}
+<h1>Network interfaces</h1>
+<p class="muted">RDMA status per NIC — green only when RDMA is actually serving. Open a NIC for its network configuration, traffic, temperature, and RDMA actions.</p>
+<div hx-get="/nic" hx-select="#nic-content" hx-trigger="every 5s" hx-swap="outerHTML">
+{% include "_nic.html" %}
+</div>
+{% endblock %}

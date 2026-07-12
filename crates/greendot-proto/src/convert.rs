@@ -827,6 +827,60 @@ impl From<pb::NicInterfacesReply> for Vec<actual::nic::NicStatus> {
     }
 }
 
+impl From<actual::nic::NicNetwork> for pb::NicNetworkMsg {
+    fn from(n: actual::nic::NicNetwork) -> Self {
+        pb::NicNetworkMsg {
+            netdev: n.netdev,
+            mac: n.mac,
+            mtu: n.mtu,
+            operstate: n.operstate,
+            dhcp: n.dhcp,
+            addrs: n
+                .addrs
+                .into_iter()
+                .map(|a| pb::NicAddrMsg {
+                    addr: a.addr,
+                    prefix: a.prefix as u32,
+                    dynamic: a.dynamic,
+                })
+                .collect(),
+            gateway: n.gateway,
+        }
+    }
+}
+
+impl From<Vec<actual::nic::NicNetwork>> for pb::NicNetworkReply {
+    fn from(v: Vec<actual::nic::NicNetwork>) -> Self {
+        pb::NicNetworkReply {
+            nics: v.into_iter().map(Into::into).collect(),
+        }
+    }
+}
+impl From<pb::NicNetworkReply> for Vec<actual::nic::NicNetwork> {
+    fn from(r: pb::NicNetworkReply) -> Self {
+        r.nics
+            .into_iter()
+            .map(|n| actual::nic::NicNetwork {
+                netdev: n.netdev,
+                mac: n.mac,
+                mtu: n.mtu,
+                operstate: n.operstate,
+                dhcp: n.dhcp,
+                addrs: n
+                    .addrs
+                    .into_iter()
+                    .map(|a| actual::nic::NicAddr {
+                        addr: a.addr,
+                        prefix: a.prefix as u8,
+                        dynamic: a.dynamic,
+                    })
+                    .collect(),
+                gateway: n.gateway,
+            })
+            .collect()
+    }
+}
+
 impl From<HashMap<String, String>> for pb::RoceCapableNicsReply {
     fn from(m: HashMap<String, String>) -> Self {
         pb::RoceCapableNicsReply {

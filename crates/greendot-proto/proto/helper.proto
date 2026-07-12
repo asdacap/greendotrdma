@@ -110,6 +110,7 @@ service Helper {
   rpc RdmaDevices(Empty) returns (RdmaDevicesReply);
   rpc NicPciAddrs(Empty) returns (NicPciAddrsReply);
   rpc NicInterfaces(Empty) returns (NicInterfacesReply);
+  rpc NicNetwork(Empty) returns (NicNetworkReply);
   rpc RoceCapableNics(Empty) returns (RoceCapableNicsReply);
   rpc NicRdmaAdvice(Empty) returns (NicRdmaAdviceReply);
   rpc SmartHealth(.greendot.helper.v1.SmartHealth) returns (SmartHealthReply);
@@ -500,6 +501,22 @@ enum NicRdmaKind {
   NIC_RDMA_KIND_CAPABLE_DISABLED = 3;
   NIC_RDMA_KIND_SOFT_ROCEABLE = 4;
   NIC_RDMA_KIND_UNSUPPORTED = 5;
+}
+
+message NicNetworkReply { repeated NicNetworkMsg nics = 1; }
+message NicNetworkMsg {
+  string netdev = 1;
+  optional string mac = 2;
+  optional uint32 mtu = 3;
+  string operstate = 4;
+  bool dhcp = 5;
+  repeated NicAddrMsg addrs = 6;
+  optional string gateway = 7;
+}
+message NicAddrMsg {
+  string addr = 1;      // IpAddr
+  uint32 prefix = 2;    // prefix length
+  bool dynamic = 3;     // DHCP-assigned
 }
 
 message RoceCapableNicsReply { repeated RoceCapableNic nics = 1; }

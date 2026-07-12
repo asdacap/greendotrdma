@@ -70,8 +70,12 @@ const CHIP_ORDER: [MetricKind; 5] = [
 ];
 
 /// Sections in display order: (series category, heading).
-const CATEGORIES: [(&str, &str); 3] =
-    [("disk", "Disks"), ("rdma", "RDMA links"), ("pool", "Pools")];
+const CATEGORIES: [(&str, &str); 4] = [
+    ("disk", "Disks"),
+    ("rdma", "RDMA links"),
+    ("nic", "NICs"),
+    ("pool", "Pools"),
+];
 
 impl MetricKind {
     fn slug(self) -> &'static str {

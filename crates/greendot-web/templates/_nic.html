@@ -1,0 +1,22 @@
+<div id="nic-content">
+{% if view.rows.is_empty() %}
+<p class="empty">No network interfaces detected.</p>
+{% else %}
+<table>
+  <thead><tr><th></th><th>Interface</th><th>RDMA device</th><th>Addresses</th><th>DHCP</th><th>Link</th><th>Status</th></tr></thead>
+  <tbody>
+    {% for n in view.rows %}
+    <tr>
+      <td><span class="dot {{ n.dot }}"></span></td>
+      <td><a href="/nic/{{ n.netdev }}">{{ n.netdev }}</a></td>
+      <td class="small">{{ n.rdma }}</td>
+      <td class="small">{{ n.addrs }}</td>
+      <td class="small">{{ n.dhcp }}</td>
+      <td class="small">{{ n.link }}</td>
+      <td class="small">{{ n.status }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>

@@ -571,6 +571,7 @@ helper_impl! {
             rdma_devices, pb::Empty, ops::RdmaDevices;
             nic_pci_addrs, pb::Empty, ops::NicPciAddrs;
             nic_interfaces, pb::Empty, ops::NicInterfaces;
+            nic_network, pb::Empty, ops::NicNetwork;
             roce_capable_nics, pb::Empty, ops::RoceCapableNics;
             nic_rdma_advice, pb::Empty, ops::NicRdmaAdvice;
             smart_health, pb::SmartHealth, ops::SmartHealth;

@@ -155,6 +155,52 @@ fn collect_drive_temp(metrics: &Metrics, hwmon_root: &Path, ts: i64) {
     }
 }
 
+/// Per-physical-NIC ethernet byte counters from
+/// `/sys/class/net/<dev>/statistics/{rx_bytes,tx_bytes}` into
+/// `nic:<dev>:rx_bps`/`write_bps`. Only interfaces with a PCI `device` symlink
+/// (physical NICs) are counted, so veth/bridge/loopback noise is skipped. Pure
+/// sysfs walking — no vendor knowledge.
+fn collect_nic_traffic(metrics: &Metrics, net_root: &Path, ts: i64) {
+    for dev in read_dir_names(net_root) {
+        let dir = net_root.join(&dev);
+        if dev == "lo" || dir.join("device").symlink_metadata().is_err() {
+            continue;
+        }
+        for (file, label) in [("rx_bytes", "rx"), ("tx_bytes", "tx")] {
+            if let Ok(raw) = std::fs::read_to_string(dir.join("statistics").join(file))
+                && let Ok(bytes) = raw.trim().parse::<u64>()
+            {
+                metrics.push_counter(&format!("nic:{dev}:{label}_bps"), ts, bytes);
+            }
+        }
+    }
+}
+
+/// Best-effort per-NIC temperature: the first
+/// `/sys/class/net/<dev>/device/hwmon/hwmon*/temp*_input` (milli-°C) into a
+/// `nic:<dev>:temp_c` gauge. Many NICs expose a sensor via their PCI device's
+/// hwmon; hosts/NICs without one simply yield no series. Vendor-neutral.
+fn collect_nic_temp(metrics: &Metrics, net_root: &Path, ts: i64) {
+    for dev in read_dir_names(net_root) {
+        if dev == "lo" {
+            continue;
+        }
+        let hwmon_root = net_root.join(&dev).join("device").join("hwmon");
+        let Some(celsius) = read_dir_names(&hwmon_root).into_iter().find_map(|hw| {
+            let hwdir = hwmon_root.join(&hw);
+            read_dir_names(&hwdir)
+                .into_iter()
+                .filter(|f| f.starts_with("temp") && f.ends_with("_input"))
+                .min()
+                .and_then(|f| std::fs::read_to_string(hwdir.join(f)).ok())
+                .and_then(|raw| parse_temp_millis(&raw))
+        }) else {
+            continue;
+        };
+        metrics.push(&format!("nic:{dev}:temp_c"), ts, celsius);
+    }
+}
+
 async fn collect_pools(metrics: &Metrics, ts: i64) {
     if let Ok(Some(pools)) = crate::actual::zfs::pools().await {
         for pool in pools {
@@ -176,6 +222,8 @@ pub async fn collector(state: std::sync::Arc<AppState>) {
         collect_block(&state.metrics, Path::new("/sys/block"), ts);
         collect_rdma(&state.metrics, Path::new("/sys/class/infiniband"), ts);
         collect_drive_temp(&state.metrics, Path::new("/sys/class/hwmon"), ts);
+        collect_nic_traffic(&state.metrics, Path::new("/sys/class/net"), ts);
+        collect_nic_temp(&state.metrics, Path::new("/sys/class/net"), ts);
         collect_pool_io(&state.metrics, Path::new("/proc/spl/kstat/zfs"), ts);
         if ts / 60 != last_minute {
             last_minute = ts / 60;
@@ -295,6 +343,44 @@ mod tests {
     #[case::garbage("warm", None)]
     fn temp_millis_parsing(#[case] raw: &str, #[case] expected: Option<f64>) {
         assert_eq!(parse_temp_millis(raw), expected);
+    }
+
+    #[test]
+    fn nic_traffic_counts_physical_only_and_temp_reads_device_hwmon() {
+        let tmp = std::env::temp_dir().join(format!("gd-nicmetrics{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // eth0: physical (has a `device` dir), with byte counters and a NIC temp
+        // sensor under device/hwmon/hwmon5/temp1_input.
+        let eth0 = tmp.join("eth0");
+        std::fs::create_dir_all(eth0.join("statistics")).unwrap();
+        std::fs::create_dir_all(eth0.join("device/hwmon/hwmon5")).unwrap();
+        std::fs::write(eth0.join("statistics/rx_bytes"), "1000\n").unwrap();
+        std::fs::write(eth0.join("statistics/tx_bytes"), "2000\n").unwrap();
+        std::fs::write(eth0.join("device/hwmon/hwmon5/temp1_input"), "52000\n").unwrap();
+        // br0: virtual (no `device`) — must produce no traffic series.
+        let br0 = tmp.join("br0");
+        std::fs::create_dir_all(br0.join("statistics")).unwrap();
+        std::fs::write(br0.join("statistics/rx_bytes"), "500\n").unwrap();
+        std::fs::write(br0.join("statistics/tx_bytes"), "500\n").unwrap();
+        // lo: excluded.
+        std::fs::create_dir_all(tmp.join("lo/statistics")).unwrap();
+
+        let metrics = Metrics::in_memory().unwrap();
+        // Two passes so counter rates exist: +2500 rx, +5000 tx over 5s.
+        collect_nic_traffic(&metrics, &tmp, 100);
+        collect_nic_temp(&metrics, &tmp, 100);
+        std::fs::write(eth0.join("statistics/rx_bytes"), "3500\n").unwrap();
+        std::fs::write(eth0.join("statistics/tx_bytes"), "7000\n").unwrap();
+        collect_nic_traffic(&metrics, &tmp, 105);
+
+        assert_eq!(metrics.ring_series("nic:eth0:rx_bps"), vec![(105, 500.0)]);
+        assert_eq!(metrics.ring_series("nic:eth0:tx_bps"), vec![(105, 1000.0)]);
+        assert_eq!(metrics.ring_series("nic:eth0:temp_c"), vec![(100, 52.0)]);
+        assert!(
+            metrics.series_names().iter().all(|s| !s.contains("br0")),
+            "virtual interfaces produce no series"
+        );
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 
     #[test]

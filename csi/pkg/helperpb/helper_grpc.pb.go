@@ -80,6 +80,7 @@ const (
 	Helper_RdmaDevices_FullMethodName          = "/greendot.helper.v1.Helper/RdmaDevices"
 	Helper_NicPciAddrs_FullMethodName          = "/greendot.helper.v1.Helper/NicPciAddrs"
 	Helper_NicInterfaces_FullMethodName        = "/greendot.helper.v1.Helper/NicInterfaces"
+	Helper_NicNetwork_FullMethodName           = "/greendot.helper.v1.Helper/NicNetwork"
 	Helper_RoceCapableNics_FullMethodName      = "/greendot.helper.v1.Helper/RoceCapableNics"
 	Helper_NicRdmaAdvice_FullMethodName        = "/greendot.helper.v1.Helper/NicRdmaAdvice"
 	Helper_SmartHealth_FullMethodName          = "/greendot.helper.v1.Helper/SmartHealth"
@@ -178,6 +179,7 @@ type HelperClient interface {
 	RdmaDevices(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*RdmaDevicesReply, error)
 	NicPciAddrs(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*NicPciAddrsReply, error)
 	NicInterfaces(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*NicInterfacesReply, error)
+	NicNetwork(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*NicNetworkReply, error)
 	RoceCapableNics(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*RoceCapableNicsReply, error)
 	NicRdmaAdvice(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*NicRdmaAdviceReply, error)
 	SmartHealth(ctx context.Context, in *SmartHealth, opts ...grpc.CallOption) (*SmartHealthReply, error)
@@ -1120,6 +1122,16 @@ func (c *helperClient) NicInterfaces(ctx context.Context, in *Empty, opts ...grp
 	return out, nil
 }
 
+func (c *helperClient) NicNetwork(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*NicNetworkReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(NicNetworkReply)
+	err := c.cc.Invoke(ctx, Helper_NicNetwork_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *helperClient) RoceCapableNics(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*RoceCapableNicsReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(RoceCapableNicsReply)
@@ -1270,6 +1282,7 @@ type HelperServer interface {
 	RdmaDevices(context.Context, *Empty) (*RdmaDevicesReply, error)
 	NicPciAddrs(context.Context, *Empty) (*NicPciAddrsReply, error)
 	NicInterfaces(context.Context, *Empty) (*NicInterfacesReply, error)
+	NicNetwork(context.Context, *Empty) (*NicNetworkReply, error)
 	RoceCapableNics(context.Context, *Empty) (*RoceCapableNicsReply, error)
 	NicRdmaAdvice(context.Context, *Empty) (*NicRdmaAdviceReply, error)
 	SmartHealth(context.Context, *SmartHealth) (*SmartHealthReply, error)
@@ -1444,6 +1457,9 @@ func (UnimplementedHelperServer) NicPciAddrs(context.Context, *Empty) (*NicPciAd
 }
 func (UnimplementedHelperServer) NicInterfaces(context.Context, *Empty) (*NicInterfacesReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method NicInterfaces not implemented")
+}
+func (UnimplementedHelperServer) NicNetwork(context.Context, *Empty) (*NicNetworkReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method NicNetwork not implemented")
 }
 func (UnimplementedHelperServer) RoceCapableNics(context.Context, *Empty) (*RoceCapableNicsReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RoceCapableNics not implemented")
@@ -2130,6 +2146,24 @@ func _Helper_NicInterfaces_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Helper_NicNetwork_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(Empty)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HelperServer).NicNetwork(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Helper_NicNetwork_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HelperServer).NicNetwork(ctx, req.(*Empty))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Helper_RoceCapableNics_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -2280,6 +2314,10 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "NicInterfaces",
 			Handler:    _Helper_NicInterfaces_Handler,
+		},
+		{
+			MethodName: "NicNetwork",
+			Handler:    _Helper_NicNetwork_Handler,
 		},
 		{
 			MethodName: "RoceCapableNics",

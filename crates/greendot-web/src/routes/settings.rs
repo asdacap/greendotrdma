@@ -1,27 +1,21 @@
 use super::{AppState, page};
-use crate::actual::nic::{self, NicRdmaKind, NicStatus};
 use crate::actual::rdma;
 use crate::auth::CurrentUser;
-use crate::dot::{Criterion, nic_diagnostics};
 use crate::routes::block_export::reconcile_state;
 use askama::Template;
-use axum::extract::{Form, Path, State};
+use axum::extract::{Form, State};
 use axum::response::Response;
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use greendot_proto::{NetdevName, ops};
+use greendot_proto::ops;
 use serde::Deserialize;
 use std::sync::Arc;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/settings", get(settings_page))
-        .route("/settings/nic/{netdev}", get(nic_detail_page))
-        .route("/settings/nic/{netdev}/diagnose", get(nic_diagnose_page))
         .route("/settings/reconcile", post(reconcile_now))
         .route("/settings/listen", post(set_listen))
-        .route("/settings/rxe", post(enable_rxe))
-        .route("/settings/roce", post(set_roce))
         .route("/settings/install", post(install_deps))
 }
 
@@ -30,57 +24,6 @@ pub struct RdmaRow {
     pub netdev: String,
     pub state: &'static str,
     pub addrs: String,
-}
-
-/// One row of the per-NIC RDMA-capability table.
-pub struct NicRow {
-    pub netdev: String,
-    pub rdma: String,
-    pub addrs: String,
-    pub status: String,
-    pub dot: &'static str,
-    /// True → render an "Enable RoCE" button posting this NIC's `netdev` (the
-    /// helper detects the vendor and runs the enable).
-    pub roce: bool,
-    /// True → render an "Enable Soft-RoCE" button for this netdev.
-    pub soft_roce: bool,
-    /// True → offer the per-NIC Diagnose page (the NIC isn't actively serving
-    /// RDMA, so there is something to explain).
-    pub diagnose: bool,
-}
-
-/// Map a classified NIC to a table row, dropping interfaces that aren't RDMA
-/// candidates (virtual interfaces, IB-only netdevs). Shared with the dashboard.
-pub(crate) fn nic_row(s: NicStatus) -> Option<NicRow> {
-    let (status, dot, roce, soft_roce): (String, &'static str, bool, bool) = match &s.kind {
-        NicRdmaKind::Active => ("RDMA active".into(), "dot-green", false, false),
-        NicRdmaKind::Inactive => ("RDMA device down".into(), "dot-yellow", false, false),
-        NicRdmaKind::CapableDisabled { vendor } => (
-            format!("RoCE-capable ({vendor}), disabled"),
-            "dot-red",
-            true,
-            false,
-        ),
-        NicRdmaKind::SoftRoceable => ("no RDMA".into(), "dot-gray", false, true),
-        NicRdmaKind::Unsupported => return None,
-    };
-    // Anything that isn't actively serving RDMA has something to diagnose.
-    let diagnose = !matches!(s.kind, NicRdmaKind::Active);
-    Some(NicRow {
-        rdma: s.rdma.unwrap_or_else(|| "—".into()),
-        addrs: s
-            .addrs
-            .iter()
-            .map(ToString::to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        status,
-        dot,
-        roce,
-        soft_roce,
-        diagnose,
-        netdev: s.netdev,
-    })
 }
 
 pub struct DepRow {
@@ -92,7 +35,6 @@ pub struct DepRow {
 pub struct SettingsView {
     pub listen_addr: String,
     pub rdma_devs: Vec<RdmaRow>,
-    pub nics: Vec<NicRow>,
     pub deps: Vec<DepRow>,
     /// Missing packages apt can install here — the one-click "Install missing".
     pub installable_packages: String,
@@ -144,11 +86,6 @@ async fn gather(
     task_id: Option<i64>,
 ) -> SettingsView {
     let devs = rdma::devices(&state.helper).await;
-    let nics: Vec<NicRow> = nic::interfaces(&state.helper)
-        .await
-        .into_iter()
-        .filter_map(nic_row)
-        .collect();
     let deps: Vec<DepRow> = greendot_proto::os::REQUIRED_CLIS
         .iter()
         .map(|&cli| DepRow {
@@ -203,7 +140,6 @@ async fn gather(
                     .join(", "),
             })
             .collect(),
-        nics,
         flash,
         task_id,
         form_error,
@@ -217,125 +153,6 @@ async fn settings_page(
     page(SettingsTemplate {
         user,
         view: gather(&state, None, None, None).await,
-    })
-}
-
-// ---- Per-NIC page (Enable RoCE / Soft-RoCE) ----
-
-pub struct NicDetailView {
-    /// `None` when no such RDMA-candidate interface exists on this host.
-    pub nic: Option<NicRow>,
-    pub netdev: String,
-    pub flash: Option<String>,
-    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
-    pub task_id: Option<i64>,
-    pub form_error: Option<String>,
-}
-
-#[derive(Template)]
-#[template(path = "nic_detail.html")]
-struct NicDetailTemplate {
-    user: CurrentUser,
-    view: NicDetailView,
-}
-
-#[derive(Template)]
-#[template(path = "_nic_detail.html")]
-struct NicDetailPartial {
-    view: NicDetailView,
-}
-
-async fn gather_nic_detail(
-    helper: &crate::helper_client::HelperClient,
-    netdev: &str,
-    flash: Option<String>,
-    form_error: Option<String>,
-    task_id: Option<i64>,
-) -> NicDetailView {
-    NicDetailView {
-        nic: nic::interfaces(helper)
-            .await
-            .into_iter()
-            .filter_map(nic_row)
-            .find(|n| n.netdev == netdev),
-        netdev: netdev.to_owned(),
-        flash,
-        task_id,
-        form_error,
-    }
-}
-
-async fn nic_detail_page(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<CurrentUser>,
-    Path(netdev): Path<String>,
-) -> Response {
-    page(NicDetailTemplate {
-        user,
-        view: gather_nic_detail(&state.helper, &netdev, None, None, None).await,
-    })
-}
-
-// ---- Per-NIC Diagnose page (read-only RDMA-readiness checklist) ----
-
-pub struct NicDiagnoseView {
-    pub netdev: String,
-    /// Short status line for the header (empty when the NIC isn't found).
-    pub status: String,
-    pub dot_class: &'static str,
-    pub criteria: Vec<Criterion>,
-    pub not_found: bool,
-}
-
-#[derive(Template)]
-#[template(path = "nic_diagnose.html")]
-struct NicDiagnoseTemplate {
-    user: CurrentUser,
-    view: NicDiagnoseView,
-}
-
-/// Build the diagnose view for `netdev`: the vendor-neutral structural checklist
-/// plus whatever opaque advisory the helper supplied for this NIC.
-async fn gather_nic_diagnose(
-    helper: &crate::helper_client::HelperClient,
-    netdev: &str,
-) -> NicDiagnoseView {
-    let Some(status) = nic::interfaces(helper)
-        .await
-        .into_iter()
-        .find(|n| n.netdev == netdev)
-    else {
-        return NicDiagnoseView {
-            netdev: netdev.to_owned(),
-            status: String::new(),
-            dot_class: "dot-gray",
-            criteria: vec![],
-            not_found: true,
-        };
-    };
-    let advice = nic::rdma_advice(helper).await;
-    let criteria = nic_diagnostics(&status, advice.get(netdev));
-    // The header dot/label reuses the same per-row mapping as the table.
-    let (status_text, dot_class) = nic_row(status.clone())
-        .map(|r| (r.status, r.dot))
-        .unwrap_or((String::new(), "dot-gray"));
-    NicDiagnoseView {
-        netdev: netdev.to_owned(),
-        status: status_text,
-        dot_class,
-        criteria,
-        not_found: false,
-    }
-}
-
-async fn nic_diagnose_page(
-    State(state): State<Arc<AppState>>,
-    Extension(user): Extension<CurrentUser>,
-    Path(netdev): Path<String>,
-) -> Response {
-    page(NicDiagnoseTemplate {
-        user,
-        view: gather_nic_diagnose(&state.helper, &netdev).await,
     })
 }
 
@@ -384,127 +201,6 @@ async fn set_listen(State(state): State<Arc<AppState>>, Form(form): Form<ListenF
     page(SettingsPartial {
         view: gather(&state, flash, error, task_id).await,
     })
-}
-
-#[derive(Deserialize)]
-struct RxeForm {
-    netdev: String,
-}
-
-async fn enable_rxe(State(state): State<Arc<AppState>>, Form(form): Form<RxeForm>) -> Response {
-    let Ok(netdev) = NetdevName::new(form.netdev.trim()) else {
-        return page(NicDetailPartial {
-            view: gather_nic_detail(
-                &state.helper,
-                &form.netdev,
-                None,
-                Some(format!("invalid interface name {:?}", form.netdev)),
-                None,
-            )
-            .await,
-        });
-    };
-    // One RxeAdd task: the helper loads the rxe module and adds the link in
-    // order. The follow-up reconcile (a separate, idempotent intent) is chained
-    // on the task's success from a background wait.
-    let title = format!("enable Soft-RoCE on {netdev}");
-    let id = match crate::task_runner::begin(&state, "rxe-add", &title) {
-        Ok(id) => id,
-        Err(e) => {
-            return page(NicDetailPartial {
-                view: gather_nic_detail(
-                    &state.helper,
-                    netdev.as_str(),
-                    None,
-                    Some(format!("{e:#}")),
-                    None,
-                )
-                .await,
-            });
-        }
-    };
-    let st = state.clone();
-    let nd = netdev.clone();
-    tokio::spawn(async move {
-        let rx = st.helper.rxe_add(ops::RxeAdd { netdev: nd });
-        let added = crate::task_runner::drive(&st, id, rx)
-            .await
-            .map(|o| o.ok)
-            .unwrap_or(false);
-        st.tasks.unregister(id);
-        if added {
-            let _ = reconcile_state(&st).await;
-        }
-    });
-    page(NicDetailPartial {
-        view: gather_nic_detail(
-            &state.helper,
-            netdev.as_str(),
-            Some(format!("started {title}")),
-            None,
-            Some(id),
-        )
-        .await,
-    })
-}
-
-#[derive(Deserialize)]
-struct RoceForm {
-    netdev: String,
-}
-
-/// Turn on hardware RoCE for a NIC. The helper detects the vendor, confirms its
-/// enable parameter is present and off (a VF may be PF-gated and can't
-/// self-enable), then sets it and reloads the device — all as one task. The
-/// reload briefly drops the NIC (which can drop the caller's own session), so it
-/// runs non-blocking; exports re-realize over the now-RoCE NIC on the next
-/// reconcile pass. The web names only the interface.
-async fn set_roce(State(state): State<Arc<AppState>>, Form(form): Form<RoceForm>) -> Response {
-    let Ok(netdev) = NetdevName::new(form.netdev.trim()) else {
-        return page(NicDetailPartial {
-            view: gather_nic_detail(
-                &state.helper,
-                &form.netdev,
-                None,
-                Some(format!("invalid interface name {:?}", form.netdev)),
-                None,
-            )
-            .await,
-        });
-    };
-    let title = format!("enable RoCE on {netdev}");
-    let view = match crate::task_runner::start(
-        &state,
-        state.helper.enable_roce(ops::EnableRoce {
-            netdev: netdev.clone(),
-        }),
-        "roce",
-        &title,
-    ) {
-        Ok(id) => {
-            gather_nic_detail(
-                &state.helper,
-                netdev.as_str(),
-                Some(format!(
-                    "started {title}; reconnect if your session dropped"
-                )),
-                None,
-                Some(id),
-            )
-            .await
-        }
-        Err(e) => {
-            gather_nic_detail(
-                &state.helper,
-                netdev.as_str(),
-                None,
-                Some(format!("{e:#}")),
-                None,
-            )
-            .await
-        }
-    };
-    page(NicDetailPartial { view })
 }
 
 #[derive(Deserialize)]
@@ -572,7 +268,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn settings_page_listen_addr_and_rxe_flow() {
+    async fn settings_page_listen_addr() {
         let app = test_app();
         let (cookie, csrf) = login(&app).await;
         let auth = |mut req: HttpRequest<Body>| {
@@ -583,41 +279,13 @@ mod tests {
             req
         };
 
+        // The page renders and links out to the dedicated NIC page (the NIC
+        // table itself now lives under /nic).
         let req = auth(HttpRequest::get("/settings").body(Body::empty()).unwrap());
         let (status, _, body) = send(&app, req).await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.contains("Default target listen address"), "{body}");
-        assert!(body.contains("Network interfaces"), "{body}");
-
-        // The per-NIC page renders (a graceful not-found is fine in the test env).
-        let req = auth(
-            HttpRequest::get("/settings/nic/eth0")
-                .body(Body::empty())
-                .unwrap(),
-        );
-        let (status, _, _) = send(&app, req).await;
-        assert_eq!(status, StatusCode::OK);
-
-        // The per-NIC Diagnose page renders its checklist (the back link and
-        // title are always present); a clearly nonexistent interface takes the
-        // graceful not-found path.
-        let req = auth(
-            HttpRequest::get("/settings/nic/eth0/diagnose")
-                .body(Body::empty())
-                .unwrap(),
-        );
-        let (status, _, body) = send(&app, req).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("Diagnose"), "{body}");
-        assert!(body.contains("Back to Settings"), "{body}");
-        let req = auth(
-            HttpRequest::get("/settings/nic/zzz999/diagnose")
-                .body(Body::empty())
-                .unwrap(),
-        );
-        let (status, _, body) = send(&app, req).await;
-        assert_eq!(status, StatusCode::OK);
-        assert!(body.contains("not found"), "{body}");
+        assert!(body.contains("href=\"/nic\""), "{body}");
 
         // Valid listen address persists; invalid is rejected.
         let (_, _, body) = send(
@@ -632,19 +300,5 @@ mod tests {
         )
         .await;
         assert!(body.contains("invalid IP address"), "{body}");
-
-        // Soft-RoCE enable round-trips through the fake helper.
-        let (_, _, body) = send(&app, auth(form_post("/settings/rxe", "netdev=eth0"))).await;
-        assert!(body.contains("started enable Soft-RoCE on eth0"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/settings/rxe", "netdev=bad%2Fname"))).await;
-        assert!(body.contains("invalid interface name"), "{body}");
-
-        // Enable-RoCE: the helper runs the whole vendor-specific flow as one
-        // task (the fake helper reports success); an invalid interface name is
-        // rejected before the helper is asked.
-        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "netdev=eth0"))).await;
-        assert!(body.contains("started enable RoCE on eth0"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/settings/roce", "netdev=bad%2Fname"))).await;
-        assert!(body.contains("invalid interface name"), "{body}");
     }
 }
