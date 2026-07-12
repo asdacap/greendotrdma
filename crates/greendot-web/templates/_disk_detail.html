@@ -37,7 +37,9 @@
   </div>
 
   <h2>Temperature</h2>
-  <div class="chartcard">{{ view.temp_svg|safe }}</div>
+  <div class="chartgrid">
+    <div class="chartcard">{{ view.temp_svg|safe }}</div>
+  </div>
 
   <h2>Partitions</h2>
   {% if disk.partitions.is_empty() %}
