@@ -40,18 +40,16 @@
   <p class="muted small">Network configuration is unavailable (the helper couldn't read <code>ip</code>).</p>
   {% endif %}
 
-  {% if let Some(temp_svg) = view.temp_svg %}
-  <h2>Traffic &amp; temperature</h2>
-  <div class="chartgrid">
-    <div class="chartcard"><div class="chart-title">Traffic</div>{{ view.traffic_svg|safe }}</div>
-    <div class="chartcard"><div class="chart-title">Temperature</div>{{ temp_svg|safe }}</div>
-  </div>
-  {% else %}
   <h2>Traffic</h2>
   <div class="chartgrid">
-    <div class="chartcard"><div class="chart-title">Traffic</div>{{ view.traffic_svg|safe }}</div>
+    <div class="chartcard"><div class="chart-title">Ethernet</div>{{ view.traffic_svg|safe }}</div>
+    {% if let Some(roce_svg) = view.roce_svg %}
+    <div class="chartcard"><div class="chart-title">RoCE / RDMA</div>{{ roce_svg|safe }}</div>
+    {% endif %}
+    {% if let Some(temp_svg) = view.temp_svg %}
+    <div class="chartcard"><div class="chart-title">Temperature</div>{{ temp_svg|safe }}</div>
+    {% endif %}
   </div>
-  {% endif %}
 
   {% if nic.roce %}
   <h2>Enable RoCE</h2>

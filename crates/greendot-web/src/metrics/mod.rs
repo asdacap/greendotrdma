@@ -73,13 +73,20 @@ impl Metrics {
     /// Turns a raw monotonic counter reading into a rate sample; the first
     /// reading (or a counter reset) yields nothing.
     pub fn push_counter(&self, series: &str, ts: i64, value: u64) {
+        self.push_counter_scaled(series, ts, value, 1.0);
+    }
+
+    /// Like [`push_counter`](Self::push_counter) but multiplies the per-second
+    /// rate by `scale` — for counters whose delta needs a unit conversion (e.g.
+    /// disk `io_ticks` in ms/s → busy-`%util` via ×0.1).
+    pub fn push_counter_scaled(&self, series: &str, ts: i64, value: u64, scale: f64) {
         let prev = self
             .raw
             .lock()
             .unwrap()
             .insert(series.to_owned(), (ts, value));
         if let Some(rate) = rate(prev, (ts, value)) {
-            self.push(series, ts, rate);
+            self.push(series, ts, rate * scale);
         }
     }
 
@@ -199,12 +206,13 @@ pub fn render_prometheus(samples: &[PromSample]) -> String {
 }
 
 /// How a chart's peak value is labelled. Series are rates/sizes (bytes),
-/// temperatures (°C), or saturation (%).
+/// temperatures (°C), saturation (%), or a bare count (IOPS, queue depth).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChartUnit {
     Bytes,
     Celsius,
     Percent,
+    Count,
 }
 
 impl ChartUnit {
@@ -225,6 +233,8 @@ impl ChartUnit {
             ChartUnit::Bytes => crate::fmt::human_bytes(max as u64),
             ChartUnit::Celsius => format!("{max:.0} °C"),
             ChartUnit::Percent => format!("{max:.0}%"),
+            ChartUnit::Count if max >= 1000.0 => format!("{:.1}k", max / 1000.0),
+            ChartUnit::Count => format!("{max:.0}"),
         }
     }
 }

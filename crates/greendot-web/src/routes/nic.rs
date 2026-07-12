@@ -148,8 +148,11 @@ pub struct NicDetailView {
     /// The interface's network configuration, when the helper could read it.
     pub net: Option<NicNetwork>,
     pub netdev: String,
-    /// Live traffic chart (received up / transmitted down; inline SVG).
+    /// Live Ethernet (netdev) traffic chart (received up / transmitted down).
     pub traffic_svg: String,
+    /// The associated RDMA device's RoCE traffic (rx up / tx down). `None` when
+    /// the NIC has no RDMA device or that device has no samples yet.
+    pub roce_svg: Option<String>,
     /// Rendered only when the NIC exposes a temperature sensor.
     pub temp_svg: Option<String>,
     pub flash: Option<String>,
@@ -186,6 +189,18 @@ async fn gather_nic_detail(
     let net = nic::networks(&state.helper).await.remove(netdev);
     let series = |suffix: &str| state.metrics.ring_series(&format!("nic:{netdev}:{suffix}"));
     let temp = series("temp_c");
+    // RoCE traffic lives under the associated RDMA device (rdma:<dev>), separate
+    // from the kernel netdev counters above; skip it when there's no device.
+    let roce_svg = nic
+        .as_ref()
+        .map(|n| n.rdma.as_str())
+        .filter(|dev| *dev != "—")
+        .and_then(|dev| {
+            let rx = state.metrics.ring_series(&format!("rdma:{dev}:rx_bps"));
+            let tx = state.metrics.ring_series(&format!("rdma:{dev}:tx_bps"));
+            (!rx.is_empty() || !tx.is_empty())
+                .then(|| mirror_chart_svg(&rx, &tx, "Rx", "Tx", 600, 120, ChartUnit::Bytes))
+        });
     NicDetailView {
         traffic_svg: mirror_chart_svg(
             &series("rx_bps"),
@@ -196,6 +211,7 @@ async fn gather_nic_detail(
             120,
             ChartUnit::Bytes,
         ),
+        roce_svg,
         temp_svg: (!temp.is_empty()).then(|| chart_svg(&temp, 600, 120, ChartUnit::Celsius)),
         nic,
         net,

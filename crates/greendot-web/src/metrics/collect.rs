@@ -6,13 +6,33 @@ use super::Metrics;
 use crate::routes::AppState;
 use std::path::Path;
 
-/// `/sys/block/<dev>/stat`: (read bytes, written bytes). Sector counts are
-/// fields 2 and 6 (0-based), always in 512-byte units.
-pub fn parse_block_stat(stat: &str) -> Option<(u64, u64)> {
+/// The `/sys/block/<dev>/stat` fields we chart. All are monotonic counters
+/// except `in_flight`, which is an instantaneous gauge.
+pub struct BlockStat {
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub read_ios: u64,
+    pub write_ios: u64,
+    /// I/Os currently in progress — the live queue depth.
+    pub in_flight: u64,
+    /// Cumulative ms the device has been busy; its ms/s rate ×0.1 is %util.
+    pub io_ticks: u64,
+}
+
+/// Parses `/sys/block/<dev>/stat`. Field order (0-based): read I/Os (0),
+/// read sectors (2), write I/Os (4), write sectors (6), in-flight (8),
+/// io_ticks ms (9); sectors are always 512-byte units.
+pub fn parse_block_stat(stat: &str) -> Option<BlockStat> {
     let fields: Vec<&str> = stat.split_whitespace().collect();
-    let read: u64 = fields.get(2)?.parse().ok()?;
-    let written: u64 = fields.get(6)?.parse().ok()?;
-    Some((read * 512, written * 512))
+    let field = |i: usize| fields.get(i)?.parse::<u64>().ok();
+    Some(BlockStat {
+        read_ios: field(0)?,
+        read_bytes: field(2)? * 512,
+        write_ios: field(4)?,
+        write_bytes: field(6)? * 512,
+        in_flight: field(8)?,
+        io_ticks: field(9)?,
+    })
 }
 
 /// RDMA port data counters are in 4-byte lane words.
@@ -39,9 +59,14 @@ fn collect_block(metrics: &Metrics, root: &Path, ts: i64) {
         let Ok(stat) = std::fs::read_to_string(root.join(&dev).join("stat")) else {
             continue;
         };
-        if let Some((read, written)) = parse_block_stat(&stat) {
-            metrics.push_counter(&format!("disk:{dev}:read_bps"), ts, read);
-            metrics.push_counter(&format!("disk:{dev}:write_bps"), ts, written);
+        if let Some(s) = parse_block_stat(&stat) {
+            metrics.push_counter(&format!("disk:{dev}:read_bps"), ts, s.read_bytes);
+            metrics.push_counter(&format!("disk:{dev}:write_bps"), ts, s.write_bytes);
+            metrics.push_counter(&format!("disk:{dev}:read_iops"), ts, s.read_ios);
+            metrics.push_counter(&format!("disk:{dev}:write_iops"), ts, s.write_ios);
+            // in_flight is a gauge; io_ticks (ms busy) → %util via ms/s ×0.1.
+            metrics.push(&format!("disk:{dev}:queue_depth"), ts, s.in_flight as f64);
+            metrics.push_counter_scaled(&format!("disk:{dev}:util_percent"), ts, s.io_ticks, 0.1);
         }
     }
 }
@@ -73,14 +98,16 @@ fn kstat_field(kstat: &str, name: &str) -> Option<u64> {
     })
 }
 
-/// Sums the `nread`/`nwritten` byte counters of every
-/// `/proc/spl/kstat/zfs/<pool>/objset-*` dataset kstat into per-pool
-/// `pool:<name>:read_bps`/`write_bps` counters. A destroyed dataset makes the
-/// sum dip, which push_counter treats as a reset and skips one sample.
+/// Sums the byte (`nread`/`nwritten`) and op (`reads`/`writes`) counters of
+/// every `/proc/spl/kstat/zfs/<pool>/objset-*` dataset kstat into per-pool
+/// `pool:<name>:read_bps`/`write_bps` and `read_iops`/`write_iops` counters. A
+/// destroyed dataset makes a sum dip, which push_counter treats as a reset and
+/// skips one sample.
 fn collect_pool_io(metrics: &Metrics, root: &Path, ts: i64) {
     for pool in read_dir_names(root) {
         let dir = root.join(&pool);
-        let (mut read, mut written, mut seen) = (0u64, 0u64, false);
+        let (mut read, mut written, mut read_ops, mut write_ops, mut seen) =
+            (0u64, 0u64, 0u64, 0u64, false);
         for objset in read_dir_names(&dir) {
             if !objset.starts_with("objset-") {
                 continue;
@@ -91,12 +118,16 @@ fn collect_pool_io(metrics: &Metrics, root: &Path, ts: i64) {
             {
                 read += r;
                 written += w;
+                read_ops += kstat_field(&raw, "reads").unwrap_or(0);
+                write_ops += kstat_field(&raw, "writes").unwrap_or(0);
                 seen = true;
             }
         }
         if seen {
             metrics.push_counter(&format!("pool:{pool}:read_bps"), ts, read);
             metrics.push_counter(&format!("pool:{pool}:write_bps"), ts, written);
+            metrics.push_counter(&format!("pool:{pool}:read_iops"), ts, read_ops);
+            metrics.push_counter(&format!("pool:{pool}:write_iops"), ts, write_ops);
         }
     }
 }
@@ -246,15 +277,26 @@ mod tests {
     use super::*;
     use rstest::rstest;
 
-    #[rstest]
-    #[case::real_stat(
-        "53055 12109 4731234 13284 41571 53354 2839906 110806 0 64468 138755 0 0 0 0 5374 14664",
-        Some((4731234 * 512, 2839906 * 512))
-    )]
-    #[case::short("1 2", None)]
-    #[case::garbage("a b c d e f g h", None)]
-    fn block_stat_parsing(#[case] stat: &str, #[case] expected: Option<(u64, u64)>) {
-        assert_eq!(parse_block_stat(stat), expected);
+    #[test]
+    fn block_stat_parses_charted_fields_and_rejects_bad_input() {
+        let s = parse_block_stat(
+            "53055 12109 4731234 13284 41571 53354 2839906 110806 0 64468 138755 0 0 0 0 5374 14664",
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                s.read_bytes,
+                s.write_bytes,
+                s.read_ios,
+                s.write_ios,
+                s.in_flight,
+                s.io_ticks,
+            ),
+            (4731234 * 512, 2839906 * 512, 53055, 41571, 0, 64468)
+        );
+        // Too few fields, or a non-numeric field before io_ticks → nothing.
+        assert!(parse_block_stat("1 2").is_none());
+        assert!(parse_block_stat("a b c d e f g h i j").is_none());
     }
 
     #[test]
@@ -270,14 +312,16 @@ mod tests {
         std::fs::write(counters.join("port_xmit_data"), "200\n").unwrap();
         let block = tmp.join("block/sda");
         std::fs::create_dir_all(&block).unwrap();
-        std::fs::write(block.join("stat"), "0 0 100 0 0 0 200 0 0 0 0\n").unwrap();
+        // Fields: read_ios(0) .. read_sectors(2) .. write_ios(4) .. write_sectors(6)
+        // .. in_flight(8) io_ticks(9).
+        std::fs::write(block.join("stat"), "10 0 100 0 5 0 200 0 3 1000 0\n").unwrap();
 
         let metrics = Metrics::in_memory().unwrap();
         // Two passes so rates exist.
         collect_rdma(&metrics, &tmp.join("ib"), 100);
         collect_block(&metrics, &tmp.join("block"), 100);
         std::fs::write(counters.join("port_rcv_data"), "350\n").unwrap();
-        std::fs::write(block.join("stat"), "0 0 1124 0 0 0 200 0 0 0 0\n").unwrap();
+        std::fs::write(block.join("stat"), "30 0 1124 0 15 0 200 0 7 1500 0\n").unwrap();
         collect_rdma(&metrics, &tmp.join("ib"), 105);
         collect_block(&metrics, &tmp.join("block"), 105);
 
@@ -287,6 +331,18 @@ mod tests {
             vec![(105, (1024.0 * 512.0) / 5.0)]
         );
         assert_eq!(metrics.ring_series("disk:sda:write_bps"), vec![(105, 0.0)]);
+        // read/write IOPS are op-count rates; in_flight is a per-pass gauge;
+        // io_ticks (1000→1500 ms over 5s = 100 ms/s) ×0.1 = 10 %util.
+        assert_eq!(metrics.ring_series("disk:sda:read_iops"), vec![(105, 4.0)]);
+        assert_eq!(metrics.ring_series("disk:sda:write_iops"), vec![(105, 2.0)]);
+        assert_eq!(
+            metrics.ring_series("disk:sda:queue_depth"),
+            vec![(100, 3.0), (105, 7.0)]
+        );
+        assert_eq!(
+            metrics.ring_series("disk:sda:util_percent"),
+            vec![(105, 10.0)]
+        );
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
@@ -328,9 +384,21 @@ mod tests {
             metrics.ring_series("pool:tank:write_bps"),
             vec![(105, 20.0)]
         );
+        // Op counters are constant across passes in this fixture → 0/s rate,
+        // but the series are still produced.
+        assert_eq!(metrics.ring_series("pool:tank:read_iops"), vec![(105, 0.0)]);
+        assert_eq!(
+            metrics.ring_series("pool:tank:write_iops"),
+            vec![(105, 0.0)]
+        );
         assert_eq!(
             metrics.series_names(),
-            vec!["pool:tank:read_bps", "pool:tank:write_bps"],
+            vec![
+                "pool:tank:read_bps",
+                "pool:tank:read_iops",
+                "pool:tank:write_bps",
+                "pool:tank:write_iops",
+            ],
             "no series from arcstats or the state file"
         );
         assert_eq!(kstat_field("name type data\nnread 4 junk\n", "nread"), None);
