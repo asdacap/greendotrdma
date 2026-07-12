@@ -21,11 +21,128 @@ pub struct ChartCard {
     pub svg: String,
 }
 
+/// One resource-type section (Disks / RDMA links / Pools) of the page.
+pub struct ChartGroup {
+    pub heading: &'static str,
+    pub cards: Vec<ChartCard>,
+}
+
+/// A time-range link; `href` preserves the active metric filter.
+pub struct RangeLink {
+    pub label: &'static str,
+    pub active: bool,
+    pub href: String,
+}
+
+/// A metric-type filter chip; clicking toggles it in/out of the URL.
+pub struct MetricChip {
+    pub label: &'static str,
+    pub active: bool,
+    pub href: String,
+}
+
 pub struct ChartsView {
     pub live: bool,
-    /// (label, is the active range)
-    pub ranges: Vec<(&'static str, bool)>,
-    pub cards: Vec<ChartCard>,
+    pub ranges: Vec<RangeLink>,
+    pub chips: Vec<MetricChip>,
+    pub groups: Vec<ChartGroup>,
+    /// The current URL, so the live htmx poll re-requests the same filtered view.
+    pub refresh_url: String,
+}
+
+/// Coarse metric class the user can filter by. Several series suffixes map to
+/// one kind (rx/tx → Network).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MetricKind {
+    Read,
+    Write,
+    Temp,
+    Network,
+    Util,
+}
+
+const CHIP_ORDER: [MetricKind; 5] = [
+    MetricKind::Read,
+    MetricKind::Write,
+    MetricKind::Temp,
+    MetricKind::Network,
+    MetricKind::Util,
+];
+
+/// Sections in display order: (series category, heading).
+const CATEGORIES: [(&str, &str); 3] =
+    [("disk", "Disks"), ("rdma", "RDMA links"), ("pool", "Pools")];
+
+impl MetricKind {
+    fn slug(self) -> &'static str {
+        match self {
+            MetricKind::Read => "read",
+            MetricKind::Write => "write",
+            MetricKind::Temp => "temp",
+            MetricKind::Network => "network",
+            MetricKind::Util => "util",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            MetricKind::Read => "Read",
+            MetricKind::Write => "Write",
+            MetricKind::Temp => "Temperature",
+            MetricKind::Network => "Network",
+            MetricKind::Util => "Utilization",
+        }
+    }
+
+    fn from_slug(s: &str) -> Option<MetricKind> {
+        CHIP_ORDER.into_iter().find(|k| k.slug() == s)
+    }
+
+    /// Classifies a series' metric suffix (`read_bps`, `temp_c`, …).
+    fn of_suffix(suffix: &str) -> Option<MetricKind> {
+        match suffix {
+            "read_bps" => Some(MetricKind::Read),
+            "write_bps" => Some(MetricKind::Write),
+            "temp_c" => Some(MetricKind::Temp),
+            "rx_bps" | "tx_bps" => Some(MetricKind::Network),
+            "used_percent" => Some(MetricKind::Util),
+            _ => None,
+        }
+    }
+}
+
+/// Card-title suffix and per-category display order for a series suffix.
+fn suffix_label(suffix: &str) -> (&'static str, u8) {
+    match suffix {
+        "read_bps" => ("read", 0),
+        "rx_bps" => ("rx", 0),
+        "write_bps" => ("write", 1),
+        "tx_bps" => ("tx", 1),
+        "temp_c" => ("temperature", 2),
+        "used_percent" => ("used %", 2),
+        _ => ("?", 9),
+    }
+}
+
+/// `/charts` URL for the given range and active filter set, in canonical order.
+fn charts_url(range: &str, kinds: &[MetricKind]) -> String {
+    let mut parts = Vec::new();
+    if range != "live" {
+        parts.push(format!("range={range}"));
+    }
+    let slugs: Vec<&str> = CHIP_ORDER
+        .iter()
+        .filter(|k| kinds.contains(k))
+        .map(|k| k.slug())
+        .collect();
+    if !slugs.is_empty() {
+        parts.push(format!("metric={}", slugs.join(",")));
+    }
+    if parts.is_empty() {
+        "/charts".to_owned()
+    } else {
+        format!("/charts?{}", parts.join("&"))
+    }
 }
 
 #[derive(Template)]
@@ -39,6 +156,8 @@ struct ChartsTemplate {
 pub struct RangeQuery {
     #[serde(default)]
     range: String,
+    #[serde(default)]
+    metric: String,
 }
 
 async fn charts_page(
@@ -54,33 +173,88 @@ async fn charts_page(
         "90d" => ("90d", Some(now - 90 * 86400)),
         _ => ("live", None),
     };
-    let cards = state
-        .metrics
-        .series_names()
+    let active: Vec<MetricKind> = query
+        .metric
+        .split(',')
+        .filter_map(MetricKind::from_slug)
+        .collect();
+
+    let names = state.metrics.series_names();
+    let groups = CATEGORIES
         .into_iter()
-        .map(|series| {
-            let points = match since {
-                None => state.metrics.ring_series(&series),
-                Some(since) => state
-                    .metrics
-                    .history(&series, since, now)
-                    .unwrap_or_default(),
-            };
-            ChartCard {
-                svg: chart_svg(&points, 600, 120, ChartUnit::for_series(&series)),
-                title: series,
-            }
+        .filter_map(|(cat, heading)| {
+            // (target, suffix) for series in this category passing the filter.
+            let mut entries: Vec<(&str, &str)> = names
+                .iter()
+                .filter_map(|s| match s.split(':').collect::<Vec<_>>()[..] {
+                    [c, target, suffix] if c == cat => {
+                        let kind = MetricKind::of_suffix(suffix)?;
+                        (active.is_empty() || active.contains(&kind)).then_some((target, suffix))
+                    }
+                    _ => None,
+                })
+                .collect();
+            entries.sort_by(|a, b| {
+                a.0.cmp(b.0)
+                    .then(suffix_label(a.1).1.cmp(&suffix_label(b.1).1))
+            });
+            let cards: Vec<ChartCard> = entries
+                .into_iter()
+                .map(|(target, suffix)| {
+                    let series = format!("{cat}:{target}:{suffix}");
+                    let points = match since {
+                        None => state.metrics.ring_series(&series),
+                        Some(since) => state
+                            .metrics
+                            .history(&series, since, now)
+                            .unwrap_or_default(),
+                    };
+                    ChartCard {
+                        svg: chart_svg(&points, 600, 120, ChartUnit::for_series(&series)),
+                        title: format!("{target} · {}", suffix_label(suffix).0),
+                    }
+                })
+                .collect();
+            (!cards.is_empty()).then_some(ChartGroup { heading, cards })
         })
         .collect();
+
     let ranges = ["live", "1h", "24h", "7d", "90d"]
-        .map(|r| (r, r == range))
-        .to_vec();
+        .into_iter()
+        .map(|r| RangeLink {
+            label: r,
+            active: r == range,
+            href: charts_url(r, &active),
+        })
+        .collect();
+    // "All" clears the filter; each metric chip toggles itself.
+    let chips = std::iter::once(MetricChip {
+        label: "All",
+        active: active.is_empty(),
+        href: charts_url(range, &[]),
+    })
+    .chain(CHIP_ORDER.into_iter().map(|k| {
+        let on = active.contains(&k);
+        let mut next: Vec<MetricKind> = active.iter().copied().filter(|&x| x != k).collect();
+        if !on {
+            next.push(k);
+        }
+        MetricChip {
+            label: k.label(),
+            active: on,
+            href: charts_url(range, &next),
+        }
+    }))
+    .collect();
+
     page(ChartsTemplate {
         user,
         view: ChartsView {
             live: range == "live",
             ranges,
-            cards,
+            chips,
+            groups,
+            refresh_url: charts_url(range, &active),
         },
     })
 }
@@ -164,9 +338,11 @@ pub async fn prometheus(State(state): State<Arc<AppState>>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    use super::{CHIP_ORDER, MetricKind, charts_url};
     use crate::routes::testutil::{login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
+    use rstest::rstest;
 
     #[tokio::test]
     async fn charts_page_and_unauthenticated_prometheus_endpoint() {
@@ -183,16 +359,54 @@ mod tests {
                 .starts_with("text/plain")
         );
 
-        // /charts is protected and renders for each known range.
+        // /charts is protected and renders for each range and with a filter.
         let (cookie, _) = login(&app).await;
-        for range in ["", "?range=1h", "?range=7d"] {
-            let req = HttpRequest::get(format!("/charts{range}"))
+        for query in ["", "?range=1h", "?range=7d", "?metric=read,write"] {
+            let req = HttpRequest::get(format!("/charts{query}"))
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .unwrap();
             let (status, _, body) = send(&app, req).await;
-            assert_eq!(status, StatusCode::OK, "{range}");
-            assert!(body.contains("Charts"), "{range}: {body}");
+            assert_eq!(status, StatusCode::OK, "{query}");
+            assert!(body.contains("Charts"), "{query}: {body}");
+            // The metric filter chips always render.
+            assert!(body.contains(r#"class="chip"#), "{query}: {body}");
         }
+    }
+
+    #[rstest]
+    #[case::read("disk:sda:read_bps", Some(MetricKind::Read))]
+    #[case::write("pool:tank:write_bps", Some(MetricKind::Write))]
+    #[case::temp("disk:nvme0n1:temp_c", Some(MetricKind::Temp))]
+    #[case::rx("rdma:rxe0:rx_bps", Some(MetricKind::Network))]
+    #[case::tx("rdma:rxe0:tx_bps", Some(MetricKind::Network))]
+    #[case::util("pool:tank:used_percent", Some(MetricKind::Util))]
+    #[case::unknown("pool:tank:mystery", None)]
+    fn suffix_classifies_into_a_filter_kind(
+        #[case] series: &str,
+        #[case] want: Option<MetricKind>,
+    ) {
+        let suffix = series.rsplit(':').next().unwrap();
+        assert_eq!(MetricKind::of_suffix(suffix), want);
+    }
+
+    #[test]
+    fn urls_carry_range_and_filter_and_chips_round_trip() {
+        // Live + no filter is the bare path; range and metric append in order.
+        assert_eq!(charts_url("live", &[]), "/charts");
+        assert_eq!(
+            charts_url("1h", &[MetricKind::Read]),
+            "/charts?range=1h&metric=read"
+        );
+        // Slugs are emitted in canonical CHIP_ORDER regardless of input order.
+        assert_eq!(
+            charts_url("live", &[MetricKind::Util, MetricKind::Read]),
+            "/charts?metric=read,util"
+        );
+        // Every chip slug round-trips through from_slug.
+        for k in CHIP_ORDER {
+            assert_eq!(MetricKind::from_slug(k.slug()), Some(k));
+        }
+        assert_eq!(MetricKind::from_slug("nope"), None);
     }
 }

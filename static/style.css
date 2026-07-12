@@ -493,9 +493,7 @@ form.inline {
 
 .chartcard {
   padding: 12px 14px 8px;
-  background:
-    repeating-linear-gradient(0deg, transparent, transparent 23px, rgba(255, 255, 255, .025) 24px),
-    var(--panel);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 9px;
 }
@@ -507,7 +505,7 @@ form.inline {
   text-transform: uppercase;
 }
 
-svg.chart { width: 100%; height: auto; margin-top: 4px; }
+svg.chart { width: 100%; height: auto; margin-top: 4px; overflow: visible; }
 
 svg.chart polyline {
   stroke: var(--accent);
@@ -518,6 +516,31 @@ svg.chart polyline {
 }
 
 .chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }
+.chart-tick-y { text-anchor: end; }
+svg.chart line.chart-grid { stroke: var(--border); stroke-width: 1; }
+svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
+
+/* Charts page: resource-type section headers and the metric filter chips. */
+.chart-section {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 22px 0 2px;
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
+.chip {
+  font-size: 12px;
+  padding: 2px 11px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--muted);
+  text-decoration: none;
+}
+.chip:hover { border-color: var(--accent); color: var(--text); }
+.chip.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
 
 .chart-title {
   font-family: var(--mono);

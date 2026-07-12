@@ -229,7 +229,18 @@ impl ChartUnit {
     }
 }
 
-/// A simple line chart as inline SVG; pure string building, no JS.
+/// A `HH:MM` (or `MM-DD` for spans over two days) label for a unix timestamp.
+fn axis_time(ts: i64, span: i64) -> String {
+    let dt = chrono::DateTime::from_timestamp(ts, 0).unwrap_or_default();
+    if span > 2 * 86400 {
+        dt.format("%m-%d").to_string()
+    } else {
+        dt.format("%H:%M").to_string()
+    }
+}
+
+/// A line chart as inline SVG with a vertical value scale (0 / mid / max) and a
+/// horizontal time axis; pure string building, no JS.
 pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32, unit: ChartUnit) -> String {
     if points.len() < 2 {
         return format!(
@@ -237,26 +248,57 @@ pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32, unit: ChartUnit
             height / 2
         );
     }
+    // Inset a plot rect from the viewBox: left gutter for y-tick labels, bottom
+    // gutter for the time axis.
+    const PAD_L: f64 = 54.0;
+    const PAD_R: f64 = 6.0;
+    const PAD_T: f64 = 8.0;
+    const PAD_B: f64 = 16.0;
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (px0, px1) = (PAD_L, w - PAD_R);
+    let py1 = h - PAD_B;
+    let (plot_w, plot_h) = (px1 - px0, py1 - PAD_T);
+
     let (t0, t1) = (points[0].0, points[points.len() - 1].0);
     let max = points
         .iter()
         .map(|(_, v)| *v)
         .fold(f64::MIN, f64::max)
         .max(1e-9);
-    let span = (t1 - t0).max(1) as f64;
+    let span = (t1 - t0).max(1);
     let coords: Vec<String> = points
         .iter()
         .map(|(t, v)| {
-            let x = (*t - t0) as f64 / span * f64::from(width);
-            let y = f64::from(height) - (v / max * f64::from(height - 14)) - 2.0;
+            let x = px0 + (*t - t0) as f64 / span as f64 * plot_w;
+            let y = py1 - (v / max) * plot_h;
             format!("{x:.1},{y:.1}")
         })
         .collect();
-    format!(
-        r#"<svg class="chart" viewBox="0 0 {width} {height}"><polyline fill="none" points="{}"/><text x="4" y="12" class="chart-label">max {}</text></svg>"#,
+
+    let mut svg = format!(r#"<svg class="chart" viewBox="0 0 {width} {height}">"#);
+    // Y gridlines + right-aligned value ticks at 0, max/2, max.
+    for frac in [0.0_f64, 0.5, 1.0] {
+        let y = py1 - frac * plot_h;
+        svg.push_str(&format!(
+            r#"<line class="chart-grid" x1="{px0:.1}" y1="{y:.1}" x2="{px1:.1}" y2="{y:.1}"/><text class="chart-label chart-tick-y" x="{:.1}" y="{:.1}">{}</text>"#,
+            px0 - 4.0,
+            y + 3.0,
+            unit.label(max * frac),
+        ));
+    }
+    // X baseline with start/end time labels.
+    svg.push_str(&format!(
+        r#"<line class="chart-axis" x1="{px0:.1}" y1="{py1:.1}" x2="{px1:.1}" y2="{py1:.1}"/><text class="chart-label" x="{px0:.1}" y="{:.1}">{}</text><text class="chart-label" x="{px1:.1}" y="{:.1}" text-anchor="end">{}</text>"#,
+        h - 4.0,
+        axis_time(t0, span),
+        h - 4.0,
+        axis_time(t1, span),
+    ));
+    svg.push_str(&format!(
+        r#"<polyline fill="none" points="{}"/></svg>"#,
         coords.join(" "),
-        unit.label(max),
-    )
+    ));
+    svg
 }
 
 #[cfg(test)]
@@ -336,11 +378,15 @@ mod tests {
 
         let svg = chart_svg(&ring, 600, 120, ChartUnit::Bytes);
         assert!(svg.contains("<polyline"), "{svg}");
-        assert!(svg.contains("max 1000 B"), "{svg}");
+        // The value scale labels its top tick with the peak; axes are drawn.
+        assert!(svg.contains(">1000 B</text>"), "{svg}");
+        assert!(svg.contains("chart-grid"), "{svg}");
+        assert!(svg.contains("chart-axis"), "{svg}");
         assert!(chart_svg(&[], 600, 120, ChartUnit::Bytes).contains("no data yet"));
-        // Non-byte units label the peak appropriately.
+        // Non-byte units label the peak tick appropriately.
         assert!(
-            chart_svg(&[(0, 30.0), (5, 38.0)], 600, 120, ChartUnit::Celsius).contains("max 38 °C")
+            chart_svg(&[(0, 30.0), (5, 38.0)], 600, 120, ChartUnit::Celsius)
+                .contains(">38 °C</text>")
         );
         assert_eq!(ChartUnit::for_series("disk:sda:temp_c"), ChartUnit::Celsius);
         assert_eq!(
