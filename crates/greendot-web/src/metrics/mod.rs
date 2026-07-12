@@ -301,6 +301,101 @@ pub fn chart_svg(points: &[(i64, f64)], width: u32, height: u32, unit: ChartUnit
     svg
 }
 
+/// A back-to-back ("mirror") chart: `up` is drawn upward from a central zero
+/// baseline and `down` downward, both on one shared value scale so the two
+/// directions are directly comparable. Folds a read/write (or rx/tx) pair into
+/// a single chart; either series may be empty.
+pub fn mirror_chart_svg(
+    up: &[(i64, f64)],
+    down: &[(i64, f64)],
+    up_label: &str,
+    down_label: &str,
+    width: u32,
+    height: u32,
+    unit: ChartUnit,
+) -> String {
+    if up.len() < 2 && down.len() < 2 {
+        return format!(
+            r#"<svg class="chart" viewBox="0 0 {width} {height}"><text x="4" y="{}" class="chart-label">no data yet</text></svg>"#,
+            height / 2
+        );
+    }
+    const PAD_L: f64 = 54.0;
+    const PAD_R: f64 = 6.0;
+    const PAD_T: f64 = 8.0;
+    const PAD_B: f64 = 16.0;
+    let (w, h) = (f64::from(width), f64::from(height));
+    let (px0, px1) = (PAD_L, w - PAD_R);
+    let py1 = h - PAD_B;
+    let plot_w = px1 - px0;
+    // Zero sits on the centre line; each direction gets half the plot height.
+    let mid = PAD_T + (py1 - PAD_T) / 2.0;
+    let half_h = mid - PAD_T;
+
+    // Shared time span and peak across both directions.
+    let all = || up.iter().chain(down.iter());
+    let t0 = all().map(|(t, _)| *t).min().unwrap();
+    let t1 = all().map(|(t, _)| *t).max().unwrap();
+    let span = (t1 - t0).max(1);
+    let max = all().map(|(_, v)| *v).fold(f64::MIN, f64::max).max(1e-9);
+
+    // Point string for one direction; `sign` is +1 (up) or -1 (down).
+    let coords = |pts: &[(i64, f64)], sign: f64| -> String {
+        pts.iter()
+            .map(|(t, v)| {
+                let x = px0 + (*t - t0) as f64 / span as f64 * plot_w;
+                let y = mid - sign * (v / max) * half_h;
+                format!("{x:.1},{y:.1}")
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let mut svg = format!(r#"<svg class="chart" viewBox="0 0 {width} {height}">"#);
+    // Value ticks: peak at top and bottom, zero on the centre axis.
+    for (y, val, cls) in [
+        (PAD_T, max, "chart-grid"),
+        (mid, 0.0, "chart-axis"),
+        (py1, max, "chart-grid"),
+    ] {
+        svg.push_str(&format!(
+            r#"<line class="{cls}" x1="{px0:.1}" y1="{y:.1}" x2="{px1:.1}" y2="{y:.1}"/><text class="chart-label chart-tick-y" x="{:.1}" y="{:.1}">{}</text>"#,
+            px0 - 4.0,
+            y + 3.0,
+            unit.label(val),
+        ));
+    }
+    // Start/end time labels under the plot.
+    svg.push_str(&format!(
+        r#"<text class="chart-label" x="{px0:.1}" y="{:.1}">{}</text><text class="chart-label" x="{px1:.1}" y="{:.1}" text-anchor="end">{}</text>"#,
+        h - 4.0,
+        axis_time(t0, span),
+        h - 4.0,
+        axis_time(t1, span),
+    ));
+    if up.len() >= 2 {
+        svg.push_str(&format!(
+            r#"<polyline class="chart-up" fill="none" points="{}"/>"#,
+            coords(up, 1.0),
+        ));
+    }
+    if down.len() >= 2 {
+        svg.push_str(&format!(
+            r#"<polyline class="chart-down" fill="none" points="{}"/>"#,
+            coords(down, -1.0),
+        ));
+    }
+    // Direction legend, coloured to match each polyline.
+    svg.push_str(&format!(
+        r#"<text class="chart-up-label" x="{:.1}" y="{:.1}">▲ {up_label}</text><text class="chart-down-label" x="{:.1}" y="{:.1}">▼ {down_label}</text></svg>"#,
+        px0 + 4.0,
+        PAD_T + 10.0,
+        px0 + 4.0,
+        py1 - 4.0,
+    ));
+    svg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +489,31 @@ mod tests {
             ChartUnit::Percent
         );
         assert_eq!(ChartUnit::for_series("disk:sda:read_bps"), ChartUnit::Bytes);
+    }
+
+    #[test]
+    fn mirror_chart_folds_two_directions_and_shares_a_scale() {
+        // Write peaks higher than read: both halves scale to the shared 4000 peak.
+        let read = [(0, 1000.0), (5, 2000.0)];
+        let write = [(0, 4000.0), (5, 3000.0)];
+        let svg = mirror_chart_svg(&read, &write, "Read", "Write", 600, 120, ChartUnit::Bytes);
+        // One polyline per direction, each with its own class, plus the legend.
+        assert!(svg.contains(r#"class="chart-up""#), "{svg}");
+        assert!(svg.contains(r#"class="chart-down""#), "{svg}");
+        assert!(svg.contains("▲ Read"), "{svg}");
+        assert!(svg.contains("▼ Write"), "{svg}");
+        // Shared peak tick (top and bottom) plus a zero centre axis.
+        assert!(svg.contains(">3.9 KiB</text>"), "{svg}");
+        assert!(svg.contains(">0 B</text>"), "{svg}");
+        assert!(svg.contains("chart-axis"), "{svg}");
+        // One empty direction still renders the other; two empty is "no data".
+        assert!(
+            mirror_chart_svg(&read, &[], "Read", "Write", 600, 120, ChartUnit::Bytes)
+                .contains(r#"class="chart-up""#)
+        );
+        assert!(
+            mirror_chart_svg(&[], &[], "Read", "Write", 600, 120, ChartUnit::Bytes)
+                .contains("no data yet")
+        );
     }
 }

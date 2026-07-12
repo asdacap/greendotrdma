@@ -2,7 +2,7 @@ use super::{AppState, page};
 use crate::actual::{block, smart, zfs};
 use crate::auth::{CurrentUser, nav_redirect};
 use crate::fmt::human_bytes;
-use crate::metrics::{ChartUnit, chart_svg};
+use crate::metrics::{ChartUnit, chart_svg, mirror_chart_svg};
 use askama::Template;
 use axum::extract::{Form, Path, State};
 use axum::http::HeaderMap;
@@ -325,9 +325,9 @@ pub struct DiskDetailView {
     pub name: String,
     /// `None` when the named disk doesn't exist on this host.
     pub disk: Option<DiskRow>,
-    /// Live read/write/temperature charts (inline SVG; rendered unescaped).
-    pub traffic_read_svg: String,
-    pub traffic_write_svg: String,
+    /// Live traffic (read up / write down) and temperature charts (inline SVG;
+    /// rendered unescaped).
+    pub traffic_svg: String,
     pub temp_svg: String,
     /// Full `smartctl -x` dump, shown verbatim.
     pub smart_report: String,
@@ -363,8 +363,7 @@ async fn gather_disk_detail(
     let mut view = DiskDetailView {
         name: name.to_owned(),
         disk: None,
-        traffic_read_svg: String::new(),
-        traffic_write_svg: String::new(),
+        traffic_svg: String::new(),
         temp_svg: String::new(),
         smart_report: String::new(),
         smart_installed: true,
@@ -378,9 +377,15 @@ async fn gather_disk_detail(
             if let Some(d) = disks.into_iter().find(|d| d.name == name) {
                 let ctx = device_context(state, std::slice::from_ref(&d)).await;
                 let series = |suffix| state.metrics.ring_series(&format!("disk:{name}:{suffix}"));
-                view.traffic_read_svg = chart_svg(&series("read_bps"), 600, 120, ChartUnit::Bytes);
-                view.traffic_write_svg =
-                    chart_svg(&series("write_bps"), 600, 120, ChartUnit::Bytes);
+                view.traffic_svg = mirror_chart_svg(
+                    &series("read_bps"),
+                    &series("write_bps"),
+                    "Read",
+                    "Write",
+                    600,
+                    120,
+                    ChartUnit::Bytes,
+                );
                 view.temp_svg = chart_svg(&series("temp_c"), 600, 120, ChartUnit::Celsius);
                 if let Ok(dev) = BlockDev::new(name) {
                     let rep = smart::report(&state.helper, &dev).await;

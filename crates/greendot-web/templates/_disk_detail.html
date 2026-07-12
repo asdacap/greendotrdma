@@ -30,15 +30,10 @@
   <p><a href="/zfs/pool/create?device={{ disk.device_path }}">Create a ZFS pool with this whole disk →</a></p>
   {% endif %}
 
-  <h2>Traffic</h2>
+  <h2>Traffic &amp; temperature</h2>
   <div class="chartgrid">
-    <div class="chartcard"><div class="chart-title">Read</div>{{ view.traffic_read_svg|safe }}</div>
-    <div class="chartcard"><div class="chart-title">Write</div>{{ view.traffic_write_svg|safe }}</div>
-  </div>
-
-  <h2>Temperature</h2>
-  <div class="chartgrid">
-    <div class="chartcard">{{ view.temp_svg|safe }}</div>
+    <div class="chartcard"><div class="chart-title">Traffic</div>{{ view.traffic_svg|safe }}</div>
+    <div class="chartcard"><div class="chart-title">Temperature</div>{{ view.temp_svg|safe }}</div>
   </div>
 
   <h2>Partitions</h2>

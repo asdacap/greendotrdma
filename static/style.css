@@ -22,6 +22,7 @@
   --green-bright: #3fe066;    /* hover lift on a green fill */
   --green-ink: #06250e;       /* text/icons sitting on a green fill */
   --yellow: #e3b341;
+  --yellow-rgb: 227, 179, 65;  /* same amber, for translucent chart glows */
   --red: #f0564a;
   --red-rgb: 240, 86, 74;
   --accent: #34d058;
@@ -464,7 +465,9 @@ form.inline {
 
 .chartgrid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  /* At most two charts per row (each column is at least half the width, minus
+     the gap); wraps to one when the row is narrower than ~640px. */
+  grid-template-columns: repeat(auto-fill, minmax(max(320px, calc(50% - 8px)), 1fr));
   gap: 16px;
   margin-top: 6px;
 }
@@ -492,6 +495,19 @@ svg.chart polyline {
   stroke-linecap: round;
   filter: drop-shadow(0 0 3px rgba(var(--green-rgb), .55));
 }
+
+/* Mirror charts: read/rx above the centre in green, write/tx below in amber. */
+svg.chart polyline.chart-down {
+  stroke: var(--yellow);
+  filter: drop-shadow(0 0 3px rgba(var(--yellow-rgb), .55));
+}
+.chart-up-label, .chart-down-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .03em;
+}
+.chart-up-label { fill: var(--accent); }
+.chart-down-label { fill: var(--yellow); }
 
 /* SVG viewBox coordinate space, not page typography — px is correct here. */
 .chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }

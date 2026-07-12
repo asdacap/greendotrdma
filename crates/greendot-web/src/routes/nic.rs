@@ -7,7 +7,7 @@ use super::{AppState, page};
 use crate::actual::nic::{self, NicNetwork, NicRdmaKind, NicStatus};
 use crate::auth::CurrentUser;
 use crate::dot::{Criterion, nic_diagnostics};
-use crate::metrics::{ChartUnit, chart_svg};
+use crate::metrics::{ChartUnit, chart_svg, mirror_chart_svg};
 use crate::routes::block_export::reconcile_state;
 use askama::Template;
 use axum::extract::{Path, State};
@@ -148,8 +148,8 @@ pub struct NicDetailView {
     /// The interface's network configuration, when the helper could read it.
     pub net: Option<NicNetwork>,
     pub netdev: String,
-    pub traffic_rx_svg: String,
-    pub traffic_tx_svg: String,
+    /// Live traffic chart (received up / transmitted down; inline SVG).
+    pub traffic_svg: String,
     /// Rendered only when the NIC exposes a temperature sensor.
     pub temp_svg: Option<String>,
     pub flash: Option<String>,
@@ -187,8 +187,15 @@ async fn gather_nic_detail(
     let series = |suffix: &str| state.metrics.ring_series(&format!("nic:{netdev}:{suffix}"));
     let temp = series("temp_c");
     NicDetailView {
-        traffic_rx_svg: chart_svg(&series("rx_bps"), 600, 120, ChartUnit::Bytes),
-        traffic_tx_svg: chart_svg(&series("tx_bps"), 600, 120, ChartUnit::Bytes),
+        traffic_svg: mirror_chart_svg(
+            &series("rx_bps"),
+            &series("tx_bps"),
+            "Rx",
+            "Tx",
+            600,
+            120,
+            ChartUnit::Bytes,
+        ),
         temp_svg: (!temp.is_empty()).then(|| chart_svg(&temp, 600, 120, ChartUnit::Celsius)),
         nic,
         net,
