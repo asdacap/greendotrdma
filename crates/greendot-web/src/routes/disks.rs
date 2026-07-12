@@ -329,6 +329,10 @@ pub struct DiskDetailView {
     /// rendered unescaped).
     pub traffic_svg: String,
     pub temp_svg: String,
+    /// IOPS (read up / write down), live queue depth, and busy-time %util charts.
+    pub iops_svg: String,
+    pub queue_svg: String,
+    pub util_svg: String,
     /// Full `smartctl -x` dump, shown verbatim.
     pub smart_report: String,
     /// False when smartctl isn't installed (show the dependency hint instead).
@@ -365,6 +369,9 @@ async fn gather_disk_detail(
         disk: None,
         traffic_svg: String::new(),
         temp_svg: String::new(),
+        iops_svg: String::new(),
+        queue_svg: String::new(),
+        util_svg: String::new(),
         smart_report: String::new(),
         smart_installed: true,
         error: None,
@@ -386,6 +393,17 @@ async fn gather_disk_detail(
                     120,
                     ChartUnit::Bytes,
                 );
+                view.iops_svg = mirror_chart_svg(
+                    &series("read_iops"),
+                    &series("write_iops"),
+                    "Read",
+                    "Write",
+                    600,
+                    120,
+                    ChartUnit::Count,
+                );
+                view.queue_svg = chart_svg(&series("queue_depth"), 600, 120, ChartUnit::Count);
+                view.util_svg = chart_svg(&series("util_percent"), 600, 120, ChartUnit::Percent);
                 view.temp_svg = chart_svg(&series("temp_c"), 600, 120, ChartUnit::Celsius);
                 if let Ok(dev) = BlockDev::new(name) {
                     let rep = smart::report(&state.helper, &dev).await;
