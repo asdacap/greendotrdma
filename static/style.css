@@ -26,8 +26,8 @@
   --red-rgb: 240, 86, 74;
   --accent: #34d058;
 
-  /* Pico provides the form layout (aligned, full-width controls); these map its
-     tokens onto the panel palette so anything it renders stays on-brand. */
+  /* Pico owns the typography and form scale; these only map its tokens onto
+     the panel palette so anything it renders stays on-brand. */
   --pico-font-family: var(--ui);
   --pico-background-color: var(--bg);
   --pico-color: var(--text);
@@ -40,9 +40,6 @@
   --pico-form-element-border-color: var(--border);
   --pico-form-element-color: var(--text);
   --pico-form-element-placeholder-color: var(--faint);
-  --pico-border-radius: 5px;
-  --pico-form-element-spacing-vertical: .44rem;
-  --pico-form-element-spacing-horizontal: .6rem;
   --pico-form-element-active-border-color: var(--green);
   --pico-form-element-focus-color: rgba(var(--green-rgb), .14);
   --pico-primary-inverse: var(--green-ink);
@@ -60,7 +57,6 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
-  font: 14.5px/1.55 var(--ui);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -92,7 +88,6 @@ summary:focus-visible {
   gap: 9px;
   padding: 2px 18px 4px;
   font-weight: 700;
-  font-size: 15px;
   letter-spacing: .01em;
 }
 
@@ -102,7 +97,7 @@ summary:focus-visible {
   padding: 0 18px 18px;
   margin: 2px 0 0;
   font-family: var(--mono);
-  font-size: 10.5px;
+  font-size: .75rem;
   letter-spacing: .04em;
   color: var(--faint);
   text-transform: uppercase;
@@ -112,7 +107,7 @@ summary:focus-visible {
   display: block;
   margin: 16px 0 4px;
   padding: 0 18px;
-  font-size: 10px;
+  font-size: .625rem;
   font-weight: 600;
   letter-spacing: .16em;
   text-transform: uppercase;
@@ -149,7 +144,7 @@ summary:focus-visible {
   gap: 8px;
 }
 
-.sidebar-footer .muted { font-family: var(--mono); font-size: 12px; }
+.sidebar-footer .muted { font-family: var(--mono); font-size: .75rem; }
 
 .linklike {
   background: none;
@@ -174,12 +169,7 @@ main {
   background: radial-gradient(120% 55% at 0% 0%, rgba(var(--green-rgb), .035), transparent 62%);
 }
 
-h1 {
-  font-size: 23px;
-  font-weight: 650;
-  letter-spacing: -.015em;
-  margin: 0 0 22px;
-}
+h1 { letter-spacing: -.015em; }
 
 h1::after {
   content: "";
@@ -198,7 +188,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 11.5px;
+  font-size: .75rem;
   font-weight: 600;
   letter-spacing: .13em;
   text-transform: uppercase;
@@ -219,14 +209,14 @@ p { margin: 10px 0; }
 
 .muted { color: var(--muted); }
 .faint { color: var(--faint); }
-.small { font-size: 12px; }
+.small { font-size: .875em; }
 .error { color: var(--red); }
 .flash { color: var(--green); }
 .empty { color: var(--muted); }
 
 .badge {
   display: inline-block;
-  font-size: 11px;
+  font-size: .75rem;
   line-height: 1.5;
   padding: 0 7px;
   border-radius: 999px;
@@ -317,7 +307,7 @@ code, .mono { font-family: var(--mono); }
 .port-top .dot { width: 11px; height: 11px; }
 
 .port-state {
-  font-size: 10px;
+  font-size: .625rem;
   font-weight: 700;
   letter-spacing: .14em;
   text-transform: uppercase;
@@ -330,7 +320,6 @@ code, .mono { font-family: var(--mono); }
 
 .port-name {
   font-family: var(--mono);
-  font-size: 15px;
   font-weight: 600;
   letter-spacing: -.01em;
   word-break: break-all;
@@ -338,12 +327,12 @@ code, .mono { font-family: var(--mono); }
 
 .port-meta {
   font-family: var(--mono);
-  font-size: 11.5px;
+  font-size: .75rem;
   letter-spacing: .03em;
   color: var(--muted);
 }
 
-.port-reason { font-size: 12px; color: var(--faint); }
+.port-reason { font-size: .875em; color: var(--faint); }
 
 /* ---- Tables ------------------------------------------------------------- */
 
@@ -355,16 +344,14 @@ table {
 }
 
 th, td {
-  padding: 9px 13px;
   border-bottom: 1px solid var(--border);
-  font-size: 13.5px;
   font-variant-numeric: tabular-nums;
 }
 
 th {
   color: var(--muted);
   font-weight: 600;
-  font-size: 10.5px;
+  font-size: .75rem;
   letter-spacing: .1em;
   text-transform: uppercase;
   background: var(--bg-rail);
@@ -373,7 +360,7 @@ th {
 tbody tr:hover td { background: rgba(255, 255, 255, .015); }
 tr:last-child td { border-bottom: none; }
 
-td code { font-size: 12.5px; color: var(--text); }
+td code { font-size: .875em; color: var(--text); }
 
 .usagebar {
   display: inline-block;
@@ -394,9 +381,8 @@ td code { font-size: 12.5px; color: var(--text); }
 }
 
 /* ---- Forms -------------------------------------------------------------- */
-/* Pico paints the controls — inset fill, border, radius, focus ring — from the
-   tokens mapped in :root. The rules here only set the layout the brand wants
-   tighter than Pico's defaults: card chrome, label rhythm, the mono textarea. */
+/* Pico paints the controls and owns the field rhythm (label spacing, control
+   margins) — the rules here only add the card chrome and the mono textarea. */
 
 .card {
   max-width: 480px;
@@ -406,20 +392,12 @@ td code { font-size: 12.5px; color: var(--text); }
   border-radius: 9px;
 }
 
-.card label {
-  margin: 12px 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
+.card label { color: var(--muted); }
 
 /* Checkbox/radio options carry full-strength text; Pico lays them out inline. */
-.card label.checkbox { color: var(--text); font-size: 13.5px; }
+.card label.checkbox { color: var(--text); }
 
-input, select, textarea, button, [role=button] { font: inherit; }
-
-.card input, .card select, .card textarea { margin-bottom: 0; }
-.card fieldset { margin: 12px 0 0; }   /* same rhythm as a label row */
-.card textarea { font-family: var(--mono); font-size: 12.5px; }
+.card textarea { font-family: var(--mono); }
 
 /* Inline action forms stay compact and horizontal (Pico stretches to 100%). */
 .inline input, .inline select { margin: 0; width: auto; }
@@ -428,12 +406,13 @@ input, select, textarea, button, [role=button] { font: inherit; }
    swaps the colour tokens. The quiet panel button is the default — green primary
    is reserved for a card's submit. <a role="button"> (e.g. Diagnose) rides the
    same tokens. */
-button, [role=button] {
+button, [type=button], [role=button] {
   --pico-background-color: var(--panel-2);
   --pico-border-color: var(--border-strong);
   --pico-color: var(--text);
 }
 button:is(:hover, :focus, :active),
+[type=button]:is(:hover, :focus, :active),
 [role=button]:is(:hover, :focus, :active) {
   --pico-background-color: var(--panel-hover);
   --pico-border-color: var(--muted);
@@ -445,7 +424,6 @@ button:is(:hover, :focus, :active),
   --pico-background-color: var(--green);
   --pico-border-color: var(--green);
   --pico-color: var(--green-ink);
-  margin-top: 18px;
   font-weight: 650;
   letter-spacing: .01em;
 }
@@ -500,7 +478,7 @@ form.inline {
 
 .chartcard .muted {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: .75rem;
   letter-spacing: .04em;
   text-transform: uppercase;
 }
@@ -515,6 +493,7 @@ svg.chart polyline {
   filter: drop-shadow(0 0 3px rgba(var(--green-rgb), .55));
 }
 
+/* SVG viewBox coordinate space, not page typography — px is correct here. */
 .chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }
 .chart-tick-y { text-anchor: end; }
 svg.chart line.chart-grid { stroke: var(--border); stroke-width: 1; }
@@ -523,7 +502,7 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
 /* Charts page: resource-type section headers and the metric filter chips. */
 .chart-section {
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: .75rem;
   letter-spacing: .06em;
   text-transform: uppercase;
   color: var(--muted);
@@ -532,7 +511,7 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .chip {
-  font-size: 12px;
+  font-size: .75rem;
   padding: 2px 11px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -544,7 +523,7 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
 
 .chart-title {
   font-family: var(--mono);
-  font-size: 11px;
+  font-size: .75rem;
   letter-spacing: .04em;
   text-transform: uppercase;
   color: var(--muted);
@@ -561,7 +540,7 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
   border-left: 2px solid var(--border-strong);
   border-radius: 7px;
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: .875em;
   line-height: 1.5;
   white-space: pre;
 }
@@ -578,7 +557,7 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
   border-left: 2px solid var(--border-strong);
   border-radius: 7px;
   font-family: var(--mono);
-  font-size: 12.5px;
+  font-size: .875em;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -623,22 +602,13 @@ details summary:hover { color: var(--text); }
   display: flex;
   align-items: center;
   gap: 9px;
-  font-size: 18px;
+  font-size: 1.25rem;
   margin: 0 0 4px;
 }
 
 .login-card h1::after { display: none; }
 
-.login-card label {
-  margin: 16px 0 0;
-  color: var(--muted);
-  font-size: 12.5px;
-}
-
-/* Inputs and the submit button inherit Pico's painting and the primary-submit
-   rule above; only the card's own chrome (width, green top edge, shadow) is
-   local. The label's top margin owns the field rhythm, as in .card. */
-.login-card input { margin-bottom: 0; }
+.login-card label { color: var(--muted); }
 
 /* ---- Dialogs ------------------------------------------------------------ */
 /* Form dialogs replace the old disclosure dropdowns; one shared #gd-confirm
@@ -667,7 +637,7 @@ dialog > article > header {
   background: none;
   border: none;
   color: var(--muted);
-  font-size: 12px;
+  font-size: .75rem;
   font-weight: 600;
   letter-spacing: .04em;
 }
@@ -684,7 +654,6 @@ dialog footer {
   background: none;
   border: none;
 }
-dialog footer button { margin-top: 18px; }   /* clear of the last field */
 
 /* Quiet secondary (Cancel) button. */
 button.secondary {
