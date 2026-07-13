@@ -58,6 +58,31 @@
         <td>{{ m.health }}</td>
         <td>
           <div class="rowactions">
+            {% if let Some(target) = m.attach_target %}
+            <button type="button" class="dialog-trigger" data-dialog-open>Add drive</button>
+            <dialog>
+              <article>
+                <header>Add drive to {{ m.name }} — {{ view.name }}</header>
+                {% if view.add_devices.is_empty() %}
+                <p class="muted small">No free devices — free up an unmounted, empty partition or disk first.</p>
+                {% else %}
+                <form class="card" hx-post="/zfs/pool/{{ view.name }}/attach-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="target" value="{{ target }}">
+                  <label>New device
+                    <select name="device">
+                      {% for d in view.add_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+                    </select>
+                  </label>
+                  <p class="muted small">The new drive is attached and resilvered into this vdev: a single disk becomes a mirror, a mirror gains a copy, a raidz grows by one drive (needs OpenZFS 2.3+).</p>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit">Attach</button>
+                  </footer>
+                </form>
+                {% endif %}
+              </article>
+            </dialog>
+            {% endif %}
             {% if m.can_detach %}
             <button type="button" class="dialog-trigger" data-dialog-open>Detach</button>
             <dialog>
@@ -104,23 +129,43 @@
   </table>
   {% endif %}
 
-  <button type="button" class="dialog-trigger" data-dialog-open>Add device</button>
+  <button type="button" class="dialog-trigger" data-dialog-open>Add vdev</button>
   <dialog>
     <article>
-      <header>Add device — {{ view.name }}</header>
+      <header>Add vdev — {{ view.name }}</header>
       {% if view.add_devices.is_empty() %}
       <p class="muted small">No free devices to add — free up an unmounted, empty partition or disk first.</p>
       {% else %}
-      <form class="card" hx-post="/zfs/pool/{{ view.name }}/add-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
-        <label>Device
-          <select name="device">
-            {% for d in view.add_devices %}<option value="{{ d.path }}">{{ d.label }}</option>{% endfor %}
+      <form class="card" hx-post="/zfs/pool/{{ view.name }}/add-vdev" hx-target="#pool-detail-content" hx-swap="outerHTML">
+        <label>Class
+          <select name="class">
+            <option value="data">data</option>
+            <option value="special">special (metadata)</option>
+            <option value="log">log (SLOG)</option>
+            <option value="dedup">dedup</option>
+            <option value="cache">cache (L2ARC)</option>
+            <option value="spare">spare</option>
           </select>
         </label>
-        <p class="muted small">A single-disk vdev is refused if it would reduce the pool's redundancy.</p>
+        <label>Layout
+          <select name="layout">
+            <option value="stripe">stripe (no redundancy)</option>
+            <option value="mirror">mirror</option>
+            <option value="raidz1">raidz1</option>
+            <option value="raidz2">raidz2</option>
+            <option value="raidz3">raidz3</option>
+          </select>
+        </label>
+        <fieldset>
+          <legend>Devices</legend>
+          {% for d in view.add_devices %}
+          <label class="checkbox"><input type="checkbox" name="devices" value="{{ d.path }}"> {{ d.label }}</label>
+          {% endfor %}
+        </fieldset>
+        <p class="muted small">mirror needs ≥2 devices, raidz1 ≥2, raidz2 ≥3, raidz3 ≥4. cache and spare take a plain device list — choose stripe. A vdev that would reduce the pool's redundancy is refused.</p>
         <footer>
           <button type="button" class="secondary" data-dialog-close>Cancel</button>
-          <button type="submit">Add device</button>
+          <button type="submit">Add vdev</button>
         </footer>
       </form>
       {% endif %}

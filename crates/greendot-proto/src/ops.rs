@@ -11,13 +11,14 @@
 //!   is the security choke point.
 
 use crate::convert::{
-    dec_lvm_report, dec_transport, dec_vdev, map_new, parse_ip, strs, to_u8, to_u16,
+    dec_lvm_report, dec_transport, dec_vdev, dec_vdev_class, map_new, parse_ip, strs, to_u8, to_u16,
 };
 use crate::pb;
 use crate::{
     BlockDev, ConvertError, CsiNqn, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
     MountPoint, NetdevName, Nqn, NsUuid, PackageName, PartLabel, PoolName, Secret, SnapName,
-    SshFingerprint, Transport, Username, ValidationError, VdevLayout, VdevTarget, VgName,
+    SshFingerprint, Transport, Username, ValidationError, VdevClass, VdevLayout, VdevTarget,
+    VgName,
 };
 use std::net::IpAddr;
 
@@ -401,25 +402,75 @@ impl From<PoolCreate> for pb::PoolCreate {
     }
 }
 
+/// One new top-level vdev (`zpool add`). Ingress is the choke point for the
+/// grammar invariants: at least one device, and cache/spare take a plain
+/// device list (no mirror/raidz layout).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PoolDeviceAdd {
+pub struct PoolVdevAdd {
     pub pool: PoolName,
+    pub class: VdevClass,
+    pub layout: VdevLayout,
+    pub devices: Vec<DevicePath>,
+}
+
+impl TryFrom<pb::PoolVdevAdd> for PoolVdevAdd {
+    type Error = ConvertError;
+    fn try_from(p: pb::PoolVdevAdd) -> Result<Self, ConvertError> {
+        let class = dec_vdev_class(p.class)?;
+        let layout = dec_vdev(p.layout)?;
+        if !class.allows_layout(layout) {
+            return Err(ConvertError(format!(
+                "{} vdevs take a plain device list, not a layout",
+                class.label()
+            )));
+        }
+        if p.devices.is_empty() {
+            return Err(ConvertError("vdev add needs at least one device".into()));
+        }
+        Ok(PoolVdevAdd {
+            pool: PoolName::new(p.pool)?,
+            class,
+            layout,
+            devices: map_new(p.devices, DevicePath::new)?,
+        })
+    }
+}
+impl From<PoolVdevAdd> for pb::PoolVdevAdd {
+    fn from(p: PoolVdevAdd) -> Self {
+        pb::PoolVdevAdd {
+            pool: p.pool.as_str().to_owned(),
+            class: pb::VdevClass::from(p.class) as i32,
+            layout: pb::VdevLayout::from(p.layout) as i32,
+            devices: strs(&p.devices),
+        }
+    }
+}
+
+/// `zpool attach <pool> <target> <device>`. `target` reuses the [`VdevTarget`]
+/// grammar: a leaf device path (mirror/single-disk) or a raidz vdev name
+/// (raidz expansion; on old zfs the task fails with zpool's own error).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolDeviceAttach {
+    pub pool: PoolName,
+    pub target: VdevTarget,
     pub device: DevicePath,
 }
 
-impl TryFrom<pb::PoolDeviceAdd> for PoolDeviceAdd {
+impl TryFrom<pb::PoolDeviceAttach> for PoolDeviceAttach {
     type Error = ConvertError;
-    fn try_from(p: pb::PoolDeviceAdd) -> Result<Self, ConvertError> {
-        Ok(PoolDeviceAdd {
+    fn try_from(p: pb::PoolDeviceAttach) -> Result<Self, ConvertError> {
+        Ok(PoolDeviceAttach {
             pool: PoolName::new(p.pool)?,
+            target: VdevTarget::new(p.target)?,
             device: DevicePath::new(p.device)?,
         })
     }
 }
-impl From<PoolDeviceAdd> for pb::PoolDeviceAdd {
-    fn from(p: PoolDeviceAdd) -> Self {
-        pb::PoolDeviceAdd {
+impl From<PoolDeviceAttach> for pb::PoolDeviceAttach {
+    fn from(p: PoolDeviceAttach) -> Self {
+        pb::PoolDeviceAttach {
             pool: p.pool.as_str().to_owned(),
+            target: p.target.as_str().to_owned(),
             device: p.device.as_str().to_owned(),
         }
     }
@@ -1458,10 +1509,31 @@ mod tests {
             ],
             ashift: Some(12),
         } => pb::PoolCreate);
-        roundtrip!(PoolDeviceAdd {
+        roundtrip!(PoolVdevAdd {
             pool: PoolName::new("tank").unwrap(),
+            class: VdevClass::Special,
+            layout: VdevLayout::Mirror,
+            devices: vec![
+                DevicePath::new("/dev/sdd").unwrap(),
+                DevicePath::new("/dev/sde").unwrap(),
+            ],
+        } => pb::PoolVdevAdd);
+        roundtrip!(PoolVdevAdd {
+            pool: PoolName::new("tank").unwrap(),
+            class: VdevClass::Cache,
+            layout: VdevLayout::Stripe,
+            devices: vec![DevicePath::new("/dev/sdd").unwrap()],
+        } => pb::PoolVdevAdd);
+        roundtrip!(PoolDeviceAttach {
+            pool: PoolName::new("tank").unwrap(),
+            target: VdevTarget::new("/dev/sdb").unwrap(),
             device: DevicePath::new("/dev/sdd").unwrap(),
-        } => pb::PoolDeviceAdd);
+        } => pb::PoolDeviceAttach);
+        roundtrip!(PoolDeviceAttach {
+            pool: PoolName::new("tank").unwrap(),
+            target: VdevTarget::new("raidz1-0").unwrap(),
+            device: DevicePath::new("/dev/sdd").unwrap(),
+        } => pb::PoolDeviceAttach);
         roundtrip!(PoolDeviceRemove {
             pool: PoolName::new("tank").unwrap(),
             target: VdevTarget::new("mirror-0").unwrap(),
@@ -1728,6 +1800,54 @@ mod tests {
                 vdev: 0, // VDEV_LAYOUT_UNSPECIFIED
                 devices: vec!["/dev/sdb".into()],
                 ashift: None,
+            })
+            .is_err()
+        );
+        // Vdev-add grammar invariants: cache takes no layout, at least one
+        // device, and an unspecified class is rejected; the valid combination
+        // converts.
+        assert!(
+            PoolVdevAdd::try_from(pb::PoolVdevAdd {
+                pool: "tank".into(),
+                class: pb::VdevClass::Cache as i32,
+                layout: pb::VdevLayout::Mirror as i32,
+                devices: vec!["/dev/sdb".into(), "/dev/sdc".into()],
+            })
+            .is_err()
+        );
+        assert!(
+            PoolVdevAdd::try_from(pb::PoolVdevAdd {
+                pool: "tank".into(),
+                class: pb::VdevClass::Data as i32,
+                layout: pb::VdevLayout::Stripe as i32,
+                devices: vec![],
+            })
+            .is_err()
+        );
+        assert!(
+            PoolVdevAdd::try_from(pb::PoolVdevAdd {
+                pool: "tank".into(),
+                class: 0, // VDEV_CLASS_UNSPECIFIED
+                layout: pb::VdevLayout::Stripe as i32,
+                devices: vec!["/dev/sdb".into()],
+            })
+            .is_err()
+        );
+        assert!(
+            PoolVdevAdd::try_from(pb::PoolVdevAdd {
+                pool: "tank".into(),
+                class: pb::VdevClass::Log as i32,
+                layout: pb::VdevLayout::Mirror as i32,
+                devices: vec!["/dev/sdb".into(), "/dev/sdc".into()],
+            })
+            .is_ok()
+        );
+        // A bare vdev keyword is not a valid attach target.
+        assert!(
+            PoolDeviceAttach::try_from(pb::PoolDeviceAttach {
+                pool: "tank".into(),
+                target: "mirror".into(),
+                device: "/dev/sdc".into(),
             })
             .is_err()
         );

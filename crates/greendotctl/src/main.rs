@@ -530,7 +530,8 @@ helper_impl! {
             zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount, ops::ZfsUnmount;
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy, ops::ZfsDestroy;
             pool_create, PoolCreateStream, pb::PoolCreate, ops::PoolCreate;
-            pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd, ops::PoolDeviceAdd;
+            pool_vdev_add, PoolVdevAddStream, pb::PoolVdevAdd, ops::PoolVdevAdd;
+            pool_device_attach, PoolDeviceAttachStream, pb::PoolDeviceAttach, ops::PoolDeviceAttach;
             pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove, ops::PoolDeviceRemove;
             pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach, ops::PoolDeviceDetach;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate, ops::PartitionTableCreate;

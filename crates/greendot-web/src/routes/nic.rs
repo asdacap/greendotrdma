@@ -539,7 +539,11 @@ mod tests {
         assert!(body.contains("started set MTU 9000 on eth0"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/nic/eth0/mtu", "mtu=abc"))).await;
         assert!(body.contains("invalid MTU"), "{body}");
-        let (_, _, body) = send(&app, auth(form_post("/nic/abcdefghijklmnop/mtu", "mtu=9000"))).await;
+        let (_, _, body) = send(
+            &app,
+            auth(form_post("/nic/abcdefghijklmnop/mtu", "mtu=9000")),
+        )
+        .await;
         assert!(body.contains("invalid interface name"), "{body}");
     }
 }

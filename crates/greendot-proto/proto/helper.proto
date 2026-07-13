@@ -50,7 +50,8 @@ service Helper {
 
   // ZFS pools.
   rpc PoolCreate(.greendot.helper.v1.PoolCreate) returns (stream TaskEvent);
-  rpc PoolDeviceAdd(.greendot.helper.v1.PoolDeviceAdd) returns (stream TaskEvent);
+  rpc PoolVdevAdd(.greendot.helper.v1.PoolVdevAdd) returns (stream TaskEvent);
+  rpc PoolDeviceAttach(.greendot.helper.v1.PoolDeviceAttach) returns (stream TaskEvent);
   rpc PoolDeviceRemove(.greendot.helper.v1.PoolDeviceRemove) returns (stream TaskEvent);
   rpc PoolDeviceDetach(.greendot.helper.v1.PoolDeviceDetach) returns (stream TaskEvent);
 
@@ -141,6 +142,16 @@ enum VdevLayout {
   VDEV_LAYOUT_RAIDZ1 = 3;
   VDEV_LAYOUT_RAIDZ2 = 4;
   VDEV_LAYOUT_RAIDZ3 = 5;
+}
+
+enum VdevClass {
+  VDEV_CLASS_UNSPECIFIED = 0;
+  VDEV_CLASS_DATA = 1;
+  VDEV_CLASS_SPECIAL = 2;
+  VDEV_CLASS_LOG = 3;
+  VDEV_CLASS_DEDUP = 4;
+  VDEV_CLASS_CACHE = 5;
+  VDEV_CLASS_SPARE = 6;
 }
 
 enum LvmReportKind {
@@ -293,7 +304,19 @@ message PoolCreate {
   repeated string devices = 3;
   optional uint32 ashift = 4;   // u8
 }
-message PoolDeviceAdd { string pool = 1; string device = 2; }
+// `zpool add <pool> [class] [layout] <dev>…` — one new top-level vdev. A data
+// vdev emits no class keyword and a plain stripe no layout keyword; cache and
+// spare take a plain device list (layout must be STRIPE — rejected on ingress).
+message PoolVdevAdd {
+  string pool = 1;
+  VdevClass class = 2;
+  VdevLayout layout = 3;
+  repeated string devices = 4;
+}
+// `zpool attach <pool> <target> <device>` — grow an existing vdev. `target` is
+// a leaf device path (mirror/single-disk) or a raidz vdev name (raidz
+// expansion, OpenZFS 2.3+; on older zfs the task fails with zpool's error).
+message PoolDeviceAttach { string pool = 1; string target = 2; string device = 3; }
 // `zpool remove` as two subtasks: the remove itself, then `zpool wait -t
 // remove` so the task only finishes when evacuation completes. `target` is a
 // leaf device path or a top-level vdev name (`mirror-0`, `raidz1-0`, …).

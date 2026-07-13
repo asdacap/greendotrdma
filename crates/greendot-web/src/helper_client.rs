@@ -175,7 +175,8 @@ impl HelperClient {
         zfs_unmount(ops::ZfsUnmount => pb::ZfsUnmount);
         zfs_destroy(ops::ZfsDestroy => pb::ZfsDestroy);
         pool_create(ops::PoolCreate => pb::PoolCreate);
-        pool_device_add(ops::PoolDeviceAdd => pb::PoolDeviceAdd);
+        pool_vdev_add(ops::PoolVdevAdd => pb::PoolVdevAdd);
+        pool_device_attach(ops::PoolDeviceAttach => pb::PoolDeviceAttach);
         pool_device_remove(ops::PoolDeviceRemove => pb::PoolDeviceRemove);
         pool_device_detach(ops::PoolDeviceDetach => pb::PoolDeviceDetach);
         partition_table_create(ops::PartitionTableCreate => pb::PartitionTableCreate);

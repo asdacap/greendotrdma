@@ -115,7 +115,10 @@ spec_op! {
     ops::ZfsDestroy = pb::ZfsDestroy, |o| zfs::zfs_destroy(&o.dataset, o.recursive);
     ops::PoolCreate = pb::PoolCreate,
         |o| zfs::pool_create(&o.name, o.vdev, &o.devices, o.ashift);
-    ops::PoolDeviceAdd = pb::PoolDeviceAdd, |o| zfs::pool_device_add(&o.pool, &o.device);
+    ops::PoolVdevAdd = pb::PoolVdevAdd,
+        |o| zfs::pool_vdev_add(&o.pool, o.class, o.layout, &o.devices);
+    ops::PoolDeviceAttach = pb::PoolDeviceAttach,
+        |o| zfs::pool_device_attach(&o.pool, &o.target, &o.device);
     ops::PoolDeviceDetach = pb::PoolDeviceDetach,
         |o| zfs::pool_device_detach(&o.pool, &o.device);
     ops::PartitionTableCreate = pb::PartitionTableCreate, |o| partition::table_create(&o.disk);

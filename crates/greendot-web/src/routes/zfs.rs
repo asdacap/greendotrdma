@@ -10,7 +10,9 @@ use axum::extract::{Form, Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
-use greendot_proto::{DatasetName, DevicePath, MountPoint, PoolName, VdevLayout, VdevTarget, ops};
+use greendot_proto::{
+    DatasetName, DevicePath, MountPoint, PoolName, VdevClass, VdevLayout, VdevTarget, ops,
+};
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -21,7 +23,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/pool/create", axum::routing::get(pool_create_page))
         .route("/zfs/pool", post(pool_create))
         .route("/zfs/pool/{name}", axum::routing::get(pool_detail_page))
-        .route("/zfs/pool/{name}/add-device", post(pool_add_device))
+        .route("/zfs/pool/{name}/add-vdev", post(pool_add_vdev))
+        .route("/zfs/pool/{name}/attach-device", post(pool_attach_device))
         .route("/zfs/pool/{name}/remove-device", post(pool_remove_device))
         .route("/zfs/pool/{name}/detach-device", post(pool_detach_device))
         .route(
@@ -142,6 +145,10 @@ pub struct MemberRow {
     pub health: String,
     pub can_remove: bool,
     pub can_detach: bool,
+    /// `zpool attach` target when this row is a growable top-level vdev: the
+    /// device itself (single disk → mirror), one child device (widen a
+    /// mirror), or the vdev name (raidz expansion). `None` hides the button.
+    pub attach_target: Option<String>,
 }
 
 /// Maps each block device's `/dev/<name>` path to its detail-page URL, so a pool
@@ -163,6 +170,28 @@ fn device_detail_urls(disks: Vec<block::Disk>) -> HashMap<String, String> {
     urls
 }
 
+/// The `zpool attach` anchor per container vdev: its first ONLINE device
+/// child (falling back to the first device child — zpool re-checks anyway).
+/// Growing a mirror attaches to an existing member, not the `mirror-N` name.
+fn attach_anchor(members: &[zfs::PoolMember]) -> HashMap<String, String> {
+    let mut anchor: HashMap<String, (String, bool)> = HashMap::new();
+    for m in members.iter().filter(|m| m.is_leaf) {
+        let Some(parent) = &m.parent else { continue };
+        if DevicePath::new(&m.name).is_err() {
+            continue; // a missing member shows up as a bare GUID
+        }
+        let online = m.health.as_deref() == Some("ONLINE");
+        match anchor.get(parent) {
+            Some((_, true)) => {}
+            Some(_) if !online => {}
+            _ => {
+                anchor.insert(parent.clone(), (m.name.clone(), online));
+            }
+        }
+    }
+    anchor.into_iter().map(|(k, (v, _))| (k, v)).collect()
+}
+
 /// Decides per-member actions. Detach applies to leaves inside a mirror.
 /// Remove is offered where `zpool remove` can succeed: any log/cache/spare
 /// member, and top-level data/special/dedup vdevs when the pool has no
@@ -180,9 +209,26 @@ fn member_rows(
         .filter(toplevel_data)
         .any(|m| !m.is_leaf && (m.name.starts_with("raidz") || m.name.starts_with("draid")));
     let data_toplevels = members.iter().filter(toplevel_data).count();
+    let anchors = attach_anchor(&members);
     members
         .into_iter()
         .map(|m| {
+            // `zpool attach` grows any non-cache/spare top-level vdev: a
+            // single disk becomes a mirror, a mirror widens (anchored on an
+            // existing member), a raidz expands (targeted by name; on old
+            // zfs the task fails with zpool's own error). draid and
+            // missing-device GUID rows get no button.
+            let attach_target = if m.parent.is_some() || matches!(m.class, C::Cache | C::Spare) {
+                None
+            } else if !m.is_leaf && m.name.starts_with("raidz") {
+                Some(m.name.clone())
+            } else if !m.is_leaf && m.name.starts_with("mirror-") {
+                anchors.get(&m.name).cloned()
+            } else if m.is_leaf && DevicePath::new(&m.name).is_ok() {
+                Some(m.name.clone())
+            } else {
+                None
+            };
             let in_mirror = m
                 .parent
                 .as_deref()
@@ -214,6 +260,7 @@ fn member_rows(
                 .into(),
                 size: m.size.map_or("–".into(), human_bytes),
                 health: m.health.unwrap_or_else(|| "–".into()),
+                attach_target,
                 name: m.name,
             }
         })
@@ -988,33 +1035,113 @@ async fn fs_destroy(
     .await
 }
 
+/// Adds one new top-level vdev to a pool (`zpool add <pool> [class] [layout]
+/// <dev>…`). `devices` arrives as repeated checkbox keys, so read the raw pair
+/// list; the helper refuses a vdev that would reduce the pool's redundancy.
+async fn pool_add_vdev(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(fields): Form<Vec<(String, String)>>,
+) -> Response {
+    let (mut class, mut layout) = (String::new(), String::new());
+    let mut devices: Vec<String> = Vec::new();
+    for (k, v) in fields {
+        match k.as_str() {
+            "class" => class = v,
+            "layout" => layout = v,
+            "devices" => devices.push(v),
+            _ => {}
+        }
+    }
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
+    };
+    let Some(class) = VdevClass::parse(class.trim()) else {
+        return pool_op_failed(&state, &name, "choose a vdev class").await;
+    };
+    let Some(layout) = VdevLayout::parse(layout.trim()) else {
+        return pool_op_failed(&state, &name, "choose a vdev layout").await;
+    };
+    if !class.allows_layout(layout) {
+        let msg = format!(
+            "{} vdevs take a plain device list — choose stripe",
+            class.label()
+        );
+        return pool_op_failed(&state, &name, msg).await;
+    }
+    let mut device_paths = Vec::new();
+    for d in &devices {
+        let Ok(dp) = DevicePath::new(d.trim()) else {
+            return pool_op_failed(&state, &name, format!("invalid device {d:?}")).await;
+        };
+        device_paths.push(dp);
+    }
+    if device_paths.is_empty() {
+        return pool_op_failed(&state, &name, "choose at least one device").await;
+    }
+    if device_paths.len() < layout.min_devices() {
+        let msg = format!(
+            "{} needs at least {} devices",
+            layout.keyword().unwrap_or("stripe"),
+            layout.min_devices()
+        );
+        return pool_op_failed(&state, &name, msg).await;
+    }
+    let title = format!("add {} vdev to {pool}", class.label());
+    let req = ops::PoolVdevAdd {
+        pool,
+        class,
+        layout,
+        devices: device_paths,
+    };
+    run_pool_op(
+        &state,
+        state.helper.pool_vdev_add(req),
+        "pool-add-vdev",
+        &title,
+        &name,
+    )
+    .await
+}
+
 #[derive(Deserialize)]
-struct AddDeviceForm {
+struct AttachDeviceForm {
+    target: String,
     device: String,
 }
 
-/// Adds a device to an existing pool (`zpool add`). The pool comes from the URL;
-/// the helper refuses a single-disk vdev that would reduce the pool's redundancy.
-async fn pool_add_device(
+/// Attaches a new drive to an existing vdev (`zpool attach`): mirrors a single
+/// disk, widens a mirror (target = an existing member), or expands a raidz
+/// (target = the vdev name; on old zfs the task fails with zpool's error).
+async fn pool_attach_device(
     State(state): State<Arc<AppState>>,
     Path(name): Path<String>,
-    Form(form): Form<AddDeviceForm>,
+    Form(form): Form<AttachDeviceForm>,
 ) -> Response {
     let Ok(pool) = PoolName::new(name.trim()) else {
         return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
     };
+    let Ok(target) = VdevTarget::new(form.target.trim()) else {
+        return pool_op_failed(
+            &state,
+            &name,
+            format!("invalid attach target {:?}", form.target),
+        )
+        .await;
+    };
     let Ok(device) = DevicePath::new(form.device.trim()) else {
         return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
     };
-    let req = ops::PoolDeviceAdd {
+    let req = ops::PoolDeviceAttach {
         pool: pool.clone(),
+        target: target.clone(),
         device: device.clone(),
     };
     run_pool_op(
         &state,
-        state.helper.pool_device_add(req),
-        "pool-add",
-        &format!("add {device} to {pool}"),
+        state.helper.pool_device_attach(req),
+        "pool-attach",
+        &format!("attach {device} to {target} in {pool}"),
         &name,
     )
     .await
@@ -1298,6 +1425,50 @@ mod tests {
         assert_eq!(urls.get("/dev/sdh1"), None);
     }
 
+    #[test]
+    fn attach_targets() {
+        use zfs::{MemberClass as C, PoolMember};
+        let m = |class: C, name: &str, parent: Option<&str>, health: &str| PoolMember {
+            pool: "tank".into(),
+            class,
+            name: name.into(),
+            is_leaf: !name.contains('-') || name.starts_with('/'),
+            parent: parent.map(String::from),
+            size: None,
+            alloc: None,
+            health: Some(health.into()),
+        };
+        let rows = member_rows(
+            vec![
+                m(C::Data, "mirror-0", None, "ONLINE"),
+                m(C::Data, "/dev/sda", Some("mirror-0"), "FAULTED"),
+                m(C::Data, "/dev/sdb", Some("mirror-0"), "ONLINE"),
+                m(C::Data, "raidz1-0", None, "ONLINE"),
+                m(C::Data, "/dev/sdc", Some("raidz1-0"), "ONLINE"),
+                m(C::Data, "/dev/sdd", None, "ONLINE"), // single-disk vdev
+                m(C::Cache, "/dev/sde", None, "ONLINE"),
+                m(C::Data, "9876543210", None, "UNAVAIL"), // missing member GUID
+            ],
+            &HashMap::new(),
+        );
+        let target = |name: &str| {
+            rows.iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .attach_target
+                .clone()
+        };
+        // A mirror anchors on its first ONLINE child, a raidz targets its own
+        // name, a single disk targets itself; children, cache members and
+        // missing-device GUID rows get no Add-drive button.
+        assert_eq!(target("mirror-0").as_deref(), Some("/dev/sdb"));
+        assert_eq!(target("raidz1-0").as_deref(), Some("raidz1-0"));
+        assert_eq!(target("/dev/sdd").as_deref(), Some("/dev/sdd"));
+        assert_eq!(target("/dev/sdb"), None);
+        assert_eq!(target("/dev/sde"), None);
+        assert_eq!(target("9876543210"), None);
+    }
+
     #[rstest]
     #[case::pool_root("tank", "tank")]
     #[case::nested("tank/vols/vm1", "tank")]
@@ -1514,17 +1685,42 @@ mod tests {
             assert_eq!(status, StatusCode::SEE_OTHER, "non-htmx POST redirects");
             assert_eq!(headers[header::LOCATION], "/zfs");
 
-            // Add-device: the pool name comes from the URL. A valid request
-            // streams through the fake helper; a reserved vdev keyword is rejected.
+            // Add-vdev: the pool name comes from the URL; `devices` arrives as
+            // repeated checkbox keys. Grammar invariants are validated before
+            // the helper; valid requests stream through the fake helper.
+            let cases = [
+                (
+                    "class=data&layout=stripe&devices=%2Fdev%2Fsdb",
+                    "started add data vdev to tank",
+                ),
+                (
+                    "class=special&layout=mirror&devices=%2Fdev%2Fsdb&devices=%2Fdev%2Fsdc",
+                    "started add special vdev to tank",
+                ),
+                (
+                    "class=cache&layout=stripe&devices=%2Fdev%2Fsdb",
+                    "started add cache vdev to tank",
+                ),
+                (
+                    "class=cache&layout=mirror&devices=%2Fdev%2Fsdb&devices=%2Fdev%2Fsdc",
+                    "plain device list",
+                ),
+                (
+                    "class=data&layout=mirror&devices=%2Fdev%2Fsdb",
+                    "needs at least 2 devices",
+                ),
+                ("class=data&layout=stripe", "choose at least one device"),
+                ("class=turbo&layout=stripe", "choose a vdev class"),
+            ];
+            for (form, expect) in cases {
+                let req = auth(form_post("/zfs/pool/tank/add-vdev", form));
+                let (_, _, body) = send(&app, req).await;
+                assert!(body.contains(expect), "{form}: {body}");
+            }
+            // A reserved vdev keyword as the pool name is rejected.
             let req = auth(form_post(
-                "/zfs/pool/tank/add-device",
-                "device=%2Fdev%2Fsdb",
-            ));
-            let (_, _, body) = send(&app, req).await;
-            assert!(body.contains("started add /dev/sdb to tank"), "{body}");
-            let req = auth(form_post(
-                "/zfs/pool/mirror/add-device",
-                "device=%2Fdev%2Fsdb",
+                "/zfs/pool/mirror/add-vdev",
+                "class=data&layout=stripe&devices=%2Fdev%2Fsdb",
             ));
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("invalid pool name"), "{body}");
@@ -1567,6 +1763,33 @@ mod tests {
             let req = auth(form_post("/zfs/pool/tank/detach-device", "device=mirror-0"));
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("invalid device"), "{body}");
+
+            // Attach targets an existing member device or a raidz vdev name;
+            // a bare vdev keyword is rejected before the helper.
+            let req = auth(form_post(
+                "/zfs/pool/tank/attach-device",
+                "target=%2Fdev%2Fsdb&device=%2Fdev%2Fsdc",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(
+                body.contains("started attach /dev/sdc to /dev/sdb in tank"),
+                "{body}"
+            );
+            let req = auth(form_post(
+                "/zfs/pool/tank/attach-device",
+                "target=raidz1-0&device=%2Fdev%2Fsdc",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(
+                body.contains("started attach /dev/sdc to raidz1-0 in tank"),
+                "{body}"
+            );
+            let req = auth(form_post(
+                "/zfs/pool/tank/attach-device",
+                "target=mirror&device=%2Fdev%2Fsdc",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid attach target"), "{body}");
         }
 
         #[tokio::test]

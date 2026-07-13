@@ -18,7 +18,7 @@ use crate::{
     LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvmReport, NfsClient, NfsClientSpec,
     NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec,
     NvmetSubsysSpec, PackageName, PciAddress, SubStatus, TaskEvent, Transport, ValidationError,
-    VdevLayout, actual,
+    VdevClass, VdevLayout, actual,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -152,6 +152,35 @@ impl TryFrom<pb::VdevLayout> for VdevLayout {
     }
 }
 
+impl From<VdevClass> for pb::VdevClass {
+    fn from(v: VdevClass) -> Self {
+        match v {
+            VdevClass::Data => pb::VdevClass::Data,
+            VdevClass::Special => pb::VdevClass::Special,
+            VdevClass::Log => pb::VdevClass::Log,
+            VdevClass::Dedup => pb::VdevClass::Dedup,
+            VdevClass::Cache => pb::VdevClass::Cache,
+            VdevClass::Spare => pb::VdevClass::Spare,
+        }
+    }
+}
+impl TryFrom<pb::VdevClass> for VdevClass {
+    type Error = ConvertError;
+    fn try_from(v: pb::VdevClass) -> Result<Self, ConvertError> {
+        Ok(match v {
+            pb::VdevClass::Data => VdevClass::Data,
+            pb::VdevClass::Special => VdevClass::Special,
+            pb::VdevClass::Log => VdevClass::Log,
+            pb::VdevClass::Dedup => VdevClass::Dedup,
+            pb::VdevClass::Cache => VdevClass::Cache,
+            pb::VdevClass::Spare => VdevClass::Spare,
+            pb::VdevClass::Unspecified => {
+                return Err(ConvertError("unspecified vdev class".into()));
+            }
+        })
+    }
+}
+
 impl From<LvmReport> for pb::LvmReportKind {
     fn from(r: LvmReport) -> Self {
         match r {
@@ -218,6 +247,12 @@ pub(crate) fn dec_vdev(i: i32) -> Result<VdevLayout, ConvertError> {
     let p = pb::VdevLayout::try_from(i)
         .map_err(|_| ConvertError(format!("unknown vdev layout {i}")))?;
     VdevLayout::try_from(p)
+}
+
+pub(crate) fn dec_vdev_class(i: i32) -> Result<VdevClass, ConvertError> {
+    let p =
+        pb::VdevClass::try_from(i).map_err(|_| ConvertError(format!("unknown vdev class {i}")))?;
+    VdevClass::try_from(p)
 }
 
 pub(crate) fn dec_lvm_report(i: i32) -> Result<LvmReport, ConvertError> {

@@ -355,7 +355,8 @@ pub(crate) mod testutil {
             zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount;
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy;
             pool_create, PoolCreateStream, pb::PoolCreate;
-            pool_device_add, PoolDeviceAddStream, pb::PoolDeviceAdd;
+            pool_vdev_add, PoolVdevAddStream, pb::PoolVdevAdd;
+            pool_device_attach, PoolDeviceAttachStream, pb::PoolDeviceAttach;
             pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove;
             pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate;

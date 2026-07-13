@@ -217,6 +217,56 @@ impl VdevLayout {
     }
 }
 
+/// Which allocation class a new top-level vdev joins (`zpool add` keyword).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VdevClass {
+    Data,
+    Special,
+    Log,
+    Dedup,
+    Cache,
+    Spare,
+}
+
+impl VdevClass {
+    /// The `zpool add` class keyword, or `None` for an ordinary data vdev
+    /// (which takes no keyword — the devices are listed bare).
+    pub fn keyword(self) -> Option<&'static str> {
+        match self {
+            VdevClass::Data => None,
+            VdevClass::Special => Some("special"),
+            VdevClass::Log => Some("log"),
+            VdevClass::Dedup => Some("dedup"),
+            VdevClass::Cache => Some("cache"),
+            VdevClass::Spare => Some("spare"),
+        }
+    }
+
+    /// cache/spare vdevs are plain device lists — no mirror/raidz layout.
+    pub fn allows_layout(self, layout: VdevLayout) -> bool {
+        !matches!(self, VdevClass::Cache | VdevClass::Spare) || layout == VdevLayout::Stripe
+    }
+
+    /// Human label for task titles and error messages.
+    pub fn label(self) -> &'static str {
+        self.keyword().unwrap_or("data")
+    }
+
+    /// Parses a form value (`data`/`special`/`log`/…) into a class.
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "data" => VdevClass::Data,
+            "special" => VdevClass::Special,
+            "log" => VdevClass::Log,
+            "dedup" => VdevClass::Dedup,
+            "cache" => VdevClass::Cache,
+            "spare" => VdevClass::Spare,
+            _ => return None,
+        })
+    }
+}
+
 /// Which LVM reporting command the helper should run on the web side's behalf.
 /// LVM reporting needs root, so these reads go through the helper (unlike ZFS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -746,6 +796,27 @@ mod tests {
         let form = keyword.unwrap_or("stripe");
         assert_eq!(VdevLayout::parse(form), Some(layout));
         assert_eq!(VdevLayout::parse("nonsense"), None);
+    }
+
+    #[rstest]
+    #[case::data(VdevClass::Data, None, true)]
+    #[case::special(VdevClass::Special, Some("special"), true)]
+    #[case::log(VdevClass::Log, Some("log"), true)]
+    #[case::dedup(VdevClass::Dedup, Some("dedup"), true)]
+    #[case::cache(VdevClass::Cache, Some("cache"), false)]
+    #[case::spare(VdevClass::Spare, Some("spare"), false)]
+    fn vdev_class(
+        #[case] class: VdevClass,
+        #[case] keyword: Option<&str>,
+        #[case] allows_mirror: bool,
+    ) {
+        assert_eq!(class.keyword(), keyword);
+        assert_eq!(class.label(), keyword.unwrap_or("data"));
+        assert_eq!(class.allows_layout(VdevLayout::Mirror), allows_mirror);
+        assert!(class.allows_layout(VdevLayout::Stripe));
+        // parse() round-trips the snake_case form value.
+        assert_eq!(VdevClass::parse(class.label()), Some(class));
+        assert_eq!(VdevClass::parse("nonsense"), None);
     }
 
     #[rstest]

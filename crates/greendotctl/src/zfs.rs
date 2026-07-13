@@ -3,8 +3,8 @@
 use crate::cmd::{self, TaskSpec};
 use crate::util::s;
 use greendot_proto::{
-    DatasetName, DevicePath, MountPoint, PoolName, SnapName, SubStatus, Task, VdevLayout,
-    VdevTarget,
+    DatasetName, DevicePath, MountPoint, PoolName, SnapName, SubStatus, Task, VdevClass,
+    VdevLayout, VdevTarget,
 };
 use std::io;
 use std::path::Path;
@@ -119,10 +119,37 @@ pub fn pool_create(
     zpool_spec(args)
 }
 
-/// `zpool add <pool> <device>`. No `-f`: zpool refuses (and reports) a vdev
-/// that would reduce the pool's redundancy, which is the desired behaviour.
-pub fn pool_device_add(pool: &PoolName, device: &DevicePath) -> TaskSpec {
-    zpool_spec(s(&["add", pool.as_str(), device.as_str()]))
+/// `zpool add <pool> [class] [layout] <dev>…` — one new top-level vdev. A data
+/// vdev emits no class keyword and a plain stripe no layout keyword, matching
+/// zpool's grammar (`zpool add tank special mirror a b`, `zpool add tank cache
+/// x`). No `-f`: zpool refuses (and reports) a vdev that would reduce the
+/// pool's redundancy, which is the desired behaviour.
+pub fn pool_vdev_add(
+    pool: &PoolName,
+    class: VdevClass,
+    layout: VdevLayout,
+    devices: &[DevicePath],
+) -> TaskSpec {
+    let mut args = s(&["add", pool.as_str()]);
+    if let Some(keyword) = class.keyword() {
+        args.push(keyword.to_string());
+    }
+    if let Some(keyword) = layout.keyword() {
+        args.push(keyword.to_string());
+    }
+    args.extend(devices.iter().map(|d| d.to_string()));
+    zpool_spec(args)
+}
+
+/// `zpool attach <pool> <target> <device>` — grow a mirror (or make one from
+/// a single disk), or expand a raidz vdev when the target is its name.
+pub fn pool_device_attach(pool: &PoolName, target: &VdevTarget, device: &DevicePath) -> TaskSpec {
+    zpool_spec(s(&[
+        "attach",
+        pool.as_str(),
+        target.as_str(),
+        device.as_str(),
+    ]))
 }
 
 /// `zpool remove <pool> <target>` — a leaf device or a top-level vdev name.
@@ -266,11 +293,33 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pool_add_args() {
-        let spec = pool_device_add(&pool(), &dp("/dev/sdd"));
+    #[rstest]
+    #[case::data_stripe(VdevClass::Data, VdevLayout::Stripe, &["sdd"],
+        &["add", "tank", "/dev/sdd"])]
+    #[case::special_mirror(VdevClass::Special, VdevLayout::Mirror, &["sdd", "sde"],
+        &["add", "tank", "special", "mirror", "/dev/sdd", "/dev/sde"])]
+    #[case::log_mirror(VdevClass::Log, VdevLayout::Mirror, &["sdd", "sde"],
+        &["add", "tank", "log", "mirror", "/dev/sdd", "/dev/sde"])]
+    #[case::cache(VdevClass::Cache, VdevLayout::Stripe, &["sdd"],
+        &["add", "tank", "cache", "/dev/sdd"])]
+    #[case::spare(VdevClass::Spare, VdevLayout::Stripe, &["sdd"],
+        &["add", "tank", "spare", "/dev/sdd"])]
+    #[case::data_raidz2(VdevClass::Data, VdevLayout::Raidz2, &["sdd", "sde", "sdf"],
+        &["add", "tank", "raidz2", "/dev/sdd", "/dev/sde", "/dev/sdf"])]
+    fn pool_vdev_add_args(
+        #[case] class: VdevClass,
+        #[case] layout: VdevLayout,
+        #[case] devs: &[&str],
+        #[case] expected: &[&str],
+    ) {
+        let devices: Vec<_> = devs.iter().map(|d| dp(&format!("/dev/{d}"))).collect();
+        let spec = pool_vdev_add(&pool(), class, layout, &devices);
         assert_eq!(spec.command, "zpool");
-        assert_eq!(spec.args, s(&["add", "tank", "/dev/sdd"]));
+        assert_eq!(
+            spec.args,
+            s(expected),
+            "data/stripe must not emit empty keywords"
+        );
         assert!(!spec.args.iter().any(|a| a == "-f"), "no forced add");
     }
 
@@ -281,6 +330,10 @@ mod tests {
         &["remove", "tank", "/dev/sdd"])]
     #[case::wait(pool_wait_remove(&pool()), &["wait", "-t", "remove", "tank"])]
     #[case::detach(pool_device_detach(&pool(), &dp("/dev/sdc")), &["detach", "tank", "/dev/sdc"])]
+    #[case::attach_leaf(pool_device_attach(&pool(), &VdevTarget::new("/dev/sdb").unwrap(), &dp("/dev/sdd")),
+        &["attach", "tank", "/dev/sdb", "/dev/sdd"])]
+    #[case::attach_raidz(pool_device_attach(&pool(), &VdevTarget::new("raidz1-0").unwrap(), &dp("/dev/sdd")),
+        &["attach", "tank", "raidz1-0", "/dev/sdd"])]
     fn pool_remove_detach_args(#[case] spec: TaskSpec, #[case] expected: &[&str]) {
         assert_eq!(spec.command, "zpool");
         assert_eq!(spec.args, s(expected));
