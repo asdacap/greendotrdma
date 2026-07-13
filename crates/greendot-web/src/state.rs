@@ -16,7 +16,8 @@ use std::sync::Mutex;
 /// name one model. Re-exported so existing `crate::state::*` paths keep working;
 /// the SQLite-backed `Db` (task history + the sole config writer) stays here.
 pub use greendot_proto::desired::{
-    Desired, IscsiExport, NfsClientEntry, NfsExport, NvmeExport, parse_listen_iface, read_desired,
+    Desired, IscsiExport, NfsClientEntry, NfsExport, NicConfig, NvmeExport, parse_listen_iface,
+    read_desired,
 };
 pub use greendot_proto::{OUR_IQN_PREFIX, OUR_NQN_PREFIX, SubStatus};
 
@@ -84,6 +85,10 @@ struct ConfigDoc {
     iscsi_export: Vec<IscsiExport>,
     policy: Vec<SnapshotPolicy>,
     nfs_export: Vec<NfsExport>,
+    /// Per-NIC desired config (MTU + Soft-RoCE/RoCE enablement) that the daemon's
+    /// reconciler re-applies on boot; keyed by netdev name.
+    #[serde(default)]
+    nic_config: Vec<NicConfig>,
     client_token: Vec<ClientToken>,
     /// Pre-split configs stored a single unified `export = [...]` table tagged
     /// with `kind`, plus `next_export_id`. These read-only fields capture those
@@ -570,6 +575,51 @@ impl Db {
         let mut doc = self.config.lock().unwrap();
         doc.settings.insert(key.to_owned(), value.to_owned());
         self.persist(&doc)
+    }
+
+    /// Upserts `netdev`'s desired-config row (created blank if absent) and hands
+    /// it to `edit` before persisting — the shared path for the MTU / Soft-RoCE /
+    /// RoCE setters, so each records only the field it owns without clobbering
+    /// the others.
+    fn edit_nic_config(&self, netdev: &str, edit: impl FnOnce(&mut NicConfig)) -> Result<()> {
+        let mut doc = self.config.lock().unwrap();
+        if !doc.nic_config.iter().any(|c| c.netdev == netdev) {
+            doc.nic_config.push(NicConfig {
+                netdev: netdev.to_owned(),
+                mtu: None,
+                want_rxe: false,
+                want_roce: false,
+            });
+        }
+        let entry = doc
+            .nic_config
+            .iter_mut()
+            .find(|c| c.netdev == netdev)
+            .expect("row inserted above when absent");
+        edit(entry);
+        self.persist(&doc)
+    }
+
+    /// Records the desired MTU for `netdev` so reconcile re-applies it on reboot.
+    pub fn set_nic_mtu(&self, netdev: &str, mtu: u32) -> Result<()> {
+        self.edit_nic_config(netdev, |c| c.mtu = Some(mtu))
+    }
+
+    /// Records that Soft-RoCE (rxe) should stay enabled on `netdev` across reboots.
+    pub fn set_nic_want_rxe(&self, netdev: &str, want: bool) -> Result<()> {
+        self.edit_nic_config(netdev, |c| c.want_rxe = want)
+    }
+
+    /// Records that hardware RoCE should stay enabled on `netdev` across reboots.
+    pub fn set_nic_want_roce(&self, netdev: &str, want: bool) -> Result<()> {
+        self.edit_nic_config(netdev, |c| c.want_roce = want)
+    }
+
+    /// The desired NIC configs (display/tests), sorted by netdev.
+    pub fn list_nic_configs(&self) -> Result<Vec<NicConfig>> {
+        let mut configs = self.config.lock().unwrap().nic_config.clone();
+        configs.sort_by(|a, b| a.netdev.cmp(&b.netdev));
+        Ok(configs)
     }
 
     /// Records a started task; returns its id. Command/args/stdin land via
@@ -1311,5 +1361,28 @@ want_tcp = false
             std::fs::remove_file(dir.join(format!("gd-mig-tasks{tag}.{ext}"))).ok();
         }
         std::fs::remove_file(&state).ok();
+    }
+
+    #[test]
+    fn nic_config_setters_upsert_one_row_per_netdev() {
+        let db = Db::in_memory().unwrap();
+        // Each setter creates the row if absent and touches only its own field.
+        db.set_nic_mtu("enp1s0", 9000).unwrap();
+        db.set_nic_want_rxe("enp1s0", true).unwrap();
+        db.set_nic_want_roce("enp3s0", true).unwrap();
+        // A later MTU change updates the same row rather than adding another.
+        db.set_nic_mtu("enp1s0", 1500).unwrap();
+
+        let configs = db.list_nic_configs().unwrap();
+        assert_eq!(
+            configs
+                .iter()
+                .map(|c| (c.netdev.as_str(), c.mtu, c.want_rxe, c.want_roce))
+                .collect::<Vec<_>>(),
+            [
+                ("enp1s0", Some(1500), true, false),
+                ("enp3s0", None, false, true),
+            ]
+        );
     }
 }

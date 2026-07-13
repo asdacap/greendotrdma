@@ -553,7 +553,7 @@ message NicAdviceMsg { string netdev = 1; string label = 2; string detail = 3; }
 message SmartHealthReply { repeated SmartHealthMsg devices = 1; }
 message SmartHealthMsg { string device = 1; optional bool passed = 2; optional int32 temp_c = 3; }
 
-message ReconcileDryRunReply { bool nvmet_ok = 1; bool lio_ok = 2; bool nfs_ok = 3; }
+message ReconcileDryRunReply { bool nvmet_ok = 1; bool lio_ok = 2; bool nfs_ok = 3; bool nic_ok = 4; }
 
 // ---- Task streaming (the task-op reply). A task is a sequence of subtasks,
 // each with its own recorded output and terminal status; Stdout/Stderr belong

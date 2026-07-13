@@ -230,6 +230,7 @@ want_tcp = true
             "Apply NVMe-oF configuration",
             "Apply iSCSI configuration",
             "Apply NFS configuration",
+            "Apply NIC configuration",
         ],
         "every area must appear as a subtask; events: {events:?}"
     );

@@ -71,7 +71,7 @@ pub trait ReadOp: TryFrom<Self::Wire, Error = ConvertError> + Send + Sized + 'st
 /// Captures `ip <args>` stdout for a read op. Read-only, so it runs directly
 /// (no task record); a missing binary or non-zero exit yields an empty string,
 /// which the pure parser turns into an empty result.
-fn run_ip(args: &[&str]) -> String {
+pub(crate) fn run_ip(args: &[&str]) -> String {
     std::process::Command::new("ip")
         .args(args)
         .output()
@@ -461,11 +461,12 @@ impl ReadOp for ops::ReconcileDryRun {
     type Wire = pb::Empty;
     type Reply = pb::ReconcileDryRunReply;
     fn read(self, ctx: &Ctx) -> Self::Reply {
-        let (nvmet_ok, lio_ok, nfs_ok) = reconcile::drift(ctx.reconcile_config.clone());
+        let (nvmet_ok, lio_ok, nfs_ok, nic_ok) = reconcile::drift(ctx.reconcile_config.clone());
         pb::ReconcileDryRunReply {
             nvmet_ok,
             lio_ok,
             nfs_ok,
+            nic_ok,
         }
     }
 }

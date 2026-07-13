@@ -183,6 +183,30 @@ pub struct NfsClientEntry {
     pub rw: bool,
 }
 
+/// Desired per-NIC configuration, keyed by interface name. Unlike the live
+/// one-shot actions (`ip link set mtu`, the rxe link add, the vendor RoCE
+/// enable) this is remembered so reconciliation re-applies it after a reboot —
+/// the kernel forgets a runtime MTU, and a Soft-RoCE (rxe) link never survives a
+/// reboot at all. Keyed by `netdev` to match the netdev-based actions; a
+/// since-renamed interface simply leaves an orphan entry that resolves to
+/// nothing and is skipped.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NicConfig {
+    pub netdev: String,
+    /// Desired MTU. `None` means "no MTU preference recorded" — the entry then
+    /// contributes no drift and is left as the kernel/DHCP set it.
+    #[serde(default)]
+    pub mtu: Option<u32>,
+    /// Keep Soft-RoCE (rxe) enabled: re-add the rxe link on reconcile when the
+    /// NIC is a plain Ethernet candidate with no RDMA device yet.
+    #[serde(default)]
+    pub want_rxe: bool,
+    /// Keep hardware RoCE enabled: re-run the vendor enable on reconcile when the
+    /// NIC is RoCE-capable but currently disabled.
+    #[serde(default)]
+    pub want_roce: bool,
+}
+
 pub fn default_true() -> bool {
     true
 }
@@ -192,6 +216,8 @@ pub struct Desired {
     pub nvme_exports: Vec<NvmeExport>,
     pub iscsi_exports: Vec<IscsiExport>,
     pub nfs_exports: Vec<NfsExport>,
+    /// Per-NIC config to re-apply on reconcile (currently just MTU).
+    pub nic_configs: Vec<NicConfig>,
     pub listen: IpAddr,
 }
 
@@ -207,6 +233,7 @@ struct DesiredDoc {
     nvme_export: Vec<NvmeExport>,
     iscsi_export: Vec<IscsiExport>,
     nfs_export: Vec<NfsExport>,
+    nic_config: Vec<NicConfig>,
     #[serde(rename = "export")]
     legacy_export: Vec<LegacyExport>,
 }
@@ -292,6 +319,8 @@ pub fn read_desired(state_path: &Path) -> Result<Desired> {
     }
     let mut nfs_exports = doc.nfs_export;
     nfs_exports.sort_by(|a, b| a.path.cmp(&b.path));
+    let mut nic_configs = doc.nic_config;
+    nic_configs.sort_by(|a, b| a.netdev.cmp(&b.netdev));
     let listen = doc
         .settings
         .get("listen_addr")
@@ -301,6 +330,7 @@ pub fn read_desired(state_path: &Path) -> Result<Desired> {
         nvme_exports,
         iscsi_exports,
         nfs_exports,
+        nic_configs,
         listen,
     })
 }
@@ -364,11 +394,27 @@ want_tcp = false
 [[nfs_export]]
 id = 1
 path = "/tank/share"
+
+[[nic_config]]
+netdev = "enp3s0"
+mtu = 9000
+
+[[nic_config]]
+netdev = "enp1s0"
+mtu = 1500
 "#,
         )
         .unwrap();
         let d = read_desired(&state).unwrap();
         assert_eq!(d.listen, "10.0.0.5".parse::<IpAddr>().unwrap());
+        // NIC configs are read and sorted by netdev.
+        assert_eq!(
+            d.nic_configs
+                .iter()
+                .map(|n| (n.netdev.as_str(), n.mtu))
+                .collect::<Vec<_>>(),
+            [("enp1s0", Some(1500)), ("enp3s0", Some(9000))]
+        );
         assert_eq!(
             d.nvme_exports.iter().map(|e| &e.name).collect::<Vec<_>>(),
             ["vm2"]

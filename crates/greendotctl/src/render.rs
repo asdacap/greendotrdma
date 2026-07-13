@@ -10,14 +10,15 @@
 use crate::actual::lio::ActualLio;
 use crate::actual::nvmet::ActualNvmet;
 use greendot_proto::actual::nfs::ActualNfs;
+use greendot_proto::actual::nic::{NicNetwork, NicRdmaKind, NicStatus};
 use greendot_proto::desired::{
-    IscsiExport, NfsExport, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX, iscsi_render_error,
-    listen_addrs, nfs_render_error, nvme_render_error,
+    IscsiExport, NfsExport, NicConfig, NvmeExport, OUR_IQN_PREFIX, OUR_NQN_PREFIX,
+    iscsi_render_error, listen_addrs, nfs_render_error, nvme_render_error,
 };
 use greendot_proto::{
     KernelModule, LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec,
-    NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired,
-    NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Transport,
+    NetdevName, NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn,
+    NvmetDesired, NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, Transport,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -303,6 +304,71 @@ pub fn nfs_modules(nfs_exports: &[NfsExport]) -> Vec<KernelModule> {
     } else {
         Vec::new()
     }
+}
+
+/// A NIC-config action the reconciler applies to realize desired state. Each is
+/// chosen from the desired config *and* the NIC's current classification, so an
+/// already-realized NIC is never re-touched — the RDMA enables in particular
+/// reload the device, so they must only fire when the NIC is genuinely off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NicAction {
+    /// `ip link set dev <netdev> mtu <mtu>` — interface present and off-target.
+    SetMtu(NetdevName, u32),
+    /// Add the Soft-RoCE (rxe) link — a plain Ethernet candidate with no RDMA
+    /// device yet.
+    AddRxe(NetdevName),
+    /// Run the vendor hardware-RoCE enable — RoCE-capable hardware, disabled.
+    EnableRoce(NetdevName),
+}
+
+/// The NIC actions needed to realize `desired`, given the live per-NIC network
+/// config (`networks`, for MTU) and structural RDMA classification (`statuses`,
+/// for RoCE gating). Ordered per desired entry: MTU first, then RDMA enablement.
+/// An entry whose interface is absent, whose saved name is invalid, or that is
+/// already realized contributes nothing — so a satisfied config yields an empty
+/// list, and the RDMA enables never re-bounce a NIC that already has a device.
+/// The `want_rxe`/`want_roce` gating mirrors exactly which NIC kinds the web
+/// offers each action for (`SoftRoceable` → Soft-RoCE, `CapableDisabled` → RoCE).
+pub fn nic_actions(
+    desired: &[NicConfig],
+    networks: &[NicNetwork],
+    statuses: &[NicStatus],
+) -> Vec<NicAction> {
+    let mut actions = Vec::new();
+    for c in desired {
+        let Ok(name) = NetdevName::new(&c.netdev) else {
+            continue;
+        };
+        if let Some(mtu) = c.mtu
+            && networks
+                .iter()
+                .find(|n| n.netdev == c.netdev)
+                .is_some_and(|n| n.mtu != Some(mtu))
+        {
+            actions.push(NicAction::SetMtu(name.clone(), mtu));
+        }
+        match statuses
+            .iter()
+            .find(|s| s.netdev == c.netdev)
+            .map(|s| &s.kind)
+        {
+            Some(NicRdmaKind::SoftRoceable) if c.want_rxe => actions.push(NicAction::AddRxe(name)),
+            Some(NicRdmaKind::CapableDisabled { .. }) if c.want_roce => {
+                actions.push(NicAction::EnableRoce(name))
+            }
+            _ => {}
+        }
+    }
+    actions
+}
+
+/// Whether every desired NIC setting is already realized (no action to apply).
+pub fn nic_satisfied(
+    desired: &[NicConfig],
+    networks: &[NicNetwork],
+    statuses: &[NicStatus],
+) -> bool {
+    nic_actions(desired, networks, statuses).is_empty()
 }
 
 fn set<T: Ord, I: IntoIterator<Item = T>>(items: I) -> BTreeSet<T> {
@@ -997,5 +1063,82 @@ mod tests {
             last_error: None,
         };
         assert_eq!(nfs_modules(&[enabled]), vec![KernelModule::Rpcrdma]);
+    }
+
+    #[test]
+    fn nic_actions_gate_on_live_classification() {
+        let cfg = |netdev: &str, mtu: Option<u32>, want_rxe: bool, want_roce: bool| NicConfig {
+            netdev: netdev.into(),
+            mtu,
+            want_rxe,
+            want_roce,
+        };
+        let net = |netdev: &str, mtu: Option<u32>| NicNetwork {
+            netdev: netdev.into(),
+            mac: None,
+            mtu,
+            operstate: "UP".into(),
+            dhcp: false,
+            addrs: vec![],
+            gateway: None,
+        };
+        let stat = |netdev: &str, kind: NicRdmaKind| NicStatus {
+            netdev: netdev.into(),
+            rdma: None,
+            pci: None,
+            addrs: vec![],
+            kind,
+        };
+        let networks = vec![net("enp1s0", Some(1500)), net("enp3s0", Some(9000))];
+        let statuses = vec![
+            stat("enp1s0", NicRdmaKind::SoftRoceable),
+            stat(
+                "enp3s0",
+                NicRdmaKind::CapableDisabled {
+                    vendor: "Acme".into(),
+                },
+            ),
+            stat("enp5s0", NicRdmaKind::Active),
+        ];
+
+        // enp1s0: MTU off-target → SetMtu, and SoftRoceable + want_rxe → AddRxe.
+        // enp3s0: MTU already 9000 (no SetMtu), CapableDisabled + want_roce →
+        // EnableRoce. enp5s0: already Active → want_rxe/want_roce produce nothing
+        // (never re-bounced). enp9s0: absent → skipped entirely.
+        let desired = vec![
+            cfg("enp1s0", Some(9000), true, false),
+            cfg("enp3s0", Some(9000), false, true),
+            cfg("enp5s0", None, true, true),
+            cfg("enp9s0", Some(9000), true, true),
+        ];
+        assert_eq!(
+            nic_actions(&desired, &networks, &statuses),
+            vec![
+                NicAction::SetMtu(NetdevName::new("enp1s0").unwrap(), 9000),
+                NicAction::AddRxe(NetdevName::new("enp1s0").unwrap()),
+                NicAction::EnableRoce(NetdevName::new("enp3s0").unwrap()),
+            ]
+        );
+        assert!(!nic_satisfied(&desired, &networks, &statuses));
+
+        // Once every NIC is realized (MTUs at target, both RDMA NICs now Active),
+        // the config is satisfied and nothing re-fires.
+        let realized_nets = vec![net("enp1s0", Some(9000)), net("enp3s0", Some(9000))];
+        let realized_stats = vec![
+            stat("enp1s0", NicRdmaKind::Active),
+            stat("enp3s0", NicRdmaKind::Active),
+            stat("enp5s0", NicRdmaKind::Active),
+        ];
+        assert!(nic_satisfied(&desired, &realized_nets, &realized_stats));
+        // An invalid saved name and an empty config both yield no actions.
+        assert!(
+            nic_actions(
+                &[cfg("bad/name", Some(9000), true, true)],
+                &networks,
+                &statuses
+            )
+            .is_empty()
+        );
+        assert!(nic_satisfied(&[], &networks, &statuses));
     }
 }

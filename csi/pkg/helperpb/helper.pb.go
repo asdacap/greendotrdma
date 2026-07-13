@@ -5930,6 +5930,7 @@ type ReconcileDryRunReply struct {
 	NvmetOk       bool                   `protobuf:"varint,1,opt,name=nvmet_ok,json=nvmetOk,proto3" json:"nvmet_ok,omitempty"`
 	LioOk         bool                   `protobuf:"varint,2,opt,name=lio_ok,json=lioOk,proto3" json:"lio_ok,omitempty"`
 	NfsOk         bool                   `protobuf:"varint,3,opt,name=nfs_ok,json=nfsOk,proto3" json:"nfs_ok,omitempty"`
+	NicOk         bool                   `protobuf:"varint,4,opt,name=nic_ok,json=nicOk,proto3" json:"nic_ok,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -5981,6 +5982,13 @@ func (x *ReconcileDryRunReply) GetLioOk() bool {
 func (x *ReconcileDryRunReply) GetNfsOk() bool {
 	if x != nil {
 		return x.NfsOk
+	}
+	return false
+}
+
+func (x *ReconcileDryRunReply) GetNicOk() bool {
+	if x != nil {
+		return x.NicOk
 	}
 	return false
 }
@@ -6747,11 +6755,12 @@ const file_helper_proto_rawDesc = "" +
 	"\x06passed\x18\x02 \x01(\bH\x00R\x06passed\x88\x01\x01\x12\x1a\n" +
 	"\x06temp_c\x18\x03 \x01(\x05H\x01R\x05tempC\x88\x01\x01B\t\n" +
 	"\a_passedB\t\n" +
-	"\a_temp_c\"_\n" +
+	"\a_temp_c\"v\n" +
 	"\x14ReconcileDryRunReply\x12\x19\n" +
 	"\bnvmet_ok\x18\x01 \x01(\bR\anvmetOk\x12\x15\n" +
 	"\x06lio_ok\x18\x02 \x01(\bR\x05lioOk\x12\x15\n" +
-	"\x06nfs_ok\x18\x03 \x01(\bR\x05nfsOk\"\x88\x01\n" +
+	"\x06nfs_ok\x18\x03 \x01(\bR\x05nfsOk\x12\x15\n" +
+	"\x06nic_ok\x18\x04 \x01(\bR\x05nicOk\"\x88\x01\n" +
 	"\x0eSubtaskStarted\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\acommand\x18\x02 \x01(\tH\x00R\acommand\x88\x01\x01\x12\x12\n" +

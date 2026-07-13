@@ -51,7 +51,7 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
     // diffs it in one privileged pass — the web does no hardware read. A
     // transport failure deserializes to "all drifted", so we still reconcile.
     let drift = state.helper.reconcile_dry_run().await;
-    if drift.nvmet_ok && drift.lio_ok && drift.nfs_ok {
+    if drift.nvmet_ok && drift.lio_ok && drift.nfs_ok && drift.nic_ok {
         return Ok(None); // already realized — emit no task
     }
 

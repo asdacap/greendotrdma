@@ -8,17 +8,77 @@
 
 use crate::cmd::EventSink;
 use crate::render::{
-    foreign_port_ids, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied, nvme_modules,
-    nvmet_satisfied, render_issues, render_lio, render_nfs, render_nvmet,
+    NicAction, foreign_port_ids, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied,
+    nic_actions, nic_satisfied, nvme_modules, nvmet_satisfied, render_issues, render_lio,
+    render_nfs, render_nvmet,
 };
-use crate::{cmd, lio, modules, nfs, nvmet};
+use crate::{cmd, hardware, lio, modules, nfs, nvmet};
 use anyhow::Result;
 use greendot_proto::actual::nfs::from_report;
+use greendot_proto::actual::nic::{NicNetwork, NicStatus};
 use greendot_proto::config::Config;
 use greendot_proto::{NFS_RDMA_PORT, SubStatus, SubTask, Task, TaskEvent, pb};
+use std::collections::HashMap;
 use std::io::{self, Write};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// The sysfs class root for RDMA devices (the classification's `ib_root`).
+const IB_ROOT: &str = "/sys/class/infiniband";
+
+/// The live NIC state reconcile diffs desired NIC config against: per-NIC
+/// network config (`ip -j addr`/`route`, for MTU) and the structural RDMA
+/// classification (sysfs + the vendor RoCE-capable verdict, for RoCE gating).
+/// Mirrors the `NicNetwork` and `NicInterfaces` read ops so reconcile and the
+/// web see one model; combined here so a pass takes a single read.
+fn read_live_nics() -> (Vec<NicNetwork>, Vec<NicStatus>) {
+    let networks = greendot_proto::actual::nic::networks_from_json(
+        &crate::exec::run_ip(&["-j", "addr"]),
+        &crate::exec::run_ip(&["-j", "route", "show", "default"]),
+    );
+    let roce_hw: HashMap<String, String> = hardware::roce_capable(Path::new(hardware::NET_ROOT))
+        .into_iter()
+        .map(|(netdev, vendor)| (netdev, vendor.to_owned()))
+        .collect();
+    let netdev_addrs = crate::actual::rdma::netdev_addrs();
+    let statuses = crate::actual::nic::classify(
+        Path::new(hardware::NET_ROOT),
+        Path::new(IB_ROOT),
+        &netdev_addrs,
+        &roce_hw,
+    );
+    (networks, statuses)
+}
+
+/// Applies each NIC action as its own subtask — an MTU set, a Soft-RoCE link
+/// add, or the vendor hardware-RoCE enable — reusing the exact code the one-shot
+/// `SetMtu`/`RxeAdd`/`EnableRoce` ops run, so a mixed pass shows one line per
+/// change. A satisfied config emits a single grey `Skipped` subtask, matching
+/// the export areas. `Err` is only a sink failure; domain failures fold into the
+/// task aggregate as failed subtasks.
+fn apply_nic(task: &mut Task, actions: &[NicAction]) -> io::Result<()> {
+    if actions.is_empty() {
+        task.skipped_subtask("Apply NIC configuration");
+        return Ok(());
+    }
+    for act in actions {
+        match act {
+            NicAction::SetMtu(netdev, mtu) => {
+                let mut sub = task.begin_subtask(format!("Set MTU {mtu} on {netdev}"));
+                let status = cmd::run_into(&mut sub, &crate::net::set_mtu(netdev, *mtu))?;
+                sub.complete(status);
+            }
+            NicAction::AddRxe(netdev) => modules::rxe_add(task, netdev)?,
+            NicAction::EnableRoce(netdev) => {
+                let mut sub = task.begin_subtask(format!("Enable RoCE on {netdev}"));
+                let status =
+                    hardware::enable_into(Path::new(hardware::NET_ROOT), netdev, &mut sub)?;
+                sub.complete(status);
+            }
+        }
+    }
+    Ok(())
+}
 
 /// Runs the `reconcile` subcommand and exits with status 1 if any step failed.
 /// With no explicit config it prefers a running daemon — proxying
@@ -81,16 +141,18 @@ fn proxy(socket: std::path::PathBuf) -> Result<()> {
     })
 }
 
-/// The web's cheap drift pre-check (`ReconcileDryRun`): the three per-area
+/// The web's cheap drift pre-check (`ReconcileDryRun`): the per-area
 /// drift-satisfied flags, *without applying* and without the mutate lock. A
-/// config/desired read error reports drift on all three areas, so the web then
-/// dispatches a real `Reconcile` that surfaces it.
-pub fn drift(cfg_path: Option<String>) -> (bool, bool, bool) {
+/// config/desired read error reports drift on all areas, so the web then
+/// dispatches a real `Reconcile` that surfaces it. The NIC flag is what makes an
+/// MTU/RoCE-only drift (no export drift) still trigger a reconcile — otherwise a
+/// reboot with satisfied exports would skip re-applying NIC config.
+pub fn drift(cfg_path: Option<String>) -> (bool, bool, bool, bool) {
     let Ok(cfg) = Config::load(cfg_path) else {
-        return (false, false, false);
+        return (false, false, false, false);
     };
     let Ok(desired) = greendot_proto::desired::read_desired(&cfg.state_path) else {
-        return (false, false, false);
+        return (false, false, false, false);
     };
     let pci_addrs = crate::actual::nic::pci_addrs();
     let actual_nvmet = crate::actual::nvmet::read(&cfg.nvmet_root);
@@ -113,7 +175,9 @@ pub fn drift(cfg_path: Option<String>) -> (bool, bool, bool) {
         &render_nfs(&desired.nfs_exports, NFS_RDMA_PORT),
         &nfs_actual,
     );
-    (nvmet_ok, lio_ok, nfs_ok)
+    let (nic_networks, nic_statuses) = read_live_nics();
+    let nic_ok = nic_satisfied(&desired.nic_configs, &nic_networks, &nic_statuses);
+    (nvmet_ok, lio_ok, nfs_ok, nic_ok)
 }
 
 /// Reconciles desired → actual wholly in this (root) process, streaming each
@@ -178,13 +242,20 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
         Path::new(nfs::NFS_EXPORTS_FILE),
     ));
     let nfs_ok = nfs_satisfied(&nfs_desired, &nfs_actual);
+    // NIC config (MTU + Soft-RoCE/RoCE enablement) re-applied so it survives a
+    // reboot; the actions are gated on live classification so a realized NIC is
+    // never re-touched.
+    let (nic_networks, nic_statuses) = read_live_nics();
+    let nic_acts = nic_actions(&desired.nic_configs, &nic_networks, &nic_statuses);
     tracing::info!(
         nvme = desired.nvme_exports.len(),
         iscsi = desired.iscsi_exports.len(),
         nfs = desired.nfs_exports.len(),
+        nic = desired.nic_configs.len(),
         nvmet_ok,
         lio_ok,
         nfs_ok,
+        nic_ok = nic_acts.is_empty(),
         "reconcile pass"
     );
 
@@ -220,7 +291,8 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
             Path::new(nfs::NFSD_PORTLIST),
             sub,
         )
-    })
+    })?;
+    apply_nic(task, &nic_acts)
 }
 
 /// One reconcile area: a grey `Skipped` subtask when already satisfied,

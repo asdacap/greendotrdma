@@ -331,6 +331,15 @@ async fn enable_rxe(State(state): State<Arc<AppState>>, Path(netdev): Path<Strin
             .await,
         });
     };
+    // Persist the intent so reconcile re-adds the rxe link after a reboot (a
+    // runtime rxe link never survives one); the immediate RxeAdd below is the
+    // separate live intent.
+    if let Err(e) = state.db.set_nic_want_rxe(netdev.as_str(), true) {
+        return page(NicDetailPartial {
+            view: gather_nic_detail(&state, netdev.as_str(), None, Some(format!("{e:#}")), None)
+                .await,
+        });
+    }
     // One RxeAdd task: the helper loads the rxe module and adds the link in
     // order. The follow-up reconcile (a separate, idempotent intent) is chained
     // on the task's success from a background wait.
@@ -394,6 +403,15 @@ async fn set_roce(State(state): State<Arc<AppState>>, Path(netdev): Path<String>
             .await,
         });
     };
+    // Persist the intent so reconcile re-runs the vendor enable after a reboot
+    // if the NIC comes back RoCE-disabled; the immediate EnableRoce below is the
+    // separate live intent (and reloads the device now).
+    if let Err(e) = state.db.set_nic_want_roce(netdev.as_str(), true) {
+        return page(NicDetailPartial {
+            view: gather_nic_detail(&state, netdev.as_str(), None, Some(format!("{e:#}")), None)
+                .await,
+        });
+    }
     let title = format!("enable RoCE on {netdev}");
     let view = match crate::task_runner::start(
         &state,
@@ -449,6 +467,12 @@ async fn set_mtu(
     let Ok(mtu) = form.mtu.trim().parse::<u32>() else {
         return err(format!("invalid MTU {:?}", form.mtu)).await;
     };
+    // Record the desired MTU first so a reboot re-applies it via reconcile even
+    // if the immediate apply below is interrupted; the live set is a separate
+    // idempotent intent (instant feedback, no device reload).
+    if let Err(e) = state.db.set_nic_mtu(name.as_str(), mtu) {
+        return err(format!("could not save MTU setting: {e:#}")).await;
+    }
     let title = format!("set MTU {mtu} on {name}");
     let view = match crate::task_runner::start(
         &state,
@@ -478,13 +502,16 @@ async fn set_mtu(
 
 #[cfg(test)]
 mod tests {
-    use crate::routes::testutil::{form_post, login, send, test_app};
+    use crate::routes::testutil::{form_post, login, send, test_state};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
 
     #[tokio::test]
     async fn nic_list_detail_diagnose_and_roce_flow() {
-        let app = test_app();
+        // Built from a held state so the persisted desired NIC config (which
+        // reconcile re-applies on reboot) can be asserted after the posts.
+        let state = test_state();
+        let app = crate::routes::app(state.clone());
         let (cookie, csrf) = login(&app).await;
         let auth = |mut req: HttpRequest<Body>| {
             req.headers_mut()
@@ -545,5 +572,21 @@ mod tests {
         )
         .await;
         assert!(body.contains("invalid interface name"), "{body}");
+
+        // The valid Soft-RoCE / RoCE / MTU posts each persisted their intent to
+        // eth0's desired NIC config, so reconcile re-applies them after a reboot;
+        // the rejected posts (bad name / non-numeric MTU) wrote nothing.
+        let configs = state.db.list_nic_configs().unwrap();
+        assert_eq!(
+            configs
+                .iter()
+                .map(|c| c.netdev.as_str())
+                .collect::<Vec<_>>(),
+            ["eth0"],
+            "only the valid interface was recorded: {configs:?}"
+        );
+        let eth0 = &configs[0];
+        assert_eq!(eth0.mtu, Some(9000));
+        assert!(eth0.want_rxe && eth0.want_roce, "{eth0:?}");
     }
 }
