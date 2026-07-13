@@ -527,6 +527,32 @@ impl From<PoolDeviceDetach> for pb::PoolDeviceDetach {
     }
 }
 
+/// `zpool online <pool> <device>` — bring a REMOVED/OFFLINE leaf device back
+/// into service.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolDeviceOnline {
+    pub pool: PoolName,
+    pub device: DevicePath,
+}
+
+impl TryFrom<pb::PoolDeviceOnline> for PoolDeviceOnline {
+    type Error = ConvertError;
+    fn try_from(p: pb::PoolDeviceOnline) -> Result<Self, ConvertError> {
+        Ok(PoolDeviceOnline {
+            pool: PoolName::new(p.pool)?,
+            device: DevicePath::new(p.device)?,
+        })
+    }
+}
+impl From<PoolDeviceOnline> for pb::PoolDeviceOnline {
+    fn from(p: PoolDeviceOnline) -> Self {
+        pb::PoolDeviceOnline {
+            pool: p.pool.as_str().to_owned(),
+            device: p.device.as_str().to_owned(),
+        }
+    }
+}
+
 // ---- Partitioning ----
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1546,6 +1572,10 @@ mod tests {
             pool: PoolName::new("tank").unwrap(),
             device: DevicePath::new("/dev/sdc").unwrap(),
         } => pb::PoolDeviceDetach);
+        roundtrip!(PoolDeviceOnline {
+            pool: PoolName::new("tank").unwrap(),
+            device: DevicePath::new("/dev/sdb").unwrap(),
+        } => pb::PoolDeviceOnline);
         roundtrip!(PartitionTableCreate { disk: BlockDev::new("sdb").unwrap() } => pb::PartitionTableCreate);
         roundtrip!(PartitionCreate {
             disk: BlockDev::new("sdb").unwrap(),

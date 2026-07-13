@@ -359,6 +359,7 @@ pub(crate) mod testutil {
             pool_device_attach, PoolDeviceAttachStream, pb::PoolDeviceAttach;
             pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove;
             pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach;
+            pool_device_online, PoolDeviceOnlineStream, pb::PoolDeviceOnline;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate;
             partition_create, PartitionCreateStream, pb::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete;

@@ -167,6 +167,12 @@ pub fn pool_device_detach(pool: &PoolName, device: &DevicePath) -> TaskSpec {
     zpool_spec(s(&["detach", pool.as_str(), device.as_str()]))
 }
 
+/// `zpool online <pool> <device>` — bring a REMOVED/OFFLINE leaf device back
+/// into service (zpool resilvers it to catch up on writes made while it was gone).
+pub fn pool_device_online(pool: &PoolName, device: &DevicePath) -> TaskSpec {
+    zpool_spec(s(&["online", pool.as_str(), device.as_str()]))
+}
+
 /// `zpool remove` then `zpool wait -t remove` as one task, so the task only
 /// finishes when evacuation completes (instant for log/cache/spare devices).
 /// The wait is skipped when the remove itself failed — it would otherwise
@@ -330,6 +336,7 @@ mod tests {
         &["remove", "tank", "/dev/sdd"])]
     #[case::wait(pool_wait_remove(&pool()), &["wait", "-t", "remove", "tank"])]
     #[case::detach(pool_device_detach(&pool(), &dp("/dev/sdc")), &["detach", "tank", "/dev/sdc"])]
+    #[case::online(pool_device_online(&pool(), &dp("/dev/sdb")), &["online", "tank", "/dev/sdb"])]
     #[case::attach_leaf(pool_device_attach(&pool(), &VdevTarget::new("/dev/sdb").unwrap(), &dp("/dev/sdd")),
         &["attach", "tank", "/dev/sdb", "/dev/sdd"])]
     #[case::attach_raidz(pool_device_attach(&pool(), &VdevTarget::new("raidz1-0").unwrap(), &dp("/dev/sdd")),

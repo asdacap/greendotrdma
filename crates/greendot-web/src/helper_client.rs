@@ -179,6 +179,7 @@ impl HelperClient {
         pool_device_attach(ops::PoolDeviceAttach => pb::PoolDeviceAttach);
         pool_device_remove(ops::PoolDeviceRemove => pb::PoolDeviceRemove);
         pool_device_detach(ops::PoolDeviceDetach => pb::PoolDeviceDetach);
+        pool_device_online(ops::PoolDeviceOnline => pb::PoolDeviceOnline);
         partition_table_create(ops::PartitionTableCreate => pb::PartitionTableCreate);
         partition_create(ops::PartitionCreate => pb::PartitionCreate);
         partition_delete(ops::PartitionDelete => pb::PartitionDelete);

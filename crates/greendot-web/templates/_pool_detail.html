@@ -83,6 +83,22 @@
               </article>
             </dialog>
             {% endif %}
+            {% if m.can_online %}
+            <button type="button" class="dialog-trigger" data-dialog-open>Bring online</button>
+            <dialog>
+              <article>
+                <header>Bring {{ m.name }} online — {{ view.name }}</header>
+                <form class="card" hx-post="/zfs/pool/{{ view.name }}/online-device" hx-target="#pool-detail-content" hx-swap="outerHTML">
+                  <input type="hidden" name="device" value="{{ m.name }}">
+                  <p class="muted small">The device is put back into service and resilvered to catch up on any writes made while it was gone. Safe when the disk is physically back.</p>
+                  <footer>
+                    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+                    <button type="submit">Bring online</button>
+                  </footer>
+                </form>
+              </article>
+            </dialog>
+            {% endif %}
             {% if m.can_detach %}
             <button type="button" class="dialog-trigger" data-dialog-open>Detach</button>
             <dialog>

@@ -27,6 +27,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/pool/{name}/attach-device", post(pool_attach_device))
         .route("/zfs/pool/{name}/remove-device", post(pool_remove_device))
         .route("/zfs/pool/{name}/detach-device", post(pool_detach_device))
+        .route("/zfs/pool/{name}/online-device", post(pool_online_device))
         .route(
             "/zfs/pool/{pool}/zvol/{*rest}",
             axum::routing::get(zvol_detail_page),
@@ -145,6 +146,9 @@ pub struct MemberRow {
     pub health: String,
     pub can_remove: bool,
     pub can_detach: bool,
+    /// A leaf device that isn't ONLINE — offer `zpool online` to bring it back
+    /// (a member REMOVED/OFFLINE while the pool stayed up, now physically back).
+    pub can_online: bool,
     /// `zpool attach` target when this row is a growable top-level vdev: the
     /// device itself (single disk → mirror), one child device (widen a
     /// mirror), or the vdev name (raidz expansion). `None` hides the button.
@@ -244,10 +248,17 @@ fn member_rows(
                     C::Log | C::Cache | C::Spare => true,
                     C::Special | C::Dedup => !pool_has_raidz,
                 };
+            // Onlining applies to a leaf device that zpool isn't currently
+            // using (REMOVED/OFFLINE/UNAVAIL/FAULTED); ONLINE and a spare's
+            // AVAIL need no action. zpool re-checks, so this only hides no-ops.
+            let can_online = m.is_leaf
+                && DevicePath::new(&m.name).is_ok()
+                && !matches!(m.health.as_deref(), None | Some("ONLINE") | Some("AVAIL"));
             MemberRow {
                 detail_url: dev_urls.get(&m.name).cloned(),
                 can_detach: m.is_leaf && in_mirror && DevicePath::new(&m.name).is_ok(),
                 can_remove,
+                can_online,
                 is_child: m.parent.is_some(),
                 class: match m.class {
                     C::Data => "",
@@ -1215,6 +1226,33 @@ async fn pool_detach_device(
     .await
 }
 
+/// Brings a REMOVED/OFFLINE leaf device back online (`zpool online`), which
+/// kicks a resilver to catch up on writes made while it was gone.
+async fn pool_online_device(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+    Form(form): Form<DetachDeviceForm>,
+) -> Response {
+    let Ok(pool) = PoolName::new(name.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid pool name {name:?}")).await;
+    };
+    let Ok(device) = DevicePath::new(form.device.trim()) else {
+        return pool_op_failed(&state, &name, format!("invalid device {:?}", form.device)).await;
+    };
+    let req = ops::PoolDeviceOnline {
+        pool: pool.clone(),
+        device: device.clone(),
+    };
+    run_pool_op(
+        &state,
+        state.helper.pool_device_online(req),
+        "pool-online",
+        &format!("online {device} in {pool}"),
+        &name,
+    )
+    .await
+}
+
 // ---- Dedicated ZFS pool creation form ----
 
 pub struct PoolDeviceOption {
@@ -1761,6 +1799,17 @@ mod tests {
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("started detach /dev/sdc from tank"), "{body}");
             let req = auth(form_post("/zfs/pool/tank/detach-device", "device=mirror-0"));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("invalid device"), "{body}");
+
+            // Online takes a leaf device path; a container name is rejected.
+            let req = auth(form_post(
+                "/zfs/pool/tank/online-device",
+                "device=%2Fdev%2Fvdb",
+            ));
+            let (_, _, body) = send(&app, req).await;
+            assert!(body.contains("started online /dev/vdb in tank"), "{body}");
+            let req = auth(form_post("/zfs/pool/tank/online-device", "device=mirror-0"));
             let (_, _, body) = send(&app, req).await;
             assert!(body.contains("invalid device"), "{body}");
 

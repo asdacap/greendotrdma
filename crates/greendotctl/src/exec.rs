@@ -121,6 +121,8 @@ spec_op! {
         |o| zfs::pool_device_attach(&o.pool, &o.target, &o.device);
     ops::PoolDeviceDetach = pb::PoolDeviceDetach,
         |o| zfs::pool_device_detach(&o.pool, &o.device);
+    ops::PoolDeviceOnline = pb::PoolDeviceOnline,
+        |o| zfs::pool_device_online(&o.pool, &o.device);
     ops::PartitionTableCreate = pb::PartitionTableCreate, |o| partition::table_create(&o.disk);
     ops::PartitionCreate = pb::PartitionCreate,
         |o| partition::partition_create(&o.disk, o.start_sector, o.size_sectors, &o.label);

@@ -534,6 +534,7 @@ helper_impl! {
             pool_device_attach, PoolDeviceAttachStream, pb::PoolDeviceAttach, ops::PoolDeviceAttach;
             pool_device_remove, PoolDeviceRemoveStream, pb::PoolDeviceRemove, ops::PoolDeviceRemove;
             pool_device_detach, PoolDeviceDetachStream, pb::PoolDeviceDetach, ops::PoolDeviceDetach;
+            pool_device_online, PoolDeviceOnlineStream, pb::PoolDeviceOnline, ops::PoolDeviceOnline;
             partition_table_create, PartitionTableCreateStream, pb::PartitionTableCreate, ops::PartitionTableCreate;
             partition_create, PartitionCreateStream, pb::PartitionCreate, ops::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete, ops::PartitionDelete;

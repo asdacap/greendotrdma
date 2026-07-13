@@ -54,6 +54,7 @@ service Helper {
   rpc PoolDeviceAttach(.greendot.helper.v1.PoolDeviceAttach) returns (stream TaskEvent);
   rpc PoolDeviceRemove(.greendot.helper.v1.PoolDeviceRemove) returns (stream TaskEvent);
   rpc PoolDeviceDetach(.greendot.helper.v1.PoolDeviceDetach) returns (stream TaskEvent);
+  rpc PoolDeviceOnline(.greendot.helper.v1.PoolDeviceOnline) returns (stream TaskEvent);
 
   // Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
   rpc PartitionTableCreate(.greendot.helper.v1.PartitionTableCreate) returns (stream TaskEvent);
@@ -323,6 +324,9 @@ message PoolDeviceAttach { string pool = 1; string target = 2; string device = 3
 message PoolDeviceRemove { string pool = 1; string target = 2; }
 // `zpool detach <pool> <device>` — take a leaf device out of its mirror.
 message PoolDeviceDetach { string pool = 1; string device = 2; }
+// `zpool online <pool> <device>` — bring a REMOVED/OFFLINE leaf device back
+// into service (kicks a resilver to catch up on writes made while it was gone).
+message PoolDeviceOnline { string pool = 1; string device = 2; }
 
 message SmartReport { string device = 1; }
 message SmartHealth { repeated string devices = 1; }
