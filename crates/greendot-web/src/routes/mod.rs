@@ -376,6 +376,7 @@ pub(crate) mod testutil {
             reconcile, ReconcileStream, pb::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce;
+            set_mtu, SetMtuStream, pb::SetMtu;
             install_packages, InstallPackagesStream, pb::InstallPackages;
             rdma_resources, RdmaResourcesStream, pb::Empty;
             zfs_clone, ZfsCloneStream, pb::ZfsClone;

@@ -96,6 +96,7 @@ service Helper {
   // System setup.
   rpc RxeAdd(.greendot.helper.v1.RxeAdd) returns (stream TaskEvent);
   rpc EnableRoce(.greendot.helper.v1.EnableRoce) returns (stream TaskEvent);
+  rpc SetMtu(.greendot.helper.v1.SetMtu) returns (stream TaskEvent);
   rpc InstallPackages(.greendot.helper.v1.InstallPackages) returns (stream TaskEvent);
 
   // Tool-output reads (streamed; the web collects stdout verbatim).
@@ -423,6 +424,7 @@ message ZvolInfoReply { bool exists = 1; uint64 size_bytes = 2; }
 // (skipped if already loaded), then add the rdma link.
 message RxeAdd { string netdev = 1; }
 message EnableRoce { string netdev = 1; }
+message SetMtu { string netdev = 1; uint32 mtu = 2; }
 message InstallPackages { repeated string packages = 1; }
 
 // ---- Typed read replies. Each mirrors a shared `actual::*` DTO; addresses

@@ -27,7 +27,9 @@
       <tr><th>DHCP</th><td class="small">{% if net.dhcp %}yes{% else %}no{% endif %}</td></tr>
       <tr><th>Link state</th><td class="small">{{ net.operstate }}</td></tr>
       <tr><th>MAC</th><td class="small">{% if let Some(mac) = net.mac %}{{ mac }}{% else %}—{% endif %}</td></tr>
-      <tr><th>MTU</th><td class="small">{% if let Some(mtu) = net.mtu %}{{ mtu }}{% else %}—{% endif %}</td></tr>
+      <tr><th>MTU</th><td class="small">
+        {% if let Some(mtu) = net.mtu %}{{ mtu }}{% if view.mtu_warning.is_some() %} <span class="dot dot-yellow"></span>{% endif %}{% else %}—{% endif %}
+      </td></tr>
       <tr><th>Gateway</th><td class="small">{% if let Some(gw) = net.gateway %}{{ gw }}{% else %}—{% endif %}</td></tr>
       <tr><th>Addresses</th><td class="small">
         {% if net.addrs.is_empty() %}—{% else %}
@@ -36,6 +38,13 @@
       </td></tr>
     </tbody>
   </table>
+
+  {% if let Some(warning) = view.mtu_warning %}<p class="flash">⚠ {{ warning }}</p>{% endif %}
+  <form class="inline" hx-post="/nic/{{ view.netdev }}/mtu" hx-target="#nic-detail-content" hx-swap="outerHTML"
+        hx-confirm="Change {{ view.netdev }}'s MTU? A value the switch or peers don't share can black-hole traffic on this link.">
+    <label>MTU <input type="number" name="mtu" min="68" max="65535" value="{% if let Some(mtu) = net.mtu %}{{ mtu }}{% else %}9000{% endif %}"></label>
+    <button>Set MTU</button>
+  </form>
   {% else %}
   <p class="muted small">Network configuration is unavailable (the helper couldn't read <code>ip</code>).</p>
   {% endif %}

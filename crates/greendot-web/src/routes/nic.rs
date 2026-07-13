@@ -13,9 +13,14 @@ use askama::Template;
 use axum::extract::{Path, State};
 use axum::response::Response;
 use axum::routing::{get, post};
-use axum::{Extension, Router};
+use axum::{Extension, Form, Router};
 use greendot_proto::{NetdevName, ops};
+use serde::Deserialize;
 use std::sync::Arc;
+
+/// The smallest MTU we consider a jumbo frame. RDMA storage wants jumbo frames
+/// (or larger) to cut per-packet overhead; anything below this earns a warning.
+const JUMBO_MTU: u32 = 9000;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -24,6 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/nic/{netdev}/diagnose", get(nic_diagnose_page))
         .route("/nic/{netdev}/roce", post(set_roce))
         .route("/nic/{netdev}/rxe", post(enable_rxe))
+        .route("/nic/{netdev}/mtu", post(set_mtu))
 }
 
 /// One row of the per-NIC RDMA-capability table.
@@ -159,6 +165,9 @@ pub struct NicDetailView {
     /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
     pub task_id: Option<i64>,
     pub form_error: Option<String>,
+    /// Set when the NIC's MTU is known and below a jumbo frame — a warning the
+    /// detail page renders next to the MTU form.
+    pub mtu_warning: Option<String>,
 }
 
 #[derive(Template)]
@@ -187,6 +196,16 @@ async fn gather_nic_detail(
         .filter_map(nic_row)
         .find(|n| n.netdev == netdev);
     let net = nic::networks(&state.helper).await.remove(netdev);
+    let mtu_warning = net
+        .as_ref()
+        .and_then(|n| n.mtu)
+        .filter(|m| *m < JUMBO_MTU)
+        .map(|m| {
+            format!(
+                "MTU {m} is below a jumbo frame ({JUMBO_MTU}). RDMA storage benefits \
+             from jumbo frames or larger — set it on every host and switch on the path."
+            )
+        });
     let series = |suffix: &str| state.metrics.ring_series(&format!("nic:{netdev}:{suffix}"));
     let temp = series("temp_c");
     // RoCE traffic lives under the associated RDMA device (rdma:<dev>), separate
@@ -219,6 +238,7 @@ async fn gather_nic_detail(
         flash,
         task_id,
         form_error,
+        mtu_warning,
     }
 }
 
@@ -402,6 +422,60 @@ async fn set_roce(State(state): State<Arc<AppState>>, Path(netdev): Path<String>
     page(NicDetailPartial { view })
 }
 
+// ---- Set MTU ----
+
+#[derive(Deserialize)]
+struct SetMtuForm {
+    mtu: String,
+}
+
+/// Change a NIC's MTU. Unlike RoCE this doesn't reload the device — `ip link set
+/// mtu` takes effect at once and doesn't drop the link — so it runs as a plain
+/// task and the page stays put. The web only names the interface and the value;
+/// the range check and the `ip` invocation live in the daemon.
+async fn set_mtu(
+    State(state): State<Arc<AppState>>,
+    Path(netdev): Path<String>,
+    Form(form): Form<SetMtuForm>,
+) -> Response {
+    let err = |msg: String| async {
+        page(NicDetailPartial {
+            view: gather_nic_detail(&state, &netdev, None, Some(msg), None).await,
+        })
+    };
+    let Ok(name) = NetdevName::new(netdev.trim()) else {
+        return err(format!("invalid interface name {netdev:?}")).await;
+    };
+    let Ok(mtu) = form.mtu.trim().parse::<u32>() else {
+        return err(format!("invalid MTU {:?}", form.mtu)).await;
+    };
+    let title = format!("set MTU {mtu} on {name}");
+    let view = match crate::task_runner::start(
+        &state,
+        state.helper.set_mtu(ops::SetMtu {
+            netdev: name.clone(),
+            mtu,
+        }),
+        "set-mtu",
+        &title,
+    ) {
+        Ok(id) => {
+            gather_nic_detail(
+                &state,
+                name.as_str(),
+                Some(format!("started {title}")),
+                None,
+                Some(id),
+            )
+            .await
+        }
+        Err(e) => {
+            gather_nic_detail(&state, name.as_str(), None, Some(format!("{e:#}")), None).await
+        }
+    };
+    page(NicDetailPartial { view })
+}
+
 #[cfg(test)]
 mod tests {
     use crate::routes::testutil::{form_post, login, send, test_app};
@@ -457,6 +531,15 @@ mod tests {
         let (_, _, body) = send(&app, auth(form_post("/nic/eth0/roce", ""))).await;
         assert!(body.contains("started enable RoCE on eth0"), "{body}");
         let (_, _, body) = send(&app, auth(form_post("/nic/abcdefghijklmnop/roce", ""))).await;
+        assert!(body.contains("invalid interface name"), "{body}");
+
+        // Set MTU: a jumbo value dispatches the task; a non-numeric value and a
+        // too-long interface name are both rejected before the helper runs.
+        let (_, _, body) = send(&app, auth(form_post("/nic/eth0/mtu", "mtu=9000"))).await;
+        assert!(body.contains("started set MTU 9000 on eth0"), "{body}");
+        let (_, _, body) = send(&app, auth(form_post("/nic/eth0/mtu", "mtu=abc"))).await;
+        assert!(body.contains("invalid MTU"), "{body}");
+        let (_, _, body) = send(&app, auth(form_post("/nic/abcdefghijklmnop/mtu", "mtu=9000"))).await;
         assert!(body.contains("invalid interface name"), "{body}");
     }
 }

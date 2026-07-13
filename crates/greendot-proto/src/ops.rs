@@ -988,6 +988,44 @@ impl From<EnableRoce> for pb::EnableRoce {
     }
 }
 
+/// Set a NIC's MTU (`ip link set dev <netdev> mtu <mtu>`). `mtu` is bounded to a
+/// sane Ethernet range at the ingress; the kernel enforces the device-specific
+/// ceiling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetMtu {
+    pub netdev: NetdevName,
+    pub mtu: u32,
+}
+
+/// Accepted MTU range: the IPv4 minimum up to the theoretical IP packet size.
+/// The driver rejects values a given NIC can't take; this only screens garbage.
+const MTU_MIN: u32 = 68;
+const MTU_MAX: u32 = 65535;
+
+impl TryFrom<pb::SetMtu> for SetMtu {
+    type Error = ConvertError;
+    fn try_from(s: pb::SetMtu) -> Result<Self, ConvertError> {
+        if !(MTU_MIN..=MTU_MAX).contains(&s.mtu) {
+            return Err(ConvertError(format!(
+                "MTU {} out of range ({MTU_MIN}–{MTU_MAX})",
+                s.mtu
+            )));
+        }
+        Ok(SetMtu {
+            netdev: NetdevName::new(s.netdev)?,
+            mtu: s.mtu,
+        })
+    }
+}
+impl From<SetMtu> for pb::SetMtu {
+    fn from(s: SetMtu) -> Self {
+        pb::SetMtu {
+            netdev: s.netdev.as_str().to_owned(),
+            mtu: s.mtu,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallPackages {
     pub packages: Vec<PackageName>,
@@ -1504,6 +1542,7 @@ mod tests {
         } => pb::LvDelete);
         roundtrip!(RxeAdd { netdev: NetdevName::new("eth0").unwrap() } => pb::RxeAdd);
         roundtrip!(EnableRoce { netdev: NetdevName::new("ens16").unwrap() } => pb::EnableRoce);
+        roundtrip!(SetMtu { netdev: NetdevName::new("eth0").unwrap(), mtu: 9000 } => pb::SetMtu);
         roundtrip!(InstallPackages {
             packages: vec![PackageName::new("nvme-cli").unwrap()],
         } => pb::InstallPackages);
@@ -1637,6 +1676,36 @@ mod tests {
                 netdev: "eth0/../x".into(),
             })
             .is_err()
+        );
+        // A bad netdev and an out-of-range MTU are both rejected; a jumbo MTU
+        // on a valid interface converts.
+        assert!(
+            SetMtu::try_from(pb::SetMtu {
+                netdev: "eth0/../x".into(),
+                mtu: 9000
+            })
+            .is_err()
+        );
+        assert!(
+            SetMtu::try_from(pb::SetMtu {
+                netdev: "eth0".into(),
+                mtu: 0
+            })
+            .is_err()
+        );
+        assert!(
+            SetMtu::try_from(pb::SetMtu {
+                netdev: "eth0".into(),
+                mtu: 70_000
+            })
+            .is_err()
+        );
+        assert!(
+            SetMtu::try_from(pb::SetMtu {
+                netdev: "eth0".into(),
+                mtu: 9000
+            })
+            .is_ok()
         );
         assert!(
             InstallPackages::try_from(pb::InstallPackages {

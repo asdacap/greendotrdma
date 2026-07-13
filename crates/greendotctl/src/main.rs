@@ -27,6 +27,7 @@ mod install;
 mod lio;
 mod lvm;
 mod modules;
+mod net;
 mod nfs;
 mod nvmet;
 mod pam;
@@ -559,6 +560,7 @@ helper_impl! {
             reconcile, ReconcileStream, pb::Reconcile, ops::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd, ops::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce, ops::EnableRoce;
+            set_mtu, SetMtuStream, pb::SetMtu, ops::SetMtu;
             install_packages, InstallPackagesStream, pb::InstallPackages, ops::InstallPackages;
             smart_report, SmartReportStream, pb::SmartReport, ops::SmartReport;
             rdma_resources, RdmaResourcesStream, pb::Empty, ops::RdmaResources;

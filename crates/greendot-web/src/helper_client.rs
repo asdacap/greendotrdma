@@ -196,6 +196,7 @@ impl HelperClient {
         lv_delete(ops::LvDelete => pb::LvDelete);
         rxe_add(ops::RxeAdd => pb::RxeAdd);
         enable_roce(ops::EnableRoce => pb::EnableRoce);
+        set_mtu(ops::SetMtu => pb::SetMtu);
         install_packages(ops::InstallPackages => pb::InstallPackages);
         smart_report(ops::SmartReport => pb::SmartReport);
         pipe_key_add(ops::PipeKeyAdd => pb::PipeKeyAdd);

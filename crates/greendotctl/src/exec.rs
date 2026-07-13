@@ -10,8 +10,8 @@
 use crate::cmd::TaskSpec;
 use crate::pipe_keys::PipeKeyConfig;
 use crate::{
-    cmd, fs, hardware, install, lvm, modules, nfs, nvmet, partition, pipe_keys, reconcile, smart,
-    zfs,
+    cmd, fs, hardware, install, lvm, modules, net, nfs, nvmet, partition, pipe_keys, reconcile,
+    smart, zfs,
 };
 use greendot_proto::actual::nic::NicAdvice;
 use greendot_proto::{ConvertError, SubStatus, Task, ops, pb};
@@ -138,6 +138,7 @@ spec_op! {
     ops::LvDelete = pb::LvDelete, |o| lvm::lv_delete(&o.vg, &o.name);
     ops::SmartReport = pb::SmartReport, |o| smart::report(&o.device);
     ops::RdmaResources = pb::Empty, |_o| modules::rdma_resources();
+    ops::SetMtu = pb::SetMtu, |o| net::set_mtu(&o.netdev, o.mtu);
 }
 
 // ---- Compound / special task ops ----
