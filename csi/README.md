@@ -20,11 +20,15 @@ node DaemonSet ──NVMe/RDMA (4421)──────────────�
 - CSI subsystems live under `nqn.2026-06.io.greendot.csi:` on dedicated nvmet
   port 61000 (trsvcid 4421) — a sibling namespace the web UI's reconcile never
   touches; they appear on the Exports page as **External** with live RDMA dots.
-- Volumes are created **closed** (`allow_any_host=0`, empty ACL).
-  `ControllerPublishVolume` grants exactly the attaching node's host NQN;
-  `ControllerUnpublishVolume` fences: ACL revoke → port unlink (severs live
-  controllers; the kernel then DNR-rejects the fenced host's reconnect) →
-  relink.
+- Exports are **lazy**: no subsystem exists until a node attaches.
+  `ControllerPublishVolume` (re)creates the volume's subsystem **closed**
+  (`allow_any_host=0`, empty ACL) and grants exactly the attaching node's host
+  NQN. `ControllerUnpublishVolume` fences — ACL revoke → port unlink (severs
+  live controllers; the kernel then DNR-rejects the fenced host's reconnect) →
+  relink — and then tears the subsystem down, since single-node access means the
+  volume is no longer in use. The controller's export reconcile re-creates
+  subsystems a target reboot wiped for still-attached volumes, and prunes any
+  export left behind by an ungraceful node loss.
 
 ## Provenance
 

@@ -150,30 +150,29 @@ func wantCode(t *testing.T, err error, code codes.Code) {
 func TestCreateVolumeDecisions(t *testing.T) {
 	imported := encodeImportID("tank/legacy/db")
 	cases := []struct {
-		name        string
-		params      map[string]string
-		omitParent  bool
-		zvol        *helperpb.ZvolInfoReply
-		source      *csi.VolumeContentSource
-		failOp      string
-		wantCode    codes.Code
-		wantCalls   []string
-		wantVolID   string // response VolumeId, default "tank:csi:pvc-1"
-		wantDataset string // backing dataset, default "tank/csi/pvc-1"
-		wantToken   string // nqn suffix, default "tank:csi:pvc-1"
-		wantBytes   int64  // response CapacityBytes, default 10<<30
+		name       string
+		params     map[string]string
+		omitParent bool
+		zvol       *helperpb.ZvolInfoReply
+		source     *csi.VolumeContentSource
+		failOp     string
+		wantCode   codes.Code
+		wantCalls  []string
+		wantVolID  string // response VolumeId, default "tank:csi:pvc-1"
+		wantToken  string // nqn suffix, default "tank:csi:pvc-1"
+		wantBytes  int64  // response CapacityBytes, default 10<<30
 	}{
 		{
-			name:      "fresh volume: create + apply",
+			name:      "fresh volume: create only (export is lazy)",
 			zvol:      &helperpb.ZvolInfoReply{Exists: false},
 			wantCode:  codes.OK,
-			wantCalls: []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
+			wantCalls: []string{"ZvolInfo", "ZvolCreate"},
 		},
 		{
-			name:      "retry with matching size skips create but re-applies (heals a partial create)",
+			name:      "retry with matching size skips create (export is lazy, no re-apply here)",
 			zvol:      &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 10 << 30},
 			wantCode:  codes.OK,
-			wantCalls: []string{"ZvolInfo", "CsiNvmeApply"},
+			wantCalls: []string{"ZvolInfo"},
 		},
 		{
 			name:      "size conflict is AlreadyExists",
@@ -188,24 +187,23 @@ func TestCreateVolumeDecisions(t *testing.T) {
 				Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: "tank:csi:pvc-src@snap1"},
 			}},
 			wantCode:  codes.OK,
-			wantCalls: []string{"ZvolInfo", "ZfsClone", "CsiNvmeApply"},
+			wantCalls: []string{"ZvolInfo", "ZfsClone"},
 		},
 		{
-			name:      "failed export surfaces as Internal",
+			name:      "failed create surfaces as Internal",
 			zvol:      &helperpb.ZvolInfoReply{Exists: false},
-			failOp:    "CsiNvmeApply",
+			failOp:    "ZvolCreate",
 			wantCode:  codes.Internal,
-			wantCalls: []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
+			wantCalls: []string{"ZvolInfo", "ZvolCreate"},
 		},
 		{
-			name:        "zvolName overrides the leaf",
-			params:      map[string]string{"zvolName": "myvol"},
-			zvol:        &helperpb.ZvolInfoReply{Exists: false},
-			wantCode:    codes.OK,
-			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
-			wantVolID:   "tank:csi:myvol",
-			wantDataset: "tank/csi/myvol",
-			wantToken:   "tank:csi:myvol",
+			name:      "zvolName overrides the leaf",
+			params:    map[string]string{"zvolName": "myvol"},
+			zvol:      &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:  codes.OK,
+			wantCalls: []string{"ZvolInfo", "ZvolCreate"},
+			wantVolID: "tank:csi:myvol",
+			wantToken: "tank:csi:myvol",
 		},
 		{
 			name: "zvolName ${pvc.*} tokens expand from --extra-create-metadata params",
@@ -214,12 +212,11 @@ func TestCreateVolumeDecisions(t *testing.T) {
 				"csi.storage.k8s.io/pvc/namespace": "db",
 				"csi.storage.k8s.io/pvc/name":      "data",
 			},
-			zvol:        &helperpb.ZvolInfoReply{Exists: false},
-			wantCode:    codes.OK,
-			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
-			wantVolID:   "tank:csi:db-data",
-			wantDataset: "tank/csi/db-data",
-			wantToken:   "tank:csi:db-data",
+			zvol:      &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:  codes.OK,
+			wantCalls: []string{"ZvolInfo", "ZvolCreate"},
+			wantVolID: "tank:csi:db-data",
+			wantToken: "tank:csi:db-data",
 		},
 		{
 			name:     "zvolName template without provisioner metadata is InvalidArgument",
@@ -228,14 +225,13 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			wantCode: codes.InvalidArgument,
 		},
 		{
-			name:        "datasetParent routes the volume to the class's pool",
-			params:      map[string]string{"datasetParent": "bulk/csi"},
-			zvol:        &helperpb.ZvolInfoReply{Exists: false},
-			wantCode:    codes.OK,
-			wantCalls:   []string{"ZvolInfo", "ZvolCreate", "CsiNvmeApply"},
-			wantVolID:   "bulk:csi:pvc-1",
-			wantDataset: "bulk/csi/pvc-1",
-			wantToken:   "bulk:csi:pvc-1",
+			name:      "datasetParent routes the volume to the class's pool",
+			params:    map[string]string{"datasetParent": "bulk/csi"},
+			zvol:      &helperpb.ZvolInfoReply{Exists: false},
+			wantCode:  codes.OK,
+			wantCalls: []string{"ZvolInfo", "ZvolCreate"},
+			wantVolID: "bulk:csi:pvc-1",
+			wantToken: "bulk:csi:pvc-1",
 		},
 		{
 			name:       "missing datasetParent is InvalidArgument",
@@ -244,15 +240,14 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			wantCode:   codes.InvalidArgument,
 		},
 		{
-			name:        "importDataset adopts an existing zvol (no create), size adopted",
-			params:      map[string]string{"importDataset": "tank/legacy/db"},
-			zvol:        &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30},
-			wantCode:    codes.OK,
-			wantCalls:   []string{"ZvolInfo", "CsiNvmeApply"},
-			wantVolID:   imported,
-			wantDataset: "tank/legacy/db",
-			wantToken:   imported,
-			wantBytes:   20 << 30,
+			name:      "importDataset adopts an existing zvol (no create), size adopted",
+			params:    map[string]string{"importDataset": "tank/legacy/db"},
+			zvol:      &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30},
+			wantCode:  codes.OK,
+			wantCalls: []string{"ZvolInfo"},
+			wantVolID: imported,
+			wantToken: imported,
+			wantBytes: 20 << 30,
 		},
 		{
 			name:      "importDataset with a missing target is NotFound",
@@ -300,7 +295,7 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			if tc.wantCode != codes.OK {
 				return
 			}
-			wantVolID, wantDataset := orDefault(tc.wantVolID, "tank:csi:pvc-1"), orDefault(tc.wantDataset, "tank/csi/pvc-1")
+			wantVolID := orDefault(tc.wantVolID, "tank:csi:pvc-1")
 			wantToken, wantBytes := orDefault(tc.wantToken, "tank:csi:pvc-1"), tc.wantBytes
 			if wantBytes == 0 {
 				wantBytes = 10 << 30
@@ -308,15 +303,12 @@ func TestCreateVolumeDecisions(t *testing.T) {
 			if resp.Volume.VolumeId != wantVolID || resp.Volume.CapacityBytes != wantBytes {
 				t.Fatalf("bad volume: id=%q cap=%d", resp.Volume.VolumeId, resp.Volume.CapacityBytes)
 			}
-			apply := f.reqs["CsiNvmeApply"].(*helperpb.CsiNvmeApply)
-			if apply.Nqn != CSINQNPrefix+wantToken ||
-				apply.DevicePath != "/dev/zvol/"+wantDataset ||
-				apply.DeviceUuid != DeviceUUID(apply.Nqn) ||
-				apply.Trsvcid != 4421 {
-				t.Fatalf("bad apply request: %+v", apply)
-			}
+			// CreateVolume no longer exports (the export is lazy, created at
+			// ControllerPublishVolume); it still returns the node's volume
+			// context so the node resolves the device with no read-back rpc.
+			wantNqn := CSINQNPrefix + wantToken
 			vc := resp.Volume.VolumeContext
-			if vc["nqn"] != apply.Nqn || vc["deviceUUID"] != apply.DeviceUuid ||
+			if vc["nqn"] != wantNqn || vc["deviceUUID"] != DeviceUUID(wantNqn) ||
 				vc["targetTrPort"] != "4421" || vc["targetTrType"] != "rdma" {
 				t.Fatalf("bad volume context: %v", vc)
 			}
@@ -444,6 +436,12 @@ func TestPublishUnpublishFencing(t *testing.T) {
 	revoke := f.reqs["CsiHostRevoke"].(*helperpb.CsiHostRevoke)
 	if revoke.Hostnqn != hostnqn {
 		t.Fatalf("bad revoke: %+v", revoke)
+	}
+	// Unpublish also tears the export down: single-node access, so the revoked
+	// node was the only host and the volume is now unused (lazy un-export).
+	del := f.reqs["CsiNvmeDelete"].(*helperpb.CsiNvmeDelete)
+	if del.Nqn != CSINQNPrefix+"tank:csi:pvc-1" {
+		t.Fatalf("unpublish did not tear the export down: %+v", del)
 	}
 }
 

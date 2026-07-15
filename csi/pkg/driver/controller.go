@@ -11,10 +11,11 @@
 //	device_uuid= uuid5(ns, nqn)  — pinned target-side, so the node resolves
 //	             /dev/disk/by-id/nvme-uuid.<uuid> with no read-back rpc
 //
-// Fencing: CreateVolume exports closed (allow_any_host=0, empty ACL);
-// ControllerPublishVolume grants exactly the attaching node's host NQN, and
-// ControllerUnpublishVolume runs the daemon's three-step fence (ACL revoke →
-// port sever → relink), which also kills the node's live controllers.
+// Fencing: the export is created lazily, closed (allow_any_host=0, empty ACL),
+// by ControllerPublishVolume, which then grants exactly the attaching node's
+// host NQN; ControllerUnpublishVolume runs the daemon's three-step fence (ACL
+// revoke → port sever → relink) — which also kills the node's live controllers
+// — and then tears the export down, since the volume is no longer in use.
 package driver
 
 import (
@@ -23,6 +24,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/asdacap/greendotrdma/csi/pkg/helper"
 	"github.com/asdacap/greendotrdma/csi/pkg/helperpb"
@@ -85,6 +87,13 @@ type ControllerServer struct {
 	// The generated client interface, not helper.Client, so tests inject a
 	// fake without a daemon.
 	helper helperpb.HelperClient
+
+	// exported is the set of NQNs the controller currently holds an nvmet
+	// export for. The reconcile GC prunes only these, so the many never-
+	// attached lazy volumes cost it nothing. Guarded by exportedMu — the gRPC
+	// handlers and the reconcile goroutine touch it concurrently.
+	exportedMu sync.Mutex
+	exported   map[string]bool
 }
 
 func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*ControllerServer, error) {
@@ -97,7 +106,7 @@ func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*Contro
 	if cfg.TrSvcID == 0 {
 		cfg.TrSvcID = 4421
 	}
-	return &ControllerServer{cfg: cfg, helper: h}, nil
+	return &ControllerServer{cfg: cfg, helper: h, exported: map[string]bool{}}, nil
 }
 
 // A managed volume id IS its dataset path with '/' replaced by ':' — readable,
@@ -287,8 +296,8 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, status.Errorf(codes.AlreadyExists,
 			"volume %s exists with size %d (requested %d)", dataset, info.SizeBytes, capacity)
 	case info.Exists:
-		// Retry after a partial create: the zvol is there; fall through to
-		// re-apply the export (heals a failed CsiNvmeApply).
+		// Retry after a partial create: the zvol is there, nothing else to do.
+		// The export is created lazily at ControllerPublishVolume, not here.
 	case req.GetVolumeContentSource().GetSnapshot() != nil:
 		srcDataset, snap, err := cs.parseSnapshotID(req.GetVolumeContentSource().GetSnapshot().GetSnapshotId())
 		if err != nil {
@@ -329,9 +338,7 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		}
 	}
 
-	if err := cs.applyExport(ctx, nqn, dataset); err != nil {
-		return nil, err
-	}
+	// The export is created lazily on ControllerPublishVolume (per attach).
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      volID,
 		CapacityBytes: capacity,
@@ -341,8 +348,8 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 }
 
 // createImportedVolume adopts a preexisting zvol at an arbitrary dataset path:
-// it exports the existing device but never creates or clones one, and returns
-// an imp1- volume id so DeleteVolume spares the zvol.
+// it never creates or clones a zvol (the export is created lazily at publish),
+// and returns an imp1- volume id so DeleteVolume spares the zvol.
 func (cs *ControllerServer) createImportedVolume(ctx context.Context, req *csi.CreateVolumeRequest, imp string) (*csi.CreateVolumeResponse, error) {
 	if err := validDatasetPath(imp); err != nil {
 		return nil, err
@@ -360,9 +367,7 @@ func (cs *ControllerServer) createImportedVolume(ctx context.Context, req *csi.C
 	}
 	ref := &volumeRef{dataset: imp, nqnToken: encodeImportID(imp), imported: true}
 	nqn := cs.nqnOf(ref)
-	if err := cs.applyExport(ctx, nqn, imp); err != nil {
-		return nil, err
-	}
+	// The export is created lazily on ControllerPublishVolume (per attach).
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      ref.nqnToken,
 		CapacityBytes: int64(info.SizeBytes), // adopt the actual size
@@ -385,7 +390,46 @@ func (cs *ControllerServer) applyExport(ctx context.Context, nqn, dataset string
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%v", err)
 	}
-	return res.Err("exporting " + nqn)
+	if err := res.Err("exporting " + nqn); err != nil {
+		return err
+	}
+	cs.setExported(nqn, true)
+	return nil
+}
+
+// deleteExport tears the volume's nvmet export down (unbinds the CSI port,
+// deletes the subsystem, reaps the empty port). Absent-tolerant, so it is the
+// shared body of the last-detach un-export (ControllerUnpublishVolume),
+// DeleteVolume, and the reconcile GC of volumes with no live attachment.
+func (cs *ControllerServer) deleteExport(ctx context.Context, nqn string) error {
+	stream, err := cs.helper.CsiNvmeDelete(ctx, &helperpb.CsiNvmeDelete{Nqn: nqn})
+	res, err := helper.RunTask("CsiNvmeDelete", stream, err)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if err := res.Err("deleting export " + nqn); err != nil {
+		return err
+	}
+	cs.setExported(nqn, false)
+	return nil
+}
+
+// setExported records (up) or clears the controller's belief that nqn has a
+// live export, so the reconcile GC prunes only exports it created.
+func (cs *ControllerServer) setExported(nqn string, up bool) {
+	cs.exportedMu.Lock()
+	defer cs.exportedMu.Unlock()
+	if up {
+		cs.exported[nqn] = true
+	} else {
+		delete(cs.exported, nqn)
+	}
+}
+
+func (cs *ControllerServer) isExported(nqn string) bool {
+	cs.exportedMu.Lock()
+	defer cs.exportedMu.Unlock()
+	return cs.exported[nqn]
 }
 
 // volumeContext is the stock csi-driver-nvmf volume_context, so the node half
@@ -412,12 +456,7 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	// Export first (frees the zvol), then the zvol. Both absent-tolerant.
-	stream, err := cs.helper.CsiNvmeDelete(ctx, &helperpb.CsiNvmeDelete{Nqn: cs.nqnOf(ref)})
-	res, err := helper.RunTask("CsiNvmeDelete", stream, err)
-	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "%v", err)
-	}
-	if err := res.Err("deleting export"); err != nil {
+	if err := cs.deleteExport(ctx, cs.nqnOf(ref)); err != nil {
 		return nil, err
 	}
 	if ref.imported {
@@ -425,7 +464,7 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	zstream, err := cs.helper.ZvolDelete(ctx, &helperpb.ZvolDelete{Dataset: ref.dataset})
-	res, err = helper.RunTask("ZvolDelete", zstream, err)
+	res, err := helper.RunTask("ZvolDelete", zstream, err)
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
@@ -449,45 +488,51 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 // the hostnqn (the DaemonSet passes --nodeid="$(cat /etc/nvme/hostnqn)"), so
 // no side-channel mapping exists to go stale.
 func (cs *ControllerServer) ControllerPublishVolume(ctx context.Context, req *csi.ControllerPublishVolumeRequest) (*csi.ControllerPublishVolumeResponse, error) {
-	node := req.GetNodeId()
-	ref, err := cs.resolveVolumeID(req.GetVolumeId())
-	if err != nil {
-		return nil, err
-	}
 	if req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume capability is required")
 	}
 	if err := checkCapabilities([]*csi.VolumeCapability{req.GetVolumeCapability()}); err != nil {
 		return nil, err
 	}
+	if err := cs.ensurePublished(ctx, req.GetVolumeId(), req.GetNodeId()); err != nil {
+		return nil, err
+	}
+	return &csi.ControllerPublishVolumeResponse{}, nil
+}
+
+// ensurePublished (re)creates the volume's export and grants the node access. It
+// is idempotent, so it is the shared body of ControllerPublishVolume (called per
+// attach) and the export reconcile (ReconcileExports), which calls it to self-heal
+// exports a target reboot wiped: the nvmet export lives in the target's kernel
+// configfs, which a reboot clears while the zvol (ZFS) survives, and the
+// external-attacher never re-publishes an already-attached VolumeAttachment — so
+// without the reconcile a rebooted target's volumes would stay unexportable until
+// a manual re-attach.
+func (cs *ControllerServer) ensurePublished(ctx context.Context, volID, node string) error {
+	ref, err := cs.resolveVolumeID(volID)
+	if err != nil {
+		return err
+	}
 	if !strings.HasPrefix(node, "nqn.") {
-		return nil, status.Errorf(codes.InvalidArgument,
+		return status.Errorf(codes.InvalidArgument,
 			"node id %q is not a host NQN — the node plugin must run with --nodeid from /etc/nvme/hostnqn", node)
 	}
-	// The nvmet export lives in the target's kernel configfs, which a target
-	// reboot wipes — while the zvol (ZFS) survives. CreateVolume built the
-	// export, but the external-provisioner never calls it again for a bound PV,
-	// so the first attach after a reboot would find the subsystem gone and
-	// CsiHostGrant fail "does not exist". Re-apply the export here first: it is
-	// idempotent (same code path as CreateVolume) and rebuilds the subsystem +
-	// RDMA port, so publish self-heals instead of requiring a manual reconcile.
+	// Re-apply the export first: idempotent (same code path as CreateVolume),
+	// it rebuilds the subsystem + RDMA port that a target reboot wiped.
 	if err := cs.applyExport(ctx, cs.nqnOf(ref), ref.dataset); err != nil {
-		return nil, err
+		return err
 	}
 	stream, err := cs.helper.CsiHostGrant(ctx, &helperpb.CsiHostGrant{
 		Nqn: cs.nqnOf(ref), Hostnqn: node,
 	})
 	res, err := helper.RunTask("CsiHostGrant", stream, err)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "%v", err)
+		return status.Errorf(codes.Unavailable, "%v", err)
 	}
 	if res.Failed() && res.Mentions("does not exist") {
-		return nil, status.Errorf(codes.NotFound, "volume %s has no export: %s", req.GetVolumeId(), res.Error)
+		return status.Errorf(codes.NotFound, "volume %s has no export: %s", volID, res.Error)
 	}
-	if err := res.Err("granting " + node); err != nil {
-		return nil, err
-	}
-	return &csi.ControllerPublishVolumeResponse{}, nil
+	return res.Err("granting " + node)
 }
 
 // ControllerUnpublishVolume is the fence. It runs against the *storage*, so
@@ -510,6 +555,13 @@ func (cs *ControllerServer) ControllerUnpublishVolume(ctx context.Context, req *
 		return nil, status.Errorf(codes.Unavailable, "%v", err)
 	}
 	if err := res.Err("fencing " + node); err != nil {
+		return nil, err
+	}
+	// Single-node access modes only (checkCapabilities), so the revoked node was
+	// the volume's only host — it is now unused, so tear the export down (lazy
+	// un-export). Absent-tolerant. If MULTI_NODE modes are ever allowed this must
+	// become a last-host check.
+	if err := cs.deleteExport(ctx, cs.nqnOf(ref)); err != nil {
 		return nil, err
 	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil

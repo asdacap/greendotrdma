@@ -35,7 +35,7 @@ import (
 
 const (
 	DriverName    = "csi.greendot.io"
-	DriverVersion = "0.1.0"
+	DriverVersion = "0.3.0"
 
 	// CSINQNPrefix mirrors greendot-proto's CSI_NQN_PREFIX: the ownership
 	// boundary. The daemon re-validates it; this constant only derives names.
