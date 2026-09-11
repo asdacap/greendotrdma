@@ -11,11 +11,9 @@
 //	device_uuid= uuid5(ns, nqn)  — pinned target-side, so the node resolves
 //	             /dev/disk/by-id/nvme-uuid.<uuid> with no read-back rpc
 //
-// Fencing: the export is created lazily, closed (allow_any_host=0, empty ACL),
-// by ControllerPublishVolume, which then grants exactly the attaching node's
-// host NQN; ControllerUnpublishVolume runs the daemon's three-step fence (ACL
-// revoke → port sever → relink) — which also kills the node's live controllers
-// — and then tears the export down, since the volume is no longer in use.
+// Fencing: atomic target lifecycle RPCs persist the immutable attachment UID
+// before applying/granting and tombstone it before severing/deleting. Delayed
+// requests cannot resurrect a detached generation or disturb its replacement.
 package driver
 
 import (
@@ -24,7 +22,6 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
-	"sync"
 
 	"github.com/asdacap/greendotrdma/csi/pkg/helper"
 	"github.com/asdacap/greendotrdma/csi/pkg/helperpb"
@@ -33,12 +30,15 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
+	"k8s.io/client-go/kubernetes"
 )
 
 // ControllerConfig wires the controller to one greendot box. Where volumes
 // live is not part of it: every StorageClass names its own pool via the
 // datasetParent parameter, so one controller serves any number of pools.
 type ControllerConfig struct {
+	// AttachmentID is only for direct test/CLI calls; production resolves Kubernetes UIDs.
+	AttachmentID string
 	// TrAddr is the address initiators connect to (the box's RDMA/TCP IP).
 	TrAddr string
 	// TrSvcID is the CSI port's service id (default 4421 — deliberately not
@@ -83,17 +83,11 @@ func expandZvolName(tmpl string, params map[string]string) (string, error) {
 
 type ControllerServer struct {
 	csi.UnimplementedControllerServer
-	cfg ControllerConfig
+	cfg  ControllerConfig
+	kube kubernetes.Interface
 	// The generated client interface, not helper.Client, so tests inject a
 	// fake without a daemon.
 	helper helperpb.HelperClient
-
-	// exported is the set of NQNs the controller currently holds an nvmet
-	// export for. The reconcile GC prunes only these, so the many never-
-	// attached lazy volumes cost it nothing. Guarded by exportedMu — the gRPC
-	// handlers and the reconcile goroutine touch it concurrently.
-	exportedMu sync.Mutex
-	exported   map[string]bool
 }
 
 func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*ControllerServer, error) {
@@ -106,7 +100,7 @@ func NewControllerServer(cfg ControllerConfig, h helperpb.HelperClient) (*Contro
 	if cfg.TrSvcID == 0 {
 		cfg.TrSvcID = 4421
 	}
-	return &ControllerServer{cfg: cfg, helper: h, exported: map[string]bool{}}, nil
+	return &ControllerServer{cfg: cfg, helper: h}, nil
 }
 
 // A managed volume id IS its dataset path with '/' replaced by ':' — readable,
@@ -239,7 +233,17 @@ func checkCapabilities(caps []*csi.VolumeCapability) error {
 	return nil
 }
 
+func checkNQNLength(nqn string) error {
+	if len(nqn) > 223 {
+		return status.Error(codes.InvalidArgument, "derived volume NQN exceeds 223 bytes")
+	}
+	return nil
+}
+
 func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVolumeRequest) (*csi.CreateVolumeResponse, error) {
+	if req.GetName() == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume name is required")
+	}
 	if err := checkCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
 	}
@@ -284,20 +288,15 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		return nil, status.Errorf(codes.InvalidArgument, "datasetParent may not start with %q", importedPrefix)
 	}
 	nqn := cs.nqn(volID)
+	if err := checkNQNLength(nqn); err != nil {
+		return nil, err
+	}
 
 	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: dataset})
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "querying zvol: %v", err)
 	}
 	switch {
-	case info.Exists && info.SizeBytes != uint64(capacity):
-		// The name exists with a different size: a genuinely different
-		// request, per CSI's idempotency contract.
-		return nil, status.Errorf(codes.AlreadyExists,
-			"volume %s exists with size %d (requested %d)", dataset, info.SizeBytes, capacity)
-	case info.Exists:
-		// Retry after a partial create: the zvol is there, nothing else to do.
-		// The export is created lazily at ControllerPublishVolume, not here.
 	case req.GetVolumeContentSource().GetSnapshot() != nil:
 		srcDataset, snap, err := cs.parseSnapshotID(req.GetVolumeContentSource().GetSnapshot().GetSnapshotId())
 		if err != nil {
@@ -307,10 +306,14 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		size := uint64(capacity)
 		stream, err := cs.helper.ZfsClone(ctx, &helperpb.ZfsClone{
 			Dataset: srcDataset, Snap: snap, Target: dataset, NewSize: &size,
+			RestoreRequestId: &req.Name,
 		})
 		res, err := helper.RunTask("ZfsClone", stream, err)
 		if err != nil {
 			return nil, status.Errorf(codes.Unavailable, "%v", err)
+		}
+		if res.Failed() && res.Mentions("restore conflict") {
+			return nil, status.Errorf(codes.AlreadyExists, "restore target %s conflicts with this request", dataset)
 		}
 		if res.Failed() && res.Mentions("does not exist") {
 			return nil, status.Errorf(codes.NotFound, "source snapshot: %s", res.Error)
@@ -318,6 +321,14 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 		if err := res.Err("cloning " + dataset); err != nil {
 			return nil, err
 		}
+	case info.Exists && info.SizeBytes != uint64(capacity):
+		// The name exists with a different size: a genuinely different
+		// request, per CSI's idempotency contract.
+		return nil, status.Errorf(codes.AlreadyExists,
+			"volume %s exists with size %d (requested %d)", dataset, info.SizeBytes, capacity)
+	case info.Exists:
+		// Retry after a partial create: the zvol is there, nothing else to do.
+		// The export is created lazily at ControllerPublishVolume, not here.
 	default:
 		create := &helperpb.ZvolCreate{Dataset: dataset, Size: uint64(capacity)}
 		if v := req.GetParameters()["volblocksize"]; v != "" {
@@ -354,6 +365,10 @@ func (cs *ControllerServer) createImportedVolume(ctx context.Context, req *csi.C
 	if err := validDatasetPath(imp); err != nil {
 		return nil, err
 	}
+	nqn := CSINQNPrefix + encodeImportID(imp)
+	if err := checkNQNLength(nqn); err != nil {
+		return nil, err
+	}
 	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: imp})
 	if err != nil {
 		return nil, status.Errorf(codes.Unavailable, "querying zvol: %v", err)
@@ -366,7 +381,6 @@ func (cs *ControllerServer) createImportedVolume(ctx context.Context, req *csi.C
 			"import target %s is %d bytes, requested %d", imp, info.SizeBytes, want)
 	}
 	ref := &volumeRef{dataset: imp, nqnToken: encodeImportID(imp), imported: true}
-	nqn := cs.nqnOf(ref)
 	// The export is created lazily on ControllerPublishVolume (per attach).
 	return &csi.CreateVolumeResponse{Volume: &csi.Volume{
 		VolumeId:      ref.nqnToken,
@@ -375,61 +389,21 @@ func (cs *ControllerServer) createImportedVolume(ctx context.Context, req *csi.C
 	}}, nil
 }
 
-// applyExport (re-)creates the nvmet subsystem for dataset, closed to all
-// hosts; ControllerPublishVolume opens it to the attaching node.
-func (cs *ControllerServer) applyExport(ctx context.Context, nqn, dataset string) error {
-	stream, err := cs.helper.CsiNvmeApply(ctx, &helperpb.CsiNvmeApply{
-		Nqn:        nqn,
-		DevicePath: "/dev/zvol/" + dataset,
-		DeviceUuid: DeviceUUID(nqn),
-		Traddr:     cs.cfg.TrAddr,
-		Trsvcid:    cs.cfg.TrSvcID,
-		Transport:  cs.transport(),
-	})
-	res, err := helper.RunTask("CsiNvmeApply", stream, err)
-	if err != nil {
-		return status.Errorf(codes.Unavailable, "%v", err)
-	}
-	if err := res.Err("exporting " + nqn); err != nil {
-		return err
-	}
-	cs.setExported(nqn, true)
-	return nil
-}
-
-// deleteExport tears the volume's nvmet export down (unbinds the CSI port,
-// deletes the subsystem, reaps the empty port). Absent-tolerant, so it is the
-// shared body of the last-detach un-export (ControllerUnpublishVolume),
-// DeleteVolume, and the reconcile GC of volumes with no live attachment.
+// deleteExport removes an unowned export before volume deletion. The target
+// refuses to delete a generation-owned export; detach must fence it first.
 func (cs *ControllerServer) deleteExport(ctx context.Context, nqn string) error {
 	stream, err := cs.helper.CsiNvmeDelete(ctx, &helperpb.CsiNvmeDelete{Nqn: nqn})
 	res, err := helper.RunTask("CsiNvmeDelete", stream, err)
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%v", err)
 	}
+	if res.Failed() && res.Mentions("attachment conflict:") {
+		return status.Errorf(codes.FailedPrecondition, "%s", res.Error)
+	}
 	if err := res.Err("deleting export " + nqn); err != nil {
 		return err
 	}
-	cs.setExported(nqn, false)
 	return nil
-}
-
-// setExported records (up) or clears the controller's belief that nqn has a
-// live export, so the reconcile GC prunes only exports it created.
-func (cs *ControllerServer) setExported(nqn string, up bool) {
-	cs.exportedMu.Lock()
-	defer cs.exportedMu.Unlock()
-	if up {
-		cs.exported[nqn] = true
-	} else {
-		delete(cs.exported, nqn)
-	}
-}
-
-func (cs *ControllerServer) isExported(nqn string) bool {
-	cs.exportedMu.Lock()
-	defer cs.exportedMu.Unlock()
-	return cs.exported[nqn]
 }
 
 // volumeContext is the stock csi-driver-nvmf volume_context, so the node half
@@ -456,8 +430,10 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 		return &csi.DeleteVolumeResponse{}, nil
 	}
 	// Export first (frees the zvol), then the zvol. Both absent-tolerant.
-	if err := cs.deleteExport(ctx, cs.nqnOf(ref)); err != nil {
-		return nil, err
+	if nqn := cs.nqnOf(ref); len(nqn) <= 223 {
+		if err := cs.deleteExport(ctx, nqn); err != nil {
+			return nil, err
+		}
 	}
 	if ref.imported {
 		// An adopted zvol predates the driver: tear down only the export.
@@ -500,71 +476,91 @@ func (cs *ControllerServer) ControllerPublishVolume(ctx context.Context, req *cs
 	return &csi.ControllerPublishVolumeResponse{}, nil
 }
 
-// ensurePublished (re)creates the volume's export and grants the node access. It
-// is idempotent, so it is the shared body of ControllerPublishVolume (called per
-// attach) and the export reconcile (ReconcileExports), which calls it to self-heal
-// exports a target reboot wiped: the nvmet export lives in the target's kernel
-// configfs, which a reboot clears while the zvol (ZFS) survives, and the
-// external-attacher never re-publishes an already-attached VolumeAttachment — so
-// without the reconcile a rebooted target's volumes would stay unexportable until
-// a manual re-attach.
+// ensurePublished resolves the current Kubernetes generation; reconciliation
+// uses publishAttachment with the observed UID, which the target fences durably.
 func (cs *ControllerServer) ensurePublished(ctx context.Context, volID, node string) error {
+	if _, err := cs.resolveVolumeID(volID); err != nil {
+		return err
+	}
+	if !strings.HasPrefix(node, "nqn.") {
+		return status.Error(codes.InvalidArgument, "node id must be a host NQN")
+	}
+	attachment, err := cs.attachmentID(ctx, volID, node, true)
+	if err != nil {
+		return err
+	}
+	return cs.publishAttachment(ctx, volID, node, attachment)
+}
+
+func (cs *ControllerServer) publishAttachment(ctx context.Context, volID, node, attachment string) error {
 	ref, err := cs.resolveVolumeID(volID)
 	if err != nil {
 		return err
 	}
 	if !strings.HasPrefix(node, "nqn.") {
-		return status.Errorf(codes.InvalidArgument,
-			"node id %q is not a host NQN — the node plugin must run with --nodeid from /etc/nvme/hostnqn", node)
+		return status.Error(codes.InvalidArgument, "node id must be a host NQN")
 	}
-	// Re-apply the export first: idempotent (same code path as CreateVolume),
-	// it rebuilds the subsystem + RDMA port that a target reboot wiped.
-	if err := cs.applyExport(ctx, cs.nqnOf(ref), ref.dataset); err != nil {
-		return err
+	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "querying zvol: %v", err)
 	}
-	stream, err := cs.helper.CsiHostGrant(ctx, &helperpb.CsiHostGrant{
-		Nqn: cs.nqnOf(ref), Hostnqn: node,
+	if !info.Exists {
+		return status.Errorf(codes.NotFound, "volume %s not found", volID)
+	}
+	nqn := cs.nqnOf(ref)
+	stream, err := cs.helper.CsiPublish(ctx, &helperpb.CsiPublish{
+		Export:  &helperpb.CsiNvmeApply{Nqn: nqn, DevicePath: "/dev/zvol/" + ref.dataset, DeviceUuid: DeviceUUID(nqn), Traddr: cs.cfg.TrAddr, Trsvcid: cs.cfg.TrSvcID, Transport: cs.transport()},
+		Hostnqn: node, AttachmentId: attachment,
 	})
-	res, err := helper.RunTask("CsiHostGrant", stream, err)
+	res, err := helper.RunTask("CsiPublish", stream, err)
 	if err != nil {
 		return status.Errorf(codes.Unavailable, "%v", err)
 	}
-	if res.Failed() && res.Mentions("does not exist") {
-		return status.Errorf(codes.NotFound, "volume %s has no export: %s", volID, res.Error)
+	if res.Failed() && res.Mentions("attachment conflict:") {
+		return status.Errorf(codes.FailedPrecondition, "%s", res.Error)
 	}
-	return res.Err("granting " + node)
+	if err := res.Err("publishing " + volID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ControllerUnpublishVolume is the fence. It runs against the *storage*, so
 // it works exactly when it matters: the node is unreachable and Kubernetes is
 // detaching the volume out from under it.
 func (cs *ControllerServer) ControllerUnpublishVolume(ctx context.Context, req *csi.ControllerUnpublishVolumeRequest) (*csi.ControllerUnpublishVolumeResponse, error) {
-	node := req.GetNodeId()
 	ref, err := cs.resolveVolumeID(req.GetVolumeId())
 	if err != nil {
 		return nil, err
 	}
-	if !strings.HasPrefix(node, "nqn.") {
-		return nil, status.Errorf(codes.InvalidArgument, "node id %q is not a host NQN", node)
+	if !strings.HasPrefix(req.GetNodeId(), "nqn.") {
+		return nil, status.Error(codes.InvalidArgument, "node id must be a host NQN")
 	}
-	stream, err := cs.helper.CsiHostRevoke(ctx, &helperpb.CsiHostRevoke{
-		Nqn: cs.nqnOf(ref), Hostnqn: node,
-	})
-	res, err := helper.RunTask("CsiHostRevoke", stream, err)
+	attachment, err := cs.attachmentID(ctx, req.GetVolumeId(), req.GetNodeId(), false)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "%v", err)
-	}
-	if err := res.Err("fencing " + node); err != nil {
 		return nil, err
 	}
-	// Single-node access modes only (checkCapabilities), so the revoked node was
-	// the volume's only host — it is now unused, so tear the export down (lazy
-	// un-export). Absent-tolerant. If MULTI_NODE modes are ever allowed this must
-	// become a last-host check.
-	if err := cs.deleteExport(ctx, cs.nqnOf(ref)); err != nil {
-		return nil, err
+	if attachment != "" {
+		if err := cs.unpublishAttachment(ctx, cs.nqnOf(ref), req.GetNodeId(), attachment); err != nil {
+			return nil, err
+		}
 	}
 	return &csi.ControllerUnpublishVolumeResponse{}, nil
+}
+
+func (cs *ControllerServer) unpublishAttachment(ctx context.Context, nqn, host, attachment string) error {
+	stream, err := cs.helper.CsiUnpublish(ctx, &helperpb.CsiUnpublish{Nqn: nqn, Hostnqn: host, AttachmentId: attachment})
+	res, err := helper.RunTask("CsiUnpublish", stream, err)
+	if err != nil {
+		return status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if res.Failed() && res.Mentions("attachment conflict:") {
+		return status.Errorf(codes.FailedPrecondition, "%s", res.Error)
+	}
+	if err := res.Err("fencing " + host); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi.ControllerExpandVolumeRequest) (*csi.ControllerExpandVolumeResponse, error) {
@@ -586,20 +582,27 @@ func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	if !info.Exists {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	}
-	if info.SizeBytes < uint64(capacity) {
-		stream, err := cs.helper.CsiVolumeExpand(ctx, &helperpb.CsiVolumeExpand{
-			Nqn: cs.nqnOf(ref), NewSize: uint64(capacity),
-		})
-		res, err := helper.RunTask("CsiVolumeExpand", stream, err)
-		if err != nil {
-			return nil, status.Errorf(codes.Unavailable, "%v", err)
-		}
-		if err := res.Err("expanding " + req.GetVolumeId()); err != nil {
-			return nil, err
-		}
+	// The helper performs monotonic growth under its mutation lock and always
+	// retries namespace revalidation, even after the zvol already grew.
+	stream, err := cs.helper.CsiVolumeExpand(ctx, &helperpb.CsiVolumeExpand{
+		Nqn: cs.nqnOf(ref), NewSize: uint64(capacity),
+	})
+	res, err := helper.RunTask("CsiVolumeExpand", stream, err)
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "%v", err)
+	}
+	if err := res.Err("expanding " + req.GetVolumeId()); err != nil {
+		return nil, err
+	}
+	info, err = cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	if err != nil {
+		return nil, status.Errorf(codes.Unavailable, "querying expanded zvol: %v", err)
+	}
+	if !info.Exists || info.SizeBytes < uint64(capacity) {
+		return nil, status.Error(codes.Internal, "expanded zvol capacity is not yet available")
 	}
 	return &csi.ControllerExpandVolumeResponse{
-		CapacityBytes: capacity,
+		CapacityBytes: int64(info.SizeBytes),
 		// The filesystem still has to grow on the node.
 		NodeExpansionRequired: true,
 	}, nil

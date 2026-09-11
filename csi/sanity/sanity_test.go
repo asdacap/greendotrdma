@@ -141,9 +141,30 @@ func (h *statefulHelper) SnapshotDestroy(ctx context.Context, in *helperpb.Snaps
 	return taskResult("")
 }
 
+func (h *statefulHelper) CsiPublish(ctx context.Context, in *helperpb.CsiPublish, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	dataset := strings.TrimPrefix(in.Export.DevicePath, "/dev/zvol/")
+	if _, ok := h.zvols[dataset]; !ok {
+		return taskResult("backing volume does not exist")
+	}
+	h.exports[in.Export.Nqn] = true
+	return taskResult("")
+}
+
+func (h *statefulHelper) CsiUnpublish(ctx context.Context, in *helperpb.CsiUnpublish, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.exports, in.Nqn)
+	return taskResult("")
+}
+
 func (h *statefulHelper) CsiNvmeApply(ctx context.Context, in *helperpb.CsiNvmeApply, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if _, ok := h.zvols[strings.TrimPrefix(in.DevicePath, "/dev/zvol/")]; !ok {
+		return taskResult("backing volume does not exist")
+	}
 	h.exports[in.Nqn] = true
 	return taskResult("")
 }
@@ -194,7 +215,7 @@ func (nqnIDs) GenerateInvalidNodeID() string { return "not-an-nqn" }
 func TestSanity(t *testing.T) {
 	endpoint := "unix://" + filepath.Join(t.TempDir(), "csi.sock")
 	cs, err := driver.NewControllerServer(driver.ControllerConfig{
-		TrAddr: "10.0.0.5", Transport: "rdma",
+		TrAddr: "10.0.0.5", Transport: "rdma", AttachmentID: "sanity-direct",
 	}, newStateful())
 	if err != nil {
 		t.Fatal(err)

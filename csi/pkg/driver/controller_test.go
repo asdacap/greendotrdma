@@ -80,6 +80,16 @@ func (f *fakeHelper) ZfsClone(ctx context.Context, in *helperpb.ZfsClone, opts .
 	return f.task("ZfsClone", in)
 }
 
+func (f *fakeHelper) CsiPublish(ctx context.Context, in *helperpb.CsiPublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("CsiPublish", in)
+}
+func (f *fakeHelper) CsiUnpublish(ctx context.Context, in *helperpb.CsiUnpublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("CsiUnpublish", in)
+}
+func (f *fakeHelper) CsiAttachment(ctx context.Context, in *helperpb.CsiNvmeDelete, opts ...grpc.CallOption) (*helperpb.CsiAttachmentReply, error) {
+	return &helperpb.CsiAttachmentReply{}, nil
+}
+
 func (f *fakeHelper) CsiNvmeApply(ctx context.Context, in *helperpb.CsiNvmeApply, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	return f.task("CsiNvmeApply", in)
 }
@@ -97,6 +107,9 @@ func (f *fakeHelper) CsiHostRevoke(ctx context.Context, in *helperpb.CsiHostRevo
 }
 
 func (f *fakeHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVolumeExpand, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	if f.fail["CsiVolumeExpand"] == "" && f.zvol.Exists && f.zvol.SizeBytes < in.NewSize {
+		f.zvol.SizeBytes = in.NewSize
+	}
 	return f.task("CsiVolumeExpand", in)
 }
 
@@ -111,7 +124,7 @@ func (f *fakeHelper) SnapshotDestroy(ctx context.Context, in *helperpb.SnapshotD
 func testController(t *testing.T, f *fakeHelper) *ControllerServer {
 	t.Helper()
 	cs, err := NewControllerServer(ControllerConfig{
-		TrAddr: "10.0.0.5", Transport: "rdma",
+		TrAddr: "10.0.0.5", Transport: "rdma", AttachmentID: "test-attachment",
 	}, f)
 	if err != nil {
 		t.Fatal(err)
@@ -388,60 +401,39 @@ func TestDeleteImportedNeverDestroysZvol(t *testing.T) {
 // Publish/unpublish: node_id must be a host NQN and lands verbatim in the
 // grant/revoke; a missing export maps to NotFound on publish.
 func TestPublishUnpublishFencing(t *testing.T) {
-	hostnqn := "nqn.2014-08.org.nvmexpress:uuid:aaaa"
+	host := "nqn.2014-08.org.nvmexpress:uuid:aaaa"
 	f := newFake()
 	cs := testController(t, f)
-
-	_, err := cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "tank:csi:pvc-1", NodeId: "worker-1", VolumeCapability: rwoCaps()[0],
-	})
-	wantCode(t, err, codes.InvalidArgument) // not an NQN: fencing impossible
-
-	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "tank:csi:pvc-1", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
-	})
+	for _, tc := range []struct {
+		name, node, volume string
+		exists             bool
+		failure            string
+		code               codes.Code
+	}{
+		{"invalid host", "worker-1", "tank:csi:pvc-1", true, "", codes.InvalidArgument},
+		{"missing volume", host, "tank:csi:missing", false, "", codes.NotFound},
+		{"managed", host, "tank:csi:pvc-1", true, "", codes.OK},
+		{"imported", host, encodeImportID("tank/legacy/db"), true, "", codes.OK},
+		{"other owner", host, "tank:csi:pvc-1", true, "attachment conflict: volume has another owner", codes.FailedPrecondition},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f.zvol.Exists = tc.exists
+			f.fail["CsiPublish"] = tc.failure
+			_, err := cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{VolumeId: tc.volume, NodeId: tc.node, VolumeCapability: rwoCaps()[0]})
+			wantCode(t, err, tc.code)
+			if tc.code == codes.OK {
+				publish := f.reqs["CsiPublish"].(*helperpb.CsiPublish)
+				if publish.AttachmentId != "test-attachment" || publish.Hostnqn != host || publish.Export.Nqn != CSINQNPrefix+tc.volume {
+					t.Fatalf("bad publish: %v", publish)
+				}
+			}
+		})
+	}
+	_, err := cs.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{VolumeId: "tank:csi:pvc-1", NodeId: host})
 	wantCode(t, err, codes.OK)
-	grant := f.reqs["CsiHostGrant"].(*helperpb.CsiHostGrant)
-	if grant.Nqn != CSINQNPrefix+"tank:csi:pvc-1" || grant.Hostnqn != hostnqn {
-		t.Fatalf("bad grant: %+v", grant)
-	}
-	// Publish re-applies the export first, so an attach after a target reboot
-	// (configfs wiped, subsystem gone) self-heals: it rebuilds the subsystem +
-	// RDMA port for this volume's zvol before granting the node's ACL.
-	apply := f.reqs["CsiNvmeApply"].(*helperpb.CsiNvmeApply)
-	if apply.Nqn != CSINQNPrefix+"tank:csi:pvc-1" || apply.DevicePath != "/dev/zvol/tank/csi/pvc-1" {
-		t.Fatalf("publish did not re-apply the export: %+v", apply)
-	}
-
-	// An imported id grants against its encoded nqn token, unchanged fencing.
-	imp := encodeImportID("tank/legacy/db")
-	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: imp, NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
-	})
-	wantCode(t, err, codes.OK)
-	if grant = f.reqs["CsiHostGrant"].(*helperpb.CsiHostGrant); grant.Nqn != CSINQNPrefix+imp {
-		t.Fatalf("imported grant nqn = %q", grant.Nqn)
-	}
-
-	f.fail["CsiHostGrant"] = "subsystem nqn.2026-06.io.greendot.csi:tank:csi:pvc-9 does not exist"
-	_, err = cs.ControllerPublishVolume(context.Background(), &csi.ControllerPublishVolumeRequest{
-		VolumeId: "tank:csi:pvc-9", NodeId: hostnqn, VolumeCapability: rwoCaps()[0],
-	})
-	wantCode(t, err, codes.NotFound)
-
-	_, err = cs.ControllerUnpublishVolume(context.Background(), &csi.ControllerUnpublishVolumeRequest{
-		VolumeId: "tank:csi:pvc-1", NodeId: hostnqn,
-	})
-	wantCode(t, err, codes.OK)
-	revoke := f.reqs["CsiHostRevoke"].(*helperpb.CsiHostRevoke)
-	if revoke.Hostnqn != hostnqn {
-		t.Fatalf("bad revoke: %+v", revoke)
-	}
-	// Unpublish also tears the export down: single-node access, so the revoked
-	// node was the only host and the volume is now unused (lazy un-export).
-	del := f.reqs["CsiNvmeDelete"].(*helperpb.CsiNvmeDelete)
-	if del.Nqn != CSINQNPrefix+"tank:csi:pvc-1" {
-		t.Fatalf("unpublish did not tear the export down: %+v", del)
+	unpublish := f.reqs["CsiUnpublish"].(*helperpb.CsiUnpublish)
+	if unpublish.AttachmentId != "test-attachment" || unpublish.Hostnqn != host {
+		t.Fatalf("bad fence: %v", unpublish)
 	}
 }
 
@@ -465,7 +457,7 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 		_, err := cs.DeleteVolume(context.Background(), &csi.DeleteVolumeRequest{VolumeId: "tank:csi:pvc-1"})
 		wantCode(t, err, codes.FailedPrecondition)
 	})
-	t.Run("expand: no-op when already big enough", func(t *testing.T) {
+	t.Run("expand: revalidate when already big enough", func(t *testing.T) {
 		f := newFake()
 		f.zvol = &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30}
 		cs := testController(t, f)
@@ -474,8 +466,8 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 			CapacityRange: &csi.CapacityRange{RequiredBytes: 10 << 30},
 		})
 		wantCode(t, err, codes.OK)
-		if slices.Contains(f.calls, "CsiVolumeExpand") {
-			t.Fatal("expand rpc must not run when already satisfied")
+		if !slices.Contains(f.calls, "CsiVolumeExpand") || resp.CapacityBytes != 20<<30 {
+			t.Fatal("expand must revalidate and report actual capacity")
 		}
 		if !resp.NodeExpansionRequired {
 			t.Fatal("node expansion must still be requested")
@@ -495,6 +487,34 @@ func TestDeleteAndExpandEdgeCases(t *testing.T) {
 			t.Fatalf("bad expand: %+v", expand)
 		}
 	})
+}
+
+func TestExpansionRetryAfterRevalidationFailure(t *testing.T) {
+	f := newFake()
+	f.zvol = &helperpb.ZvolInfoReply{Exists: true, SizeBytes: 20 << 30}
+	f.fail["CsiVolumeExpand"] = "revalidation interrupted after ZFS grew"
+	cs := testController(t, f)
+	req := &csi.ControllerExpandVolumeRequest{
+		VolumeId:      "tank:csi:pvc-1",
+		CapacityRange: &csi.CapacityRange{RequiredBytes: 20 << 30},
+	}
+	_, err := cs.ControllerExpandVolume(context.Background(), req)
+	wantCode(t, err, codes.Internal)
+	delete(f.fail, "CsiVolumeExpand")
+	resp, err := cs.ControllerExpandVolume(context.Background(), req)
+	wantCode(t, err, codes.OK)
+	calls := 0
+	for _, call := range f.calls {
+		if call == "CsiVolumeExpand" {
+			calls++
+		}
+		if call == "CsiPublish" || call == "CsiNvmeApply" {
+			t.Fatal("expansion must not create an export")
+		}
+	}
+	if calls != 2 || resp.CapacityBytes != 20<<30 {
+		t.Fatalf("retry did not revalidate: calls=%v response=%v", f.calls, resp)
+	}
 }
 
 // Snapshots: create is retry-tolerant of "already exists"; delete tolerates
@@ -592,6 +612,42 @@ func TestNameValidationGatesEveryRPC(t *testing.T) {
 	} {
 		if _, err := cs.CreateVolume(context.Background(), req); status.Code(err) != codes.InvalidArgument {
 			t.Fatalf("reserved imp1- name must be refused, got %v", err)
+		}
+	}
+}
+
+func TestCreateIdentifierBoundariesAndRestoreRetry(t *testing.T) {
+	for _, imported := range []bool{false, true} {
+		for _, length := range []int{195, 196, 118, 119} {
+			dataset := "tank/" + strings.Repeat("a", length-5)
+			token := idFromDataset(dataset)
+			params := map[string]string{"datasetParent": "tank", "zvolName": strings.TrimPrefix(dataset, "tank/")}
+			if imported {
+				token = encodeImportID(dataset)
+				params = map[string]string{"importDataset": dataset}
+			}
+			f := newFake()
+			f.zvol = &helperpb.ZvolInfoReply{Exists: imported, SizeBytes: 10 << 30}
+			cs := testController(t, f)
+			_, err := cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{Name: "pvc-1", Parameters: params, CapacityRange: &csi.CapacityRange{RequiredBytes: 10 << 30}, VolumeCapabilities: rwoCaps()})
+			if len(CSINQNPrefix+token) > 223 {
+				wantCode(t, err, codes.InvalidArgument)
+				if len(f.calls) != 0 {
+					t.Fatalf("oversized name touched helper: %v", f.calls)
+				}
+			} else {
+				wantCode(t, err, codes.OK)
+			}
+		}
+	}
+	for _, size := range []uint64{5 << 30, 10 << 30} {
+		f := newFake()
+		f.zvol = &helperpb.ZvolInfoReply{Exists: true, SizeBytes: size}
+		_, err := testController(t, f).CreateVolume(context.Background(), &csi.CreateVolumeRequest{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "tank/csi"}, CapacityRange: &csi.CapacityRange{RequiredBytes: 10 << 30}, VolumeCapabilities: rwoCaps(), VolumeContentSource: &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: "tank:csi:source@s1"}}}})
+		wantCode(t, err, codes.OK)
+		clone, ok := f.reqs["ZfsClone"].(*helperpb.ZfsClone)
+		if !ok || clone.GetRestoreRequestId() != "pvc-1" {
+			t.Fatalf("retry must verify provenance: %v", f.calls)
 		}
 	}
 }

@@ -34,7 +34,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
+	"regexp"
+	"slices"
+	"sync"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -58,6 +60,7 @@ type NodeServer struct {
 	// on if an rdma stage finds no RDMA device (nodes without a hardware NIC).
 	SoftRoceNetdev string
 	mounter        *mount.SafeFormatAndMount
+	publishMu      sync.Mutex
 }
 
 func NewNodeServer(nodeID, hostID, volumeMapDir, softRoceNetdev string) *NodeServer {
@@ -182,6 +185,8 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	if volID == "" || staging == "" || target == "" || req.GetVolumeCapability() == nil {
 		return nil, status.Error(codes.InvalidArgument, "volume id, staging path, target path, and capability are required")
 	}
+	ns.publishMu.Lock()
+	defer ns.publishMu.Unlock()
 	options := []string{"bind"}
 	if req.GetReadonly() {
 		options = append(options, "ro")
@@ -191,6 +196,19 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 		connector, err := loadConnector(ns.VolumeMapDir, volID)
 		if err != nil {
 			return nil, status.Errorf(codes.FailedPrecondition, "volume %s is not staged: %v", volID, err)
+		}
+		mountPoints, err := ns.mounter.List()
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "listing mounts: %v", err)
+		}
+		for _, mountPoint := range mountPoints {
+			if filepath.Clean(mountPoint.Path) != filepath.Clean(target) {
+				continue
+			}
+			if !sameBlockMount(connector.DevicePath(), target, mountPoint.Device) || slices.Contains(mountPoint.Opts, "ro") != req.GetReadonly() {
+				return nil, status.Errorf(codes.FailedPrecondition, "target %s is mounted with a different device or readonly mode", target)
+			}
+			return &csi.NodePublishVolumeResponse{}, nil
 		}
 		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
 			return nil, status.Errorf(codes.Internal, "creating %s: %v", filepath.Dir(target), err)
@@ -226,11 +244,27 @@ func (ns *NodeServer) NodePublishVolume(ctx context.Context, req *csi.NodePublis
 	return &csi.NodePublishVolumeResponse{}, nil
 }
 
+// A device bind mount may list devtmpfs rather than the device as its source.
+// In that case the mounted target and the by-id device still identify one inode.
+func sameBlockMount(devicePath, target, source string) bool {
+	if devicePath == source {
+		return true
+	}
+	deviceInfo, err := os.Stat(devicePath)
+	if err != nil {
+		return false
+	}
+	targetInfo, err := os.Stat(target)
+	return err == nil && os.SameFile(deviceInfo, targetInfo)
+}
+
 func (ns *NodeServer) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) (*csi.NodeUnpublishVolumeResponse, error) {
 	target := req.GetTargetPath()
 	if req.GetVolumeId() == "" || target == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume id and target path are required")
 	}
+	ns.publishMu.Lock()
+	defer ns.publishMu.Unlock()
 	if err := mount.CleanupMountPoint(target, ns.mounter, true); err != nil {
 		return nil, status.Errorf(codes.Internal, "unmounting %s: %v", target, err)
 	}
@@ -289,22 +323,56 @@ func (ns *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 	return &csi.NodeExpandVolumeResponse{}, nil
 }
 
-// rescanController resolves the by-id symlink to nvmeXnY and writes its
-// controller's rescan attribute (upstream's parseDeviceToControllerPath).
+// rescanController follows sysfs membership instead of inferring controller
+// numbers from a namespace name (multipath subsystem and controller IDs differ).
 func rescanController(devicePath string) error {
+	return rescanNamespace(devicePath, "/sys/class/block")
+}
+
+var nvmeControllerName = regexp.MustCompile(`^nvme[0-9]+$`)
+
+func rescanNamespace(devicePath, blockClass string) error {
 	resolved, err := filepath.EvalSymlinks(devicePath)
 	if err != nil {
 		return fmt.Errorf("resolving %s: %w", devicePath, err)
 	}
-	name := filepath.Base(resolved) // nvme0n1
-	idx := strings.LastIndex(name, "n")
-	if idx <= 0 {
-		return fmt.Errorf("unexpected nvme device name %q", name)
+	device := filepath.Join(blockClass, filepath.Base(resolved), "device")
+	// Without native multipath, device points directly at the controller.
+	scan := filepath.Join(device, "rescan_controller")
+	if _, err := os.Stat(scan); err == nil {
+		return writeRescan(scan)
+	} else if !os.IsNotExist(err) {
+		return err
 	}
-	scan := filepath.Join("/sys/class/block", name[:idx]+"c0"+name[idx:], "device/rescan_controller")
-	if _, err := os.Stat(scan); err != nil {
-		// Non-multipath naming: nvme0n1 under controller nvme0.
-		scan = filepath.Join("/sys/class/block", name, "device/rescan_controller")
+	// A multipath namespace points at its subsystem, whose nvmeN links
+	// identify every member controller. Rescan all paths, not an assumed c0.
+	entries, err := os.ReadDir(device)
+	if err != nil {
+		return fmt.Errorf("reading namespace subsystem %s: %w", device, err)
 	}
-	return os.WriteFile(scan, []byte("1"), 0o200)
+	rescanned := false
+	for _, entry := range entries {
+		if !nvmeControllerName.MatchString(entry.Name()) {
+			continue
+		}
+		if err := writeRescan(filepath.Join(device, entry.Name(), "rescan_controller")); err != nil {
+			return err
+		}
+		rescanned = true
+	}
+	if !rescanned {
+		return fmt.Errorf("no NVMe controllers for namespace %s", resolved)
+	}
+	return nil
+}
+
+func writeRescan(path string) error {
+	// Never create a missing sysfs attribute: absence is a layout/error signal.
+	file, err := os.OpenFile(path, os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = file.WriteString("1")
+	return err
 }

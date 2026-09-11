@@ -88,14 +88,15 @@ func main() {
 		if err != nil {
 			klog.Fatal(err)
 		}
-		// Self-heal exports a target reboot wiped: the external-attacher never
-		// re-publishes an already-attached VolumeAttachment, so re-apply them here.
+		// Attachment UIDs are the target's durable fencing generations. An
+		// unavailable Kubernetes identity source must never fall back to host-only grants.
+		kube, err := inClusterKube()
+		if err != nil {
+			klog.Fatalf("controller requires Kubernetes attachment lookup: %v", err)
+		}
+		cs.SetKubernetes(kube)
 		if *reconcile > 0 {
-			if kube, err := inClusterKube(); err != nil {
-				klog.Warningf("export reconcile disabled: %v", err)
-			} else {
-				go cs.ReconcileExports(context.Background(), kube, *reconcile)
-			}
+			go cs.ReconcileExports(context.Background(), kube, *reconcile)
 		}
 		if err := driver.Serve(*endpoint, &driver.IdentityServer{}, cs, nil); err != nil {
 			klog.Fatal(err)

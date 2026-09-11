@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/asdacap/greendotrdma/csi/pkg/helperpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 )
@@ -30,6 +32,9 @@ func Connect(t *Tunnel) (*Client, error) {
 	conn, err := grpc.NewClient("passthrough:///greendotctl",
 		grpc.WithContextDialer(t.DialContext),
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time: 30 * time.Second, Timeout: 10 * time.Second, PermitWithoutStream: true,
+		}),
 		grpc.WithDefaultCallOptions(
 			grpc.MaxCallRecvMsgSize(maxMessage),
 			grpc.MaxCallSendMsgSize(maxMessage),

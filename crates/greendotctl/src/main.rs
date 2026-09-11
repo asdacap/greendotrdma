@@ -20,6 +20,7 @@
 
 mod actual;
 mod cmd;
+mod csi;
 mod exec;
 mod fs;
 mod hardware;
@@ -74,6 +75,7 @@ struct Opts {
     /// nvmet configfs root for the CSI ops (test-only override, like
     /// `--allow-uid`; production always uses the kernel path).
     nvmet_root: Option<PathBuf>,
+    csi_state_root: Option<PathBuf>,
     /// The SSH login whose `authorized_keys` the `PipeKey*` ops manage.
     pipe_user: String,
     /// Home of that user (test-only override; production NSS-resolves it).
@@ -93,6 +95,7 @@ impl Opts {
             admin_group: "greendot-admin".into(),
             config: None,
             nvmet_root: None,
+            csi_state_root: None,
             pipe_user: pipe_keys::SSH_USER.into(),
             pipe_home: None,
             pipe_command: None,
@@ -106,6 +109,7 @@ impl Opts {
                 "--pam-service" => opts.pam_service = value()?,
                 "--admin-group" => opts.admin_group = value()?,
                 "--config" => opts.config = Some(value()?),
+                "--csi-state-root" => opts.csi_state_root = Some(value()?.into()),
                 "--nvmet-root" => opts.nvmet_root = Some(value()?.into()),
                 "--pipe-user" => opts.pipe_user = value()?,
                 "--pipe-home" => opts.pipe_home = Some(value()?.into()),
@@ -201,6 +205,9 @@ async fn serve_forever(opts: Opts) -> Result<()> {
         mutate_lock: std::sync::Mutex::new(()),
         reconcile_config: opts.config,
         nvmet_root: opts.nvmet_root.unwrap_or_else(|| nvmet::NVMET_ROOT.into()),
+        csi_state_root: opts
+            .csi_state_root
+            .unwrap_or_else(|| csi::STATE_ROOT.into()),
         pipe_keys: pipe_keys::PipeKeyConfig {
             user: opts.pipe_user,
             // A pipe key is only useful if its login is also admitted at this
@@ -552,6 +559,8 @@ helper_impl! {
             lv_rename, LvRenameStream, pb::LvRename, ops::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete, ops::LvDelete;
             zfs_clone, ZfsCloneStream, pb::ZfsClone, ops::ZfsClone;
+            csi_publish, CsiPublishStream, pb::CsiPublish, ops::CsiPublish;
+            csi_unpublish, CsiUnpublishStream, pb::CsiUnpublish, ops::CsiUnpublish;
             csi_nvme_apply, CsiNvmeApplyStream, pb::CsiNvmeApply, ops::CsiNvmeApply;
             csi_nvme_delete, CsiNvmeDeleteStream, pb::CsiNvmeDelete, ops::CsiNvmeDelete;
             csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant, ops::CsiHostGrant;
@@ -581,6 +590,7 @@ helper_impl! {
             smart_health, pb::SmartHealth, ops::SmartHealth;
             reconcile_dry_run, pb::Empty, ops::ReconcileDryRun;
             zvol_info, pb::ZvolInfo, ops::ZvolInfo;
+            csi_attachment, pb::CsiNvmeDelete, ops::CsiNvmeDelete;
             pipe_access_report, pb::Empty, ops::PipeAccessReport;
     }
 }

@@ -21,10 +21,11 @@ import (
 
 func main() {
 	var (
-		action  = flag.String("action", "", "create|publish|unpublish|delete|expand|node-stage")
-		volume  = flag.String("volume", "", "volume id")
-		size    = flag.Int64("size", 64<<20, "capacity bytes (create/expand)")
-		hostnqn = flag.String("hostnqn", "", "node host NQN (publish/unpublish/node-stage)")
+		attachmentID = flag.String("attachment-id", "", "immutable direct test attachment generation (publish/unpublish)")
+		action       = flag.String("action", "", "create|publish|unpublish|delete|expand|node-stage|node-publish|node-unpublish|node-unstage|node-expand")
+		volume       = flag.String("volume", "", "volume id")
+		size         = flag.Int64("size", 64<<20, "capacity bytes (create/expand)")
+		hostnqn      = flag.String("hostnqn", "", "node host NQN (publish/unpublish/node-stage)")
 
 		// node-stage: exercise the real node plugin (transport prep + fabric
 		// connect) instead of a raw nvme connect, so the test proves the driver
@@ -34,6 +35,8 @@ func main() {
 		deviceUUID = flag.String("device-uuid", "", "pinned namespace uuid (node-stage)")
 		softRoce   = flag.String("soft-roce-netdev", "", "Soft-RoCE netdev for the node plugin (node-stage)")
 		staging    = flag.String("staging-path", "/tmp/csi-e2e-staging", "node staging target path (node-stage)")
+		targetPath = flag.String("target-path", "/tmp/csi-e2e-target", "node publish target")
+		filesystem = flag.Bool("filesystem", false, "stage and publish an ext4 filesystem instead of raw block")
 		volmap     = flag.String("volume-map-dir", "/tmp/csi-e2e-volumes", "node connector map dir (node-stage)")
 
 		sshAddr   = flag.String("ssh-addr", "", "storage box sshd, host:port")
@@ -48,26 +51,46 @@ func main() {
 	)
 	flag.Parse()
 
-	// node-stage runs entirely on the initiator (no controller/ssh): it drives
-	// the real NodeServer, so transport prep (modprobe + Soft-RoCE) and the
-	// fabric connect are the ones under test.
-	if *action == "node-stage" {
+	// Node actions use the real node plugin entirely on the initiator.
+	if strings.HasPrefix(*action, "node-") {
 		ns := node.NewNodeServer(*hostnqn, *hostid, *volmap, *softRoce)
-		if _, err := ns.NodeStageVolume(context.Background(), &csi.NodeStageVolumeRequest{
-			VolumeId:          *volume,
-			StagingTargetPath: *staging,
-			VolumeContext: map[string]string{
-				"nqn":          *nqn,
-				"targetTrAddr": *traddr,
-				"targetTrPort": fmt.Sprintf("%d", *trsvcid),
-				"targetTrType": *transport,
-				"deviceUUID":   *deviceUUID,
-			},
-			VolumeCapability: &csi.VolumeCapability{
-				AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
-				AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
-			},
-		}); err != nil {
+		capability := &csi.VolumeCapability{
+			AccessType: &csi.VolumeCapability_Block{Block: &csi.VolumeCapability_BlockVolume{}},
+			AccessMode: &csi.VolumeCapability_AccessMode{Mode: csi.VolumeCapability_AccessMode_SINGLE_NODE_WRITER},
+		}
+		if *filesystem {
+			capability.AccessType = &csi.VolumeCapability_Mount{Mount: &csi.VolumeCapability_MountVolume{FsType: "ext4"}}
+		}
+		ctx := context.Background()
+		var err error
+		switch *action {
+		case "node-stage":
+			_, err = ns.NodeStageVolume(ctx, &csi.NodeStageVolumeRequest{
+				VolumeId: *volume, StagingTargetPath: *staging,
+				VolumeContext: map[string]string{
+					"nqn": *nqn, "targetTrAddr": *traddr,
+					"targetTrPort": fmt.Sprintf("%d", *trsvcid),
+					"targetTrType": *transport, "deviceUUID": *deviceUUID,
+				},
+				VolumeCapability: capability,
+			})
+		case "node-publish":
+			_, err = ns.NodePublishVolume(ctx, &csi.NodePublishVolumeRequest{
+				VolumeId: *volume, StagingTargetPath: *staging, TargetPath: *targetPath, VolumeCapability: capability,
+			})
+		case "node-unpublish":
+			_, err = ns.NodeUnpublishVolume(ctx, &csi.NodeUnpublishVolumeRequest{VolumeId: *volume, TargetPath: *targetPath})
+		case "node-unstage":
+			_, err = ns.NodeUnstageVolume(ctx, &csi.NodeUnstageVolumeRequest{VolumeId: *volume, StagingTargetPath: *staging})
+		case "node-expand":
+			_, err = ns.NodeExpandVolume(ctx, &csi.NodeExpandVolumeRequest{
+				VolumeId: *volume, VolumePath: *staging, VolumeCapability: capability,
+				CapacityRange: &csi.CapacityRange{RequiredBytes: *size},
+			})
+		default:
+			klog.Fatalf("unknown node action %q", *action)
+		}
+		if err != nil {
 			klog.Fatal(err)
 		}
 		fmt.Println("ok")
@@ -86,8 +109,9 @@ func main() {
 		klog.Fatal(err)
 	}
 	cs, err := driver.NewControllerServer(driver.ControllerConfig{
-		TrAddr:  *traddr,
-		TrSvcID: uint32(*trsvcid), Transport: *transport,
+		TrAddr:       *traddr,
+		AttachmentID: *attachmentID,
+		TrSvcID:      uint32(*trsvcid), Transport: *transport,
 	}, client.Helper)
 	if err != nil {
 		klog.Fatal(err)

@@ -53,7 +53,7 @@
           pname = "greendot-csi";
           version = "0.1.0";
           src = ./csi;
-          vendorHash = "sha256-wW13lWSBCGiH5b2DsHpQb7X3wjtPx7MPsfMv6DvzvXc=";
+          vendorHash = "sha256-Ow86098KdlVED84cvUxJB+NGoG88GxIbiRJaKaQrX2Y=";
           subPackages = [ "cmd/greendot-csi" "cmd/csi-e2e" ];
           doCheck = false; # unit tests run in the dev shell
         };

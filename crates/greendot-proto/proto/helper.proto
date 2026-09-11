@@ -83,6 +83,9 @@ service Helper {
   // prefix — a sibling of (not nested under) the web prefix, so reconcile
   // treats CSI subsystems as foreign and the two owners never fight. They live
   // on a dedicated CSI port, never a render-managed one.
+  rpc CsiPublish(.greendot.helper.v1.CsiPublish) returns (stream TaskEvent);
+  rpc CsiUnpublish(.greendot.helper.v1.CsiUnpublish) returns (stream TaskEvent);
+  rpc CsiAttachment(.greendot.helper.v1.CsiNvmeDelete) returns (CsiAttachmentReply);
   rpc CsiNvmeApply(.greendot.helper.v1.CsiNvmeApply) returns (stream TaskEvent);
   rpc CsiNvmeDelete(.greendot.helper.v1.CsiNvmeDelete) returns (stream TaskEvent);
   rpc CsiHostGrant(.greendot.helper.v1.CsiHostGrant) returns (stream TaskEvent);
@@ -355,6 +358,10 @@ message Reconcile { reserved 1; reserved "config"; }
 // initiator's /dev/disk/by-id path is deterministic and no read-back rpc is
 // needed), the dedicated CSI port ensured, and the subsystem linked to it.
 // Never touches allowed_hosts: grants survive re-apply.
+// Generation-fenced lifecycle. attachment_id is an immutable VolumeAttachment UID.
+message CsiPublish { CsiNvmeApply export = 1; string hostnqn = 2; string attachment_id = 3; }
+message CsiUnpublish { string nqn = 1; string hostnqn = 2; string attachment_id = 3; }
+message CsiAttachmentReply { string hostnqn = 1; string attachment_id = 2; string error = 3; }
 message CsiNvmeApply {
   string nqn = 1;          // CsiNqn
   string device_path = 2;  // DevicePath
@@ -440,6 +447,7 @@ message ZfsClone {
   string snap = 2;         // SnapName
   string target = 3;       // DatasetName
   optional uint64 new_size = 4;
+  optional string restore_request_id = 5;
 }
 
 // Structural read: does the zvol exist, and how big is it? (CSI CreateVolume

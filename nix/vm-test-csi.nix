@@ -3,12 +3,8 @@
 #   client VM ── csi-e2e (real controller code) ── ssh ── greendotctl pipe ──▶ daemon
 #   client VM ── nvme connect -t rdma :4421 ─────────────────────────────────▶ nvmet
 #
-# The script walks the whole lifecycle: create (export is born CLOSED — the
-# initiator's connect is rejected until granted), publish (grant this host's
-# NQN), connect + write, a concurrent web reconcile that must leave the CSI
-# subsystem alone, unpublish (the three-step fence: the LIVE controller is
-# severed and the reconnect is DNR-rejected), delete (configfs + zvol + the
-# empty CSI port reaped).
+# Exercise lazy exports, generation fencing, raw-block retries, detached/online
+# growth and target-daemon restart recovery using only disposable VM resources.
 { pkgs, greendot, greendot-csi }:
 
 let
@@ -143,7 +139,7 @@ pkgs.testers.runNixOSTest {
         f" -ssh-addr {target_ip}:22 -ssh-user greendot-csi"
         " -ssh-key /root/csi-key -ssh-known-hosts /root/known_hosts"
         " -ssh-command ignored-by-forced-command"
-        f" -dataset-parent tank/csi -traddr {target_ip} -transport rdma"
+        f" -dataset-parent tank/csi -traddr {target_ip} -transport rdma -attachment-id vm-attachment-1"
     )
 
     # --- create: closed export, pinned identity ---
@@ -159,21 +155,40 @@ pkgs.testers.runNixOSTest {
         f" -hostnqn {hostnqn} -hostid {hostid} -soft-roce-netdev {netdev}"
     )
     subsys = f"/sys/kernel/config/nvmet/subsystems/{nqn}"
-    target.succeed(f"test -d {subsys}")
-    assert target.succeed(f"cat {subsys}/attr_allow_any_host").strip() == "0", "export must be born closed"
-    assert target.succeed(f"cat {subsys}/namespaces/1/device_uuid").strip() == uuid, "uuid must be pinned"
-    assert target.succeed("cat /sys/kernel/config/nvmet/ports/61000/addr_trsvcid").strip() == "4421"
-
-    # Closed means closed: the node plugin readies RDMA (modprobe + Soft-RoCE)
-    # and its fabric connect is still rejected before any grant.
-    client.fail(node_stage)
+    target.fail(f"test -d {subsys}")
+    # Detached growth must not create an export.
+    client.succeed(f"{e2e} -action expand -volume pvc-1 -size 100663296")
+    target.fail(f"test -d {subsys}")
+    assert target.succeed("zfs get -Hp -o value volsize tank/csi/pvc-1").strip() == "100663296"
 
     # --- publish: grant exactly this host, then the node connect succeeds ---
     client.succeed(f"{e2e} -action publish -volume pvc-1 -hostnqn {hostnqn}")
+    target.succeed(f"test -d {subsys}")
+    assert target.succeed(f"cat {subsys}/attr_allow_any_host").strip() == "0"
+    assert target.succeed(f"cat {subsys}/namespaces/1/device_uuid").strip() == uuid
     client.succeed(node_stage)
     dev = f"/dev/disk/by-id/nvme-uuid.{uuid}"
     client.wait_until_succeeds(f"test -e {dev}", timeout=30)
     client.succeed(f"dd if=/dev/urandom of={dev} bs=1M count=4 oflag=direct")
+
+    node_publish = node_stage.replace("-action node-stage", "-action node-publish")
+    client.succeed(node_publish)
+    client.succeed(node_publish)
+    assert client.succeed("awk '$5 == \"/tmp/csi-e2e-target\" {n++} END {print n+0}' /proc/self/mountinfo").strip() == "1"
+    client.succeed(node_stage.replace("-action node-stage", "-action node-unpublish"))
+    client.fail("mountpoint /tmp/csi-e2e-target")
+
+    # Online grow retries must leave the real namespace at its new capacity.
+    client.succeed(f"{e2e} -action expand -volume pvc-1 -size 134217728")
+    client.succeed(f"{e2e} -action expand -volume pvc-1 -size 134217728")
+    client.wait_until_succeeds(f"test $(blockdev --getsize64 {dev}) -eq 134217728")
+
+    # Restart the target daemon, then reapply the SAME generation. Existing
+    # initiator I/O remains valid and persisted ownership is recovered.
+    target.succeed("systemctl restart greendotctl.service")
+    target.wait_for_unit("greendotctl.service")
+    client.succeed(f"{e2e} -action publish -volume pvc-1 -hostnqn {hostnqn}")
+    client.succeed(f"dd if={dev} of=/dev/null bs=1M count=4 iflag=direct")
 
     # --- a concurrent web reconcile must not touch the CSI export ---
     # (as the greendot user: the daemon admits only that uid / its group)
@@ -183,12 +198,16 @@ pkgs.testers.runNixOSTest {
 
     # --- the fence: unpublish severs the LIVE controller ---
     client.succeed(f"{e2e} -action unpublish -volume pvc-1 -hostnqn {hostnqn}")
-    # The target killed the controller; the client's reconnect is rejected
-    # with DNR, so its kernel deletes the controller and the device vanishes.
-    client.wait_until_fails(f"test -e {dev}", timeout=60)
+    # Lazy teardown removes the listener, so the initiator may retain a
+    # reconnecting device until ctrl_loss_tmo instead of receiving DNR.
+    # Prove the live controller is no longer usable, not immediate udev removal.
+    client.wait_until_succeeds("test $(cat /sys/class/nvme/nvme0/state) != live")
+    client.fail(f"timeout -s KILL 5 dd if={dev} of=/dev/null bs=4096 count=1 iflag=direct")
     client.fail(f"nvme connect -t rdma -a {target_ip} -s 4421 -n {nqn} --hostnqn={hostnqn}")
-    # The subsystem itself is still exported (relinked) for future grants.
-    target.succeed(f"test -e /sys/kernel/config/nvmet/ports/61000/subsystems/{nqn}")
+    target.fail(f"test -d {subsys}")
+    # A restarted controller cannot resurrect the fenced generation.
+    client.fail(f"{e2e} -action publish -volume pvc-1 -hostnqn {hostnqn}")
+    target.fail(f"test -d {subsys}")
 
     # --- delete: everything gone, the empty CSI port reaped ---
     client.succeed(f"{e2e} -action delete -volume pvc-1")
@@ -198,6 +217,28 @@ pkgs.testers.runNixOSTest {
 
     # Idempotent re-delete over the same channel.
     client.succeed(f"{e2e} -action delete -volume pvc-1")
+
+    # Filesystem growth exercises NodeExpandVolume against real sysfs/mounts.
+    out = client.succeed(f"{e2e} -action create -volume pvc-fs -size 67108864")
+    fsctx = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    client.succeed(f"{e2e} -action publish -volume pvc-fs -hostnqn {hostnqn}")
+    fsnode = (
+        f"csi-e2e -volume pvc-fs -nqn {fsctx['nqn']} -device-uuid {fsctx['deviceUUID']}"
+        f" -traddr {target_ip} -trsvcid 4421 -transport rdma -hostnqn {hostnqn} -hostid {hostid}"
+        f" -soft-roce-netdev {netdev} -filesystem -staging-path /tmp/csi-fs-stage"
+    )
+    client.succeed(f"{fsnode} -action node-stage")
+    client.succeed("echo preserved > /tmp/csi-fs-stage/proof && sync")
+    before = int(client.succeed("stat -f -c %b /tmp/csi-fs-stage").strip())
+    client.succeed(f"{e2e} -action expand -volume pvc-fs -size 134217728")
+    print(client.succeed("readlink -f /sys/class/block/nvme1n1/device; ls -l /sys/class/nvme /sys/class/nvme-subsystem; for p in /sys/class/nvme/nvme*; do echo $p; cat $p/subsysnqn; done"))
+    client.succeed(f"{fsnode} -action node-expand -size 134217728")
+    after = int(client.succeed("stat -f -c %b /tmp/csi-fs-stage").strip())
+    assert after > before, "filesystem did not grow"
+    assert client.succeed("cat /tmp/csi-fs-stage/proof").strip() == "preserved"
+    client.succeed(f"{fsnode} -action node-unstage")
+    client.succeed(f"{e2e} -action unpublish -volume pvc-fs -hostnqn {hostnqn}")
+    client.succeed(f"{e2e} -action delete -volume pvc-fs")
 
     # --- revoke: the controller loses the box at once ---
     # The fingerprint carries `+` and `/`, so it must be form-encoded, not

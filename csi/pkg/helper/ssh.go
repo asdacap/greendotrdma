@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"sync"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -42,15 +41,12 @@ type SSHConfig struct {
 }
 
 // Tunnel dials SSH sessions whose stdio carries gRPC to the daemon socket.
-// One ssh.Client is kept per live gRPC connection: gRPC redials through
-// DialContext when the channel drops, which builds a fresh SSH connection.
+// Each gRPC connection owns its SSH transport. Redials always build a fresh
+// connection; closing a failed channel cannot leave a stale cached SSH client.
 type Tunnel struct {
 	addr    string
 	command string
 	conf    *ssh.ClientConfig
-
-	mu     sync.Mutex
-	client *ssh.Client
 }
 
 // NewTunnel validates the config and prepares the SSH client config. It does
@@ -90,15 +86,38 @@ func NewTunnel(cfg SSHConfig) (*Tunnel, error) {
 // DialContext opens one SSH session running the pipe command and returns its
 // stdio as a net.Conn — the shape grpc.WithContextDialer wants.
 func (t *Tunnel) DialContext(ctx context.Context, _ string) (net.Conn, error) {
-	client, err := t.sshClient()
+	ctx, cancel := context.WithTimeout(ctx, t.conf.Timeout)
+	defer cancel()
+	transport, err := (&net.Dialer{}).DialContext(ctx, "tcp", t.addr)
 	if err != nil {
+		return nil, fmt.Errorf("ssh: dialing %s: %w", t.addr, err)
+	}
+	// Closing the TCP transport interrupts handshake, channel-open and exec
+	// waits, including peers that accept TCP but never answer SSH requests.
+	cancelled := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		transport.Close()
+		close(cancelled)
+	})
+	defer stop()
+	deadline, _ := ctx.Deadline()
+	if err := transport.SetDeadline(deadline); err != nil {
+		transport.Close()
 		return nil, err
 	}
+	connected := false
+	defer func() {
+		if !connected {
+			transport.Close()
+		}
+	}()
+	connection, channels, requests, err := ssh.NewClientConn(transport, t.addr, t.conf)
+	if err != nil {
+		return nil, fmt.Errorf("ssh: handshake: %w", err)
+	}
+	client := ssh.NewClient(connection, channels, requests)
 	sess, err := client.NewSession()
 	if err != nil {
-		// The cached client may be a dead TCP connection; drop it so the
-		// next dial rebuilds, and fail this attempt (gRPC retries).
-		t.reset(client)
 		return nil, fmt.Errorf("ssh: opening session: %w", err)
 	}
 	stdin, err := sess.StdinPipe()
@@ -112,58 +131,36 @@ func (t *Tunnel) DialContext(ctx context.Context, _ string) (net.Conn, error) {
 	if err := sess.Start(t.command); err != nil {
 		return nil, fmt.Errorf("ssh: starting %q: %w", t.command, err)
 	}
-	return &sessionConn{sess: sess, in: stdin, out: stdout}, nil
+	if !stop() {
+		<-cancelled
+		return nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := transport.SetDeadline(time.Time{}); err != nil {
+		return nil, err
+	}
+	connected = true
+	return &sessionConn{Conn: transport, in: stdin, out: stdout}, nil
 }
 
-func (t *Tunnel) sshClient() (*ssh.Client, error) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.client != nil {
-		return t.client, nil
-	}
-	client, err := ssh.Dial("tcp", t.addr, t.conf)
-	if err != nil {
-		return nil, fmt.Errorf("ssh: dialing %s: %w", t.addr, err)
-	}
-	t.client = client
-	return client, nil
-}
-
-func (t *Tunnel) reset(stale *ssh.Client) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if t.client == stale {
-		t.client.Close()
-		t.client = nil
-	}
-}
-
-// sessionConn adapts an SSH session's stdio to net.Conn. Deadlines are no-ops:
-// gRPC drives cancellation through contexts and its own keepalives.
+// sessionConn adapts session stdio while retaining real TCP deadlines and
+// ownership. Close shuts down the transport directly: sending SSH EOF/close
+// first can itself block indefinitely on an unresponsive peer.
 type sessionConn struct {
-	sess *ssh.Session
-	in   interface {
-		Write([]byte) (int, error)
-		Close() error
-	}
+	net.Conn
+	in  interface{ Write([]byte) (int, error) }
 	out interface{ Read([]byte) (int, error) }
 }
 
 func (c *sessionConn) Read(b []byte) (int, error)  { return c.out.Read(b) }
 func (c *sessionConn) Write(b []byte) (int, error) { return c.in.Write(b) }
 
-func (c *sessionConn) Close() error {
-	c.in.Close() // EOF to the pipe -> daemon sees a clean shutdown
-	return c.sess.Close()
-}
-
 type pipeAddr struct{}
 
 func (pipeAddr) Network() string { return "ssh" }
 func (pipeAddr) String() string  { return "greendotctl-pipe" }
 
-func (c *sessionConn) LocalAddr() net.Addr                { return pipeAddr{} }
-func (c *sessionConn) RemoteAddr() net.Addr               { return pipeAddr{} }
-func (c *sessionConn) SetDeadline(t time.Time) error      { return nil }
-func (c *sessionConn) SetReadDeadline(t time.Time) error  { return nil }
-func (c *sessionConn) SetWriteDeadline(t time.Time) error { return nil }
+func (c *sessionConn) LocalAddr() net.Addr  { return pipeAddr{} }
+func (c *sessionConn) RemoteAddr() net.Addr { return pipeAddr{} }

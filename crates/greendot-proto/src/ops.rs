@@ -206,16 +206,26 @@ pub struct ZfsClone {
     pub snap: SnapName,
     pub target: DatasetName,
     pub new_size: Option<u64>,
+    pub restore_request_id: Option<String>,
 }
 
 impl TryFrom<pb::ZfsClone> for ZfsClone {
     type Error = ConvertError;
     fn try_from(c: pb::ZfsClone) -> Result<Self, ConvertError> {
+        if c.restore_request_id
+            .as_ref()
+            .is_some_and(|id| id.is_empty() || id.len() > 255)
+        {
+            return Err(ConvertError(
+                "restore request id must contain 1–255 bytes".into(),
+            ));
+        }
         Ok(ZfsClone {
             dataset: DatasetName::new(c.dataset)?,
             snap: SnapName::new(c.snap)?,
             target: DatasetName::new(c.target)?,
             new_size: c.new_size,
+            restore_request_id: c.restore_request_id,
         })
     }
 }
@@ -226,6 +236,7 @@ impl From<ZfsClone> for pb::ZfsClone {
             snap: c.snap.as_str().to_owned(),
             target: c.target.as_str().to_owned(),
             new_size: c.new_size,
+            restore_request_id: c.restore_request_id,
         }
     }
 }
@@ -1131,6 +1142,70 @@ impl From<InstallPackages> for pb::InstallPackages {
 // web-managed prefix — reconcile treats CSI subsystems as foreign, so the two
 // owners never fight over the same configfs objects.
 
+fn attachment_id(id: String) -> Result<String, ConvertError> {
+    if id.is_empty()
+        || id.len() > 255
+        || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    {
+        return Err(ConvertError("invalid attachment id".into()));
+    }
+    Ok(id)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiPublish {
+    pub export: CsiNvmeApply,
+    pub hostnqn: Nqn,
+    pub attachment_id: String,
+}
+impl TryFrom<pb::CsiPublish> for CsiPublish {
+    type Error = ConvertError;
+    fn try_from(p: pb::CsiPublish) -> Result<Self, ConvertError> {
+        Ok(Self {
+            export: p
+                .export
+                .ok_or_else(|| ConvertError("export required".into()))?
+                .try_into()?,
+            hostnqn: Nqn::new(p.hostnqn)?,
+            attachment_id: attachment_id(p.attachment_id)?,
+        })
+    }
+}
+impl From<CsiPublish> for pb::CsiPublish {
+    fn from(p: CsiPublish) -> Self {
+        Self {
+            export: Some(p.export.into()),
+            hostnqn: p.hostnqn.to_string(),
+            attachment_id: p.attachment_id,
+        }
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CsiUnpublish {
+    pub nqn: CsiNqn,
+    pub hostnqn: Nqn,
+    pub attachment_id: String,
+}
+impl TryFrom<pb::CsiUnpublish> for CsiUnpublish {
+    type Error = ConvertError;
+    fn try_from(p: pb::CsiUnpublish) -> Result<Self, ConvertError> {
+        Ok(Self {
+            nqn: CsiNqn::new(p.nqn)?,
+            hostnqn: Nqn::new(p.hostnqn)?,
+            attachment_id: attachment_id(p.attachment_id)?,
+        })
+    }
+}
+impl From<CsiUnpublish> for pb::CsiUnpublish {
+    fn from(p: CsiUnpublish) -> Self {
+        Self {
+            nqn: p.nqn.to_string(),
+            hostnqn: p.hostnqn.to_string(),
+            attachment_id: p.attachment_id,
+        }
+    }
+}
+
 /// Idempotent upsert of one CSI export: subsystem (`allow_any_host=0`),
 /// namespace 1 with the pinned `device_uuid` (written before enable, so the
 /// initiator's `/dev/disk/by-id` path is deterministic and no read-back rpc is
@@ -1249,10 +1324,9 @@ impl From<CsiHostRevoke> for pb::CsiHostRevoke {
     }
 }
 
-/// Target-side volume expansion as one intent: resize the zvol backing
-/// namespace 1 (the dataset is derived from the subsystem's own
-/// `device_path`, so the `CsiNqn` scopes what can be resized), then
-/// revalidate the namespace size so initiators see the new capacity.
+/// Target-side volume expansion as one intent: monotonically grow the managed
+/// dataset encoded in the NQN (legacy leaf NQNs resolve through namespace 1),
+/// then revalidate any live namespace, including on retries after ZFS grew.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CsiVolumeExpand {
     pub nqn: CsiNqn,
@@ -1658,12 +1732,14 @@ mod tests {
             snap: SnapName::new("csi-snap-1").unwrap(),
             target: DatasetName::new("tank/csi/pvc-2").unwrap(),
             new_size: Some(20 << 30),
+            restore_request_id: None,
         } => pb::ZfsClone);
         roundtrip!(ZfsClone {
             dataset: DatasetName::new("tank/csi/pvc-1").unwrap(),
             snap: SnapName::new("csi-snap-1").unwrap(),
             target: DatasetName::new("tank/csi/pvc-2").unwrap(),
             new_size: None,
+            restore_request_id: None,
         } => pb::ZfsClone);
         roundtrip!(ZvolInfo { dataset: DatasetName::new("tank/csi/pvc-1").unwrap() } => pb::ZvolInfo);
         roundtrip!(CsiNvmeApply {
@@ -2015,6 +2091,7 @@ mod tests {
                 snap: "tank@daily".into(), // '@' is not part of a snap name
                 target: "tank/csi/pvc-2".into(),
                 new_size: None,
+                restore_request_id: None,
             })
             .is_err()
         );
@@ -2024,6 +2101,7 @@ mod tests {
                 snap: "daily".into(),
                 target: "../../etc".into(),
                 new_size: None,
+                restore_request_id: None,
             })
             .is_err()
         );
@@ -2033,5 +2111,38 @@ mod tests {
             })
             .is_err()
         );
+    }
+    #[test]
+    fn attachment_generations_and_restore_ids_validate_and_roundtrip() {
+        for id in ["", "../escape", "has:colon", &"a".repeat(256)] {
+            assert!(attachment_id(id.into()).is_err());
+        }
+        let unpublish = CsiUnpublish {
+            nqn: CsiNqn::new("nqn.2026-06.io.greendot.csi:tank:volume").unwrap(),
+            hostnqn: Nqn::new("nqn.2014-08.org.nvmexpress:host1").unwrap(),
+            attachment_id: "attachment-1".into(),
+        };
+        assert_eq!(
+            CsiUnpublish::try_from(pb::CsiUnpublish::from(unpublish.clone())).unwrap(),
+            unpublish
+        );
+        for request_id in [
+            None,
+            Some("restore-1".to_string()),
+            Some(String::new()),
+            Some("a".repeat(256)),
+        ] {
+            let valid = request_id
+                .as_ref()
+                .is_none_or(|id| !id.is_empty() && id.len() <= 255);
+            let wire = pb::ZfsClone {
+                dataset: "tank/source".into(),
+                snap: "snap".into(),
+                target: "tank/target".into(),
+                new_size: Some(1024),
+                restore_request_id: request_id,
+            };
+            assert_eq!(ZfsClone::try_from(wire).is_ok(), valid);
+        }
     }
 }

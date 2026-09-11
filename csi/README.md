@@ -77,3 +77,37 @@ Ops driven through this controller do not appear on greendot-web's Tasks page
 (the web records only tasks it dispatches). The controller logs every daemon
 subtask and its output to the pod log, and the daemon traces each op to the
 journal — that pair is the audit trail for CSI operations.
+
+
+### Attachment-generation fencing and upgrade
+
+Upgrade the CSI controller and `greendotctl` together. The controller now requires
+Kubernetes API access to resolve immutable `VolumeAttachment` UIDs; an older helper
+lacks the generation-fenced lifecycle RPCs and attach fails closed. Existing volume
+handles and namespace UUIDs do not change. A legacy live export can be adopted only
+when its sole allowed host matches the requested node; conflicting or ownerless
+legacy exports require operator investigation, not automatic eviction.
+
+The target serializes `CsiPublish` and `CsiUnpublish` under its mutation lock and
+stores owner intent and fenced UID tombstones in `/var/lib/greendotrdma/csi` (test-only
+override: `greendotctl serve --csi-state-root <directory>`). This directory
+must be on durable storage and preserved across helper/target restarts and upgrades.
+Do not delete or restore it independently of attachment state. Owner intent is
+persisted before an export opens; a fence is persisted before controllers are
+severed, and ownership is released only after teardown succeeds. Target reboot
+clears configfs but not ownership: reconciliation recreates the same live UID.
+A new host/generation is rejected until the previous owner is fenced. Legacy
+host-only mutation RPCs cannot bypass recorded generation fences.
+
+Reconciliation reads target ownership before checking Kubernetes attachments and
+prunes only that exact generation. Thus stale passes and overlapping controllers
+cannot remove a fresh owner or resurrect a completed detach; safety does not rely
+on process-local locks or Lease expiry timing. Each volume/API pass is bounded by
+30 seconds and failure does not stop following volumes. Tombstones are deliberately
+not garbage-collected: storage grows with attachment history, because arbitrary
+late RPCs cannot safely be distinguished from reusable generations without them.
+Monitor this state directory's capacity; a persistence error fails closed.
+
+Direct test/CLI controller calls must supply an explicit immutable attachment ID
+(`csi-e2e --attachment-id <id>`). Reuse it for retries and detach of that attachment,
+not for a later attach. Production obtains it from Kubernetes, never from a host ID.

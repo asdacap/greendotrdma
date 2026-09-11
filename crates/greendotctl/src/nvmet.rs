@@ -281,6 +281,14 @@ fn step(
 /// (CSI controllers retry `CreateVolume`). The CSI port is then ensured and
 /// the subsystem linked — the link is the listener bind.
 pub fn csi_apply(root: &Path, op: &ops::CsiNvmeApply, task: &mut Task) -> io::Result<()> {
+    csi_apply_checked(root, op, task).map(|_| ())
+}
+
+pub fn csi_apply_checked(
+    root: &Path,
+    op: &ops::CsiNvmeApply,
+    task: &mut Task,
+) -> io::Result<SubStatus> {
     let done = step(task, format!("Ensure subsystem {}", op.nqn), || {
         let dir = root.join("subsystems").join(op.nqn.as_str());
         create_dir_all_ok(&dir)?;
@@ -297,7 +305,7 @@ pub fn csi_apply(root: &Path, op: &ops::CsiNvmeApply, task: &mut Task) -> io::Re
         Ok(SubStatus::Success)
     })?;
     if done == SubStatus::Failed {
-        return Ok(());
+        return Ok(SubStatus::Failed);
     }
     step(task, format!("Bind to CSI port {CSI_PORT_ID}"), || {
         let port = NvmetPortSpec {
@@ -309,30 +317,39 @@ pub fn csi_apply(root: &Path, op: &ops::CsiNvmeApply, task: &mut Task) -> io::Re
         };
         apply_port(root, &port, CSI_NQN_PREFIX)?;
         Ok(SubStatus::Success)
-    })?;
-    Ok(())
+    })
 }
 
 /// The `CsiNvmeDelete` op: absent-tolerant teardown (unlink, delete, then reap
 /// the CSI port once its last link is gone — an empty port's id would
 /// otherwise be reclaimable by the web's renderer).
 pub fn csi_delete(root: &Path, nqn: &CsiNqn, task: &mut Task) -> io::Result<()> {
-    step(task, format!("Unbind {nqn} from CSI port"), || {
+    csi_delete_checked(root, nqn, task).map(|_| ())
+}
+
+pub fn csi_delete_checked(root: &Path, nqn: &CsiNqn, task: &mut Task) -> io::Result<SubStatus> {
+    if step(task, format!("Unbind {nqn} from CSI port"), || {
         let link = csi_port_links(root).join(nqn.as_str());
         if link.symlink_metadata().is_err() {
             return Ok(SubStatus::Skipped);
         }
         remove_file_ok(&link)?;
         Ok(SubStatus::Success)
-    })?;
-    step(task, format!("Delete subsystem {nqn}"), || {
+    })? == SubStatus::Failed
+    {
+        return Ok(SubStatus::Failed);
+    }
+    if step(task, format!("Delete subsystem {nqn}"), || {
         let dir = root.join("subsystems").join(nqn.as_str());
         if !dir.is_dir() {
             return Ok(SubStatus::Skipped);
         }
         delete_subsystem(&dir)?;
         Ok(SubStatus::Success)
-    })?;
+    })? == SubStatus::Failed
+    {
+        return Ok(SubStatus::Failed);
+    }
     step(task, "Reap empty CSI port".into(), || {
         let port = root.join("ports").join(CSI_PORT_ID.to_string());
         if !port.is_dir() || !dir_entries(&port.join("subsystems")).is_empty() {
@@ -340,8 +357,7 @@ pub fn csi_delete(root: &Path, nqn: &CsiNqn, task: &mut Task) -> io::Result<()> 
         }
         remove_object_dir(&port)?;
         Ok(SubStatus::Success)
-    })?;
-    Ok(())
+    })
 }
 
 /// The `CsiHostGrant` op: add one initiator NQN to the subsystem's
@@ -351,6 +367,15 @@ pub fn csi_host_grant(root: &Path, nqn: &CsiNqn, host: &Nqn, task: &mut Task) ->
         let subsys = root.join("subsystems").join(nqn.as_str());
         if !subsys.is_dir() {
             return Err(io::Error::other(format!("subsystem {nqn} does not exist")));
+        }
+        if std::fs::read_dir(subsys.join("allowed_hosts"))?.any(|entry| {
+            entry
+                .map(|entry| entry.file_name() != host.as_str())
+                .unwrap_or(true)
+        }) {
+            return Err(io::Error::other(
+                "attachment conflict: export grants another host",
+            ));
         }
         let link = subsys.join("allowed_hosts").join(host.as_str());
         if link.symlink_metadata().is_ok() {
@@ -409,31 +434,99 @@ pub fn csi_host_revoke(root: &Path, nqn: &CsiNqn, host: &Nqn, task: &mut Task) -
     Ok(())
 }
 
-/// The `CsiVolumeExpand` op: resolve the subsystem's backing zvol from its own
-/// namespace (the `CsiNqn` is the authorization scope — the rpc cannot name an
-/// arbitrary dataset), `zfs set volsize`, then tell nvmet to revalidate the
-/// namespace size so connected initiators see the new capacity.
+/// Grow the managed zvol even when detached, then revalidate any live export.
+/// The daemon mutation lock covers both the size read and the grow, so retries
+/// (including older requests) never shrink a volume.
 pub fn csi_expand(root: &Path, nqn: &CsiNqn, new_size: u64, task: &mut Task) -> io::Result<()> {
+    expand_volume(
+        root,
+        nqn,
+        new_size,
+        task,
+        |task, dataset| {
+            let mut sub = task.begin_subtask(format!("Read capacity {dataset}"));
+            let command = crate::cmd::TaskSpec::new(
+                "zfs",
+                vec![
+                    "get".into(),
+                    "-Hp".into(),
+                    "-o".into(),
+                    "value".into(),
+                    "volsize".into(),
+                    dataset.to_string(),
+                ],
+            );
+            let output = crate::cmd::capture_into(&mut sub, &command)?;
+            match output
+                .ok()
+                .and_then(|value| value.trim().parse::<u64>().ok())
+            {
+                Some(size) if size > 0 => {
+                    sub.complete(SubStatus::Success);
+                    Ok(Some(size))
+                }
+                _ => {
+                    sub.fail("cannot read backing zvol capacity");
+                    Ok(None)
+                }
+            }
+        },
+        |task, dataset, size| {
+            crate::cmd::run(
+                task,
+                format!("Resize zvol {dataset}"),
+                &crate::zfs::zvol_resize(dataset, size),
+            )
+        },
+    )
+}
+
+fn expand_volume(
+    root: &Path,
+    nqn: &CsiNqn,
+    new_size: u64,
+    task: &mut Task,
+    mut read_size: impl FnMut(&mut Task, &DatasetName) -> io::Result<Option<u64>>,
+    mut resize: impl FnMut(&mut Task, &DatasetName, u64) -> io::Result<SubStatus>,
+) -> io::Result<()> {
     let ns = root
         .join("subsystems")
         .join(nqn.as_str())
         .join("namespaces/1");
-    let dev = read_trim(&ns.join("device_path"));
-    let Some(dataset) = dev
-        .strip_prefix("/dev/zvol/")
-        .and_then(|d| DatasetName::new(d).ok())
+    let device = read_trim(&ns.join("device_path"));
+    let token = nqn
+        .as_str()
+        .strip_prefix(CSI_NQN_PREFIX)
+        .unwrap_or_default();
+    // Older clients used bare leaf NQNs; preserve their export-backed lookup.
+    // Current managed IDs encode the full path, without a separate arbitrary
+    // dataset argument that could escape the NQN authorization scope.
+    let dataset = if token.contains(':') && !token.starts_with("imp1-") {
+        DatasetName::new(token.replace(':', "/")).ok()
+    } else if !token.starts_with("imp1-") {
+        device
+            .strip_prefix("/dev/zvol/")
+            .and_then(|name| DatasetName::new(name).ok())
+    } else {
+        None
+    };
+    let Some(dataset) =
+        dataset.filter(|dataset| !ns.exists() || device == format!("/dev/zvol/{dataset}"))
     else {
-        task.begin_subtask("Resolve backing zvol").fail(format!(
-            "subsystem {nqn} namespace 1 is not zvol-backed (device_path {dev:?})"
-        ));
+        task.begin_subtask("Resolve backing zvol")
+            .fail("namespace is not backed by the managed zvol");
         return Ok(());
     };
-    if crate::cmd::run(
-        task,
-        format!("Resize zvol {dataset}"),
-        &crate::zfs::zvol_resize(&dataset, new_size),
-    )? != SubStatus::Success
-    {
+    let Some(current_size) = read_size(task, &dataset)? else {
+        return Ok(());
+    };
+    if new_size > current_size && resize(task, &dataset, new_size)? != SubStatus::Success {
+        return Ok(());
+    }
+    // A retry after successful ZFS growth must still repair a failed revalidate.
+    // Disabled namespaces pick up capacity when enabled; detached volumes have
+    // no namespace and must not acquire an export as a side effect of growth.
+    if !ns.exists() || read_trim(&ns.join("enable")) != "1" {
         return Ok(());
     }
     step(task, "Revalidate namespace size".into(), || {
@@ -837,8 +930,107 @@ mod tests {
         std::fs::remove_dir_all(&tmp).unwrap();
     }
 
-    /// `csi_expand` refuses a non-zvol namespace, and stops after a failed
-    /// resize (the revalidate must not run against the unresized volume).
+    #[test]
+    fn csi_expand_detached_and_partial_failure_retries() {
+        for (name, attached, current, fail_resize, revalidate) in [
+            ("fresh", false, 10, false, false),
+            ("detached-after-use", false, 20, false, false),
+            ("attached", true, 10, false, true),
+            ("already-grown", true, 20, false, true),
+            ("older-request", true, 30, false, true),
+            ("resize-failed", true, 10, true, true),
+            ("revalidate-failed", true, 10, false, false),
+        ] {
+            let tmp = std::env::temp_dir().join(format!("gd-expand-{}-{name}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&tmp);
+            std::fs::create_dir_all(&tmp).unwrap();
+            let op = csi_op("tank:csi:pvc-1", "/dev/zvol/tank/csi/pvc-1");
+            let ns = tmp
+                .join("subsystems")
+                .join(op.nqn.as_str())
+                .join("namespaces/1");
+            if attached {
+                run_csi(&tmp, |root, task| csi_apply(root, &op, task));
+                if revalidate {
+                    std::fs::write(ns.join("revalidate_size"), "0").unwrap();
+                }
+            }
+            let mut size = current;
+            let events = run_csi(&tmp, |root, task| {
+                expand_volume(
+                    root,
+                    &op.nqn,
+                    20,
+                    task,
+                    |_, dataset| {
+                        assert_eq!(dataset.as_str(), "tank/csi/pvc-1");
+                        Ok(Some(current))
+                    },
+                    |task, _, requested| {
+                        assert!(requested > size);
+                        if fail_resize {
+                            task.begin_subtask("Resize").fail("injected resize failure");
+                            Ok(SubStatus::Failed)
+                        } else {
+                            size = requested;
+                            Ok(SubStatus::Success)
+                        }
+                    },
+                )
+            });
+            assert_eq!(
+                task_status(&events),
+                if fail_resize || attached && !revalidate {
+                    SubStatus::Failed
+                } else {
+                    SubStatus::Success
+                },
+                "{name}"
+            );
+            assert_eq!(
+                size,
+                if fail_resize {
+                    current
+                } else {
+                    current.max(20)
+                },
+                "{name}"
+            );
+            if attached && revalidate {
+                assert_eq!(
+                    read_trim(&ns.join("revalidate_size")),
+                    if fail_resize { "0" } else { "1" }
+                );
+            }
+            if attached && !revalidate {
+                // Grow succeeded; repair the interrupted revalidate without
+                // issuing a second grow, even though ZFS already has the size.
+                std::fs::write(ns.join("revalidate_size"), "0").unwrap();
+                let retry = run_csi(&tmp, |root, task| {
+                    expand_volume(
+                        root,
+                        &op.nqn,
+                        20,
+                        task,
+                        |_, _| Ok(Some(size)),
+                        |_, _, _| panic!("retry must not resize"),
+                    )
+                });
+                assert_eq!(task_status(&retry), SubStatus::Success);
+                assert_eq!(read_trim(&ns.join("revalidate_size")), "1");
+            }
+            if !attached {
+                assert!(
+                    !tmp.join("subsystems").exists(),
+                    "detached grow must not export"
+                );
+            }
+            std::fs::remove_dir_all(tmp).unwrap();
+        }
+    }
+
+    /// Legacy leaf NQNs require a zvol-backed namespace, and a failed
+    /// capacity read must not reach resize or revalidation.
     #[test]
     fn csi_expand_resolves_and_gates_on_the_zvol() {
         let tmp = std::env::temp_dir().join(format!("gd-nvmet-csiexp{}", std::process::id()));
@@ -851,15 +1043,14 @@ mod tests {
         assert_eq!(subtask_names(&events), ["Resolve backing zvol"]);
         assert_eq!(task_status(&events), SubStatus::Failed);
 
-        // A zvol-backed namespace resolves and reaches the resize step, which
-        // fails here (no zfs / no such dataset) — and the revalidate step must
-        // NOT run after a failed resize.
+        // A zvol-backed namespace resolves, but its capacity read fails here
+        // (no zfs / no such dataset); resize and revalidate must not run.
         let op = csi_op("pvc-1", "/dev/zvol/tank/csi/pvc-1");
         run_csi(&tmp, |r, t| csi_apply(r, &op, t));
         let events = run_csi(&tmp, |r, t| csi_expand(r, &nqn, 1 << 30, t));
         assert_eq!(
             subtask_names(&events),
-            ["Resize zvol tank/csi/pvc-1"],
+            ["Read capacity tank/csi/pvc-1"],
             "stops after the failed resize"
         );
         assert_eq!(task_status(&events), SubStatus::Failed);

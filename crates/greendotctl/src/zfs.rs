@@ -68,7 +68,25 @@ pub fn zfs_clone_and_resize(
     snap: &SnapName,
     target: &DatasetName,
     new_size: Option<u64>,
+    restore_request_id: Option<&str>,
 ) -> io::Result<()> {
+    if let Some(request_id) = restore_request_id {
+        return restore_clone(
+            task,
+            dataset,
+            snap,
+            target,
+            new_size,
+            request_id,
+            |task, command| cmd::run(task, "Restore volume", command),
+            |task, command| {
+                let mut sub = task.begin_subtask("Read restore provenance");
+                let output = cmd::capture_into(&mut sub, command)?;
+                sub.complete(SubStatus::Success);
+                Ok(output.unwrap_or_default())
+            },
+        );
+    }
     if cmd::run(
         task,
         format!("Clone {dataset}@{snap} to {target}"),
@@ -81,6 +99,94 @@ pub fn zfs_clone_and_resize(
         cmd::run(task, format!("Resize {target}"), &zvol_resize(target, size))?;
     }
     Ok(())
+}
+
+const RESTORE_REQUEST: &str = "io.greendot.csi:restore-request";
+const RESTORE_SOURCE: &str = "io.greendot.csi:restore-source";
+const RESTORE_SIZE: &str = "io.greendot.csi:restore-size";
+
+fn restore_clone(
+    task: &mut Task,
+    dataset: &DatasetName,
+    snap: &SnapName,
+    target: &DatasetName,
+    new_size: Option<u64>,
+    request_id: &str,
+    mut run: impl FnMut(&mut Task, &TaskSpec) -> io::Result<SubStatus>,
+    mut read: impl FnMut(&mut Task, &TaskSpec) -> io::Result<String>,
+) -> io::Result<()> {
+    let source = format!("{dataset}@{snap}");
+    let size = new_size.map(|size| size.to_string()).unwrap_or_default();
+    let properties = format!("{RESTORE_REQUEST},{RESTORE_SOURCE},{RESTORE_SIZE},origin,volsize");
+    let probe = spec(s(&[
+        "get",
+        "-Hp",
+        "-o",
+        "property,value,source",
+        &properties,
+        target.as_str(),
+    ]));
+    let mut output = read(task, &probe)?;
+    if output.trim().is_empty() {
+        let create = spec(s(&[
+            "clone",
+            "-o",
+            &format!("{RESTORE_REQUEST}={request_id}"),
+            "-o",
+            &format!("{RESTORE_SOURCE}={source}"),
+            "-o",
+            &format!("{RESTORE_SIZE}={size}"),
+            &source,
+            target.as_str(),
+        ]));
+        if run(task, &create)? != SubStatus::Success {
+            return Ok(());
+        }
+        output = read(task, &probe)?;
+    }
+    match restore_size(&output, request_id, &source, &size) {
+        Some(current_size) => {
+            if let Some(new_size) = new_size {
+                if new_size > current_size {
+                    run(task, &zvol_resize(target, new_size))?;
+                }
+            }
+        }
+        None => task.begin_subtask("Verify restore provenance").fail(
+            "restore conflict: target has different or unverified request, source, or capacity",
+        ),
+    }
+    Ok(())
+}
+
+fn restore_size(output: &str, request_id: &str, source: &str, size: &str) -> Option<u64> {
+    let rows: Vec<Vec<&str>> = output
+        .lines()
+        .map(|line| line.split('\t').collect())
+        .collect();
+    for (property, expected) in [
+        (RESTORE_REQUEST, request_id),
+        (RESTORE_SOURCE, source),
+        (RESTORE_SIZE, size),
+    ] {
+        if !rows
+            .iter()
+            .any(|row| row.as_slice() == [property, expected, "local"])
+        {
+            return None;
+        }
+    }
+    if !rows
+        .iter()
+        .any(|row| row.len() == 3 && row[0] == "origin" && row[1] == source)
+    {
+        return None;
+    }
+    rows.iter()
+        .find(|row| row.len() == 3 && row[0] == "volsize")?
+        .get(1)?
+        .parse()
+        .ok()
 }
 
 /// Whether `/dev/zvol/<dataset>` exists and its size in bytes, via the udev
@@ -374,6 +480,74 @@ mod tests {
             .args,
             s(&["clone", "tank/csi/pvc-1@csi-s1", "tank/csi/pvc-2"])
         );
+    }
+
+    #[test]
+    fn restore_retries_verify_provenance_and_only_grow() {
+        use crate::cmd::test::Collector;
+        use std::cell::RefCell;
+        let metadata = format!(
+            "{RESTORE_REQUEST}\tpvc-1\tlocal\n{RESTORE_SOURCE}\ttank/source@s1\tlocal\n{RESTORE_SIZE}\t20\tlocal\norigin\ttank/source@s1\t-\nvolsize\t10\t-\n"
+        );
+        for (existing, request, expected_commands) in
+            [(false, "pvc-1", 2), (true, "pvc-1", 1), (true, "other", 0)]
+        {
+            let state = RefCell::new(if existing {
+                metadata.clone()
+            } else {
+                String::new()
+            });
+            let mut commands = Vec::new();
+            for attempt in 0..3 {
+                let mut collector = Collector::default();
+                let mut task = Task::new(&mut collector);
+                restore_clone(
+                    &mut task,
+                    &ds("tank/source"),
+                    &SnapName::new("s1").unwrap(),
+                    &ds("tank/target"),
+                    Some(20),
+                    request,
+                    |_, command| {
+                        commands.push(command.args.clone());
+                        if command.args[0] == "clone" {
+                            *state.borrow_mut() = metadata.clone();
+                            Ok(SubStatus::Success)
+                        } else if attempt == 0 {
+                            Ok(SubStatus::Failed)
+                        } else {
+                            *state.borrow_mut() = metadata.replace("volsize\t10", "volsize\t20");
+                            Ok(SubStatus::Success)
+                        }
+                    },
+                    |_, _| Ok(state.borrow().clone()),
+                )
+                .unwrap();
+                task.complete().unwrap();
+                assert_eq!(
+                    commands.len(),
+                    expected_commands + usize::from(attempt > 0 && request == "pvc-1")
+                );
+            }
+            if !existing {
+                assert!(commands[0].contains(&format!("{RESTORE_REQUEST}=pvc-1")));
+            }
+        }
+        assert_eq!(
+            restore_size(&metadata, "pvc-1", "tank/source@s1", "20"),
+            Some(10)
+        );
+        for invalid in [
+            metadata.replace("local", "inherited from tank"),
+            metadata.replace("tank/source@s1", "tank/other@s1"),
+            metadata.replace("restore-size\t20", "restore-size\t30"),
+            String::new(),
+        ] {
+            assert_eq!(
+                restore_size(&invalid, "pvc-1", "tank/source@s1", "20"),
+                None
+            );
+        }
     }
 
     /// `zvol_info` through a fake udev/sysfs tree: present (symlink → zd0 with
