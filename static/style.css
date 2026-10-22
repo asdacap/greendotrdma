@@ -1,55 +1,119 @@
-/* GreenDotRDMA — appliance front panel.
-   The screen is the remote face of a storage box in a dark rack: etched panel
-   labels, machine values in monospace, and status shown as glowing link LEDs. */
+/* GreenDotRDMA — drive label / spec sheet.
+   The screen reads like the printed label on a storage box: plain ink on a cool
+   surface, condensed signage type for headings, and green spent only on "on".
+   Light/dark follows the OS; both schemes share one set of role tokens. */
+
+@font-face {
+  font-family: "Barlow";
+  font-weight: 400;
+  font-display: swap;
+  src: url("/static/fonts/Barlow-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Barlow";
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/Barlow-SemiBold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Barlow Semi Condensed";
+  font-weight: 600;
+  font-display: swap;
+  src: url("/static/fonts/BarlowSemiCondensed-SemiBold.woff2") format("woff2");
+}
 
 :root {
-  /* Field lives inside the product's own green-black world, not neutral slate. */
-  --bg: #0a0f0e;
-  --bg-rail: #0b1210;
-  --panel: #121a17;
-  --panel-2: #18221e;
-  --panel-hover: #1d2823;
-  --inset: #0a100e;
-  --border: #1e2a25;
-  --border-strong: #2c3c34;
-  --text: #dde6e0;
-  --muted: #7d9088;
-  --faint: #54655d;
+  --bg: #eef2f0;          /* page surface — cool grey-green, never cream */
+  --panel: #ffffff;
+  --panel-2: #f6f8f7;     /* table heads, quiet buttons */
+  --panel-hover: #e9eeeb;
+  --inset: #f3f6f4;       /* logs, code, form fields */
+  --border: #d5dcd8;
+  --border-strong: #b9c3be;
+  --text: #18211d;
+  --muted: #5a6761;
+  --faint: #6f7b76;
 
-  /* Status triad — product semantics, hues unchanged. Treatment does the work. */
-  --green: #34d058;
-  --green-rgb: 52, 208, 88;   /* same green, for translucent glows and rings */
-  --green-bright: #3fe066;    /* hover lift on a green fill */
-  --green-ink: #06250e;       /* text/icons sitting on a green fill */
-  --yellow: #e3b341;
-  --yellow-rgb: 227, 179, 65;  /* same amber, for translucent chart glows */
-  --red: #f0564a;
-  --red-rgb: 240, 86, 74;
-  --accent: #34d058;
+  /* Status triad — the only saturated colours on the page. */
+  --green: #178a43;
+  --green-bright: #12733a;   /* hover on a green fill */
+  --green-ink: #ffffff;      /* text sitting on a green fill */
+  --yellow: #a86a12;
+  --red: #c2362a;
+  --red-tint: rgba(194, 54, 42, .08);
+  --accent: var(--green);
 
-  /* Pico owns the typography and form scale; these only map its tokens onto
-     the panel palette so anything it renders stays on-brand. */
+  /* The rail stays a solid dark bezel in both schemes. */
+  --rail: #18211d;
+  --rail-text: #c9d3ce;
+  --rail-muted: #8a9891;
+  --rail-hover: rgba(255, 255, 255, .06);
+
+  --shadow-float: 0 18px 48px rgba(24, 33, 29, .18);
+
+  --ui: "Barlow", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --display: "Barlow Semi Condensed", "Barlow", system-ui, sans-serif;
+  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "SF Mono",
+          "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #141a17;
+    --panel: #1b2320;
+    --panel-2: #222c28;
+    --panel-hover: #29342f;
+    --inset: #111714;
+    --border: #2b3631;
+    --border-strong: #3a4842;
+    --text: #e3eae6;
+    --muted: #94a39c;
+    --faint: #7a8982;
+
+    --green: #3dbe6a;
+    --green-bright: #52cc7b;
+    --green-ink: #062611;
+    --yellow: #e0a33a;
+    --red: #ef6a5c;
+    --red-tint: rgba(239, 106, 92, .1);
+
+    --rail: #0e1311;
+    --rail-hover: rgba(255, 255, 255, .05);
+
+    --shadow-float: 0 18px 48px rgba(0, 0, 0, .5);
+  }
+}
+
+/* Pico owns the form scale and switches its own palette on prefers-color-scheme
+   with :root:not([data-theme]) — match that specificity so the mapping onto the
+   role tokens wins in both schemes. */
+:root:not([data-theme]) {
   --pico-font-family: var(--ui);
   --pico-background-color: var(--bg);
   --pico-color: var(--text);
   --pico-muted-color: var(--muted);
   --pico-muted-border-color: var(--border);
+  --pico-h1-color: var(--text);
+  --pico-h2-color: var(--text);
+  --pico-h3-color: var(--text);
   --pico-primary: var(--green);
+  --pico-primary-hover: var(--green-bright);
+  --pico-primary-underline: rgba(23, 138, 67, .4);
   --pico-primary-background: var(--green);
   --pico-primary-border: var(--green);
-  --pico-form-element-background-color: var(--inset);
-  --pico-form-element-border-color: var(--border);
-  --pico-form-element-color: var(--text);
-  --pico-form-element-placeholder-color: var(--faint);
-  --pico-form-element-active-border-color: var(--green);
-  --pico-form-element-focus-color: rgba(var(--green-rgb), .14);
   --pico-primary-inverse: var(--green-ink);
   --pico-primary-hover-background: var(--green-bright);
   --pico-primary-hover-border: var(--green-bright);
-
-  --ui: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  --mono: ui-monospace, "JetBrains Mono", "SFMono-Regular", "SF Mono",
-          "Cascadia Code", "Roboto Mono", Menlo, Consolas, monospace;
+  --pico-form-element-background-color: var(--inset);
+  --pico-form-element-border-color: var(--border-strong);
+  --pico-form-element-color: var(--text);
+  --pico-form-element-placeholder-color: var(--faint);
+  --pico-form-element-active-border-color: var(--green);
+  --pico-form-element-focus-color: rgba(23, 138, 67, .18);
+  --pico-code-background-color: var(--inset);
+  --pico-code-color: var(--text);
+  --pico-border-radius: 6px;
+  --pico-box-shadow: none;
 }
 
 body {
@@ -58,11 +122,14 @@ body {
   min-height: 100vh;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--ui);
   -webkit-font-smoothing: antialiased;
 }
 
-/* Form controls take Pico's focus ring (--pico-form-element-focus-color); the
-   outline is for the things Pico leaves bare — links, buttons, disclosures. */
+h1, h2, h3, .brand { font-family: var(--display); font-weight: 600; }
+
+/* Form controls take Pico's focus ring; the outline is for the things Pico
+   leaves bare — links, buttons, disclosures. */
 a:focus-visible,
 button:focus-visible,
 [role=button]:focus-visible,
@@ -71,81 +138,77 @@ summary:focus-visible {
   outline-offset: 2px;
 }
 
-/* ---- Rack rail (sidebar) ------------------------------------------------- */
+/* ---- Rail (sidebar) ----------------------------------------------------- */
 
 .sidebar {
-  width: 224px;
+  width: 216px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
-  padding: 20px 0 14px;
-  background: var(--bg-rail);
-  border-right: 1px solid var(--border);
+  padding: 22px 0 14px;
+  background: var(--rail);
+  color: var(--rail-text);
 }
 
 .sidebar .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 2px 18px 4px;
-  font-weight: 700;
-  letter-spacing: .01em;
+  gap: 10px;
+  padding: 0 18px;
+  font-size: 1.25rem;
+  line-height: 1.2;
+  color: #fff;
 }
 
-.sidebar .brand .dot { width: 11px; height: 11px; }
+.sidebar .brand .dot { width: 16px; height: 16px; }
 
 .brand-sub {
-  padding: 0 18px 18px;
-  margin: 2px 0 0;
-  font-family: var(--mono);
-  font-size: .75rem;
-  letter-spacing: .04em;
-  color: var(--faint);
-  text-transform: uppercase;
+  margin: 4px 0 0;
+  padding: 0 18px 0 44px;
+  font-size: .875rem;
+  color: var(--rail-muted);
 }
+
+.sidebar .brand-sub { padding-bottom: 14px; }
 
 .nav-label {
   display: block;
-  margin: 16px 0 4px;
+  margin: 16px 0 2px;
   padding: 0 18px;
-  font-size: .625rem;
-  font-weight: 600;
-  letter-spacing: .16em;
-  text-transform: uppercase;
-  color: var(--faint);
+  font-size: .8125rem;
+  color: var(--rail-muted);
 }
 
 .sidebar a {
-  position: relative;
   display: block;
-  padding: 7px 18px;
-  color: var(--muted);
+  padding: 6px 18px 6px 15px;
+  border-left: 3px solid transparent;
+  color: var(--rail-text);
   text-decoration: none;
-  border-left: 2px solid transparent;
 }
 
-.sidebar a:hover {
-  color: var(--text);
-  background: linear-gradient(90deg, rgba(var(--green-rgb), .06), transparent 70%);
-}
+.sidebar a:hover { color: #fff; background: var(--rail-hover); }
 
 .sidebar a[aria-current="page"] {
-  color: var(--text);
+  color: #fff;
+  font-weight: 600;
   border-left-color: var(--green);
-  background: linear-gradient(90deg, rgba(var(--green-rgb), .1), transparent 70%);
+  background: var(--rail-hover);
 }
 
 .sidebar-footer {
   margin-top: auto;
-  padding: 12px 18px 2px;
-  border-top: 1px solid var(--border);
+  padding: 12px 18px 0;
+  border-top: 1px solid rgba(255, 255, 255, .08);
   display: flex;
   justify-content: space-between;
   align-items: baseline;
   gap: 8px;
 }
 
-.sidebar-footer .muted { font-family: var(--mono); font-size: .75rem; }
+.sidebar-footer .muted { color: var(--rail-muted); font-size: .875rem; }
+.sidebar .linklike { color: var(--rail-text); }
+.sidebar .linklike:hover { color: #fff; }
 
 .linklike {
   background: none;
@@ -162,48 +225,32 @@ summary:focus-visible {
 
 /* ---- Main column -------------------------------------------------------- */
 
-main {
+/* Pico centres body>main in a breakpoint container; match its selector so the
+   column sits left-aligned beside the rail with its own gutters. */
+body > main {
   flex: 1;
   min-width: 0;
-  padding: 28px 36px 56px;
   max-width: 1180px;
-  background: radial-gradient(120% 55% at 0% 0%, rgba(var(--green-rgb), .035), transparent 62%);
+  margin: 0;
+  padding: 32px 40px 56px;
 }
 
-h1 { letter-spacing: -.015em; }
-
-h1::after {
-  content: "";
-  display: block;
-  width: 40px;
-  height: 2px;
-  margin-top: 11px;
-  background: var(--green);
-  box-shadow: 0 0 8px rgba(var(--green-rgb), .6);
+h1 {
+  font-size: 2rem;
+  line-height: 1.15;
+  letter-spacing: -.01em;
+  margin: 0 0 20px;
 }
 
-h1 .dot { width: 13px; height: 13px; }
+h1 .dot { width: 16px; height: 16px; vertical-align: .08em; }
 
-/* Section headers read as engraved panel legends with a lit tick. */
 h2 {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: .75rem;
-  font-weight: 600;
-  letter-spacing: .13em;
-  text-transform: uppercase;
-  color: var(--muted);
-  margin: 34px 0 12px;
-}
-
-h2::before {
-  content: "";
-  width: 6px;
-  height: 6px;
-  border-radius: 1px;
-  background: var(--green);
-  box-shadow: 0 0 6px rgba(var(--green-rgb), .7);
+  font-size: 1.25rem;
+  line-height: 1.25;
+  margin: 36px 0 12px;
 }
 
 p { margin: 10px 0; }
@@ -217,103 +264,75 @@ p { margin: 10px 0; }
 
 .badge {
   display: inline-block;
-  font-size: .75rem;
+  font-size: .8125rem;
   line-height: 1.5;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: 4px;
   color: var(--muted);
-  border: 1px solid var(--border-strong);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
   vertical-align: middle;
 }
 
-code, .mono { font-family: var(--mono); }
+code, .mono, pre { font-family: var(--mono); }
 
-/* ---- Signature: link-state LED ------------------------------------------ */
+/* ---- Status dot --------------------------------------------------------- */
+/* Shape carries the state as well as colour: filled = live, half = degraded,
+   ring = off, barred (no-entry) = down. Nothing glows or pulses. */
 
 .dot {
   display: inline-block;
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
   border-radius: 50%;
   vertical-align: baseline;
   flex-shrink: 0;
+  box-sizing: border-box;
 }
 
-.dot-green {
-  background: radial-gradient(circle at 35% 30%, #b7ffce, var(--green) 62%);
-  box-shadow: 0 0 0 1px rgba(var(--green-rgb), .35), 0 0 7px 1px rgba(var(--green-rgb), .65);
-  animation: led-pulse 2.6s ease-in-out infinite;
-}
+.dot-green { background: var(--green); }
 
 .dot-yellow {
-  background: radial-gradient(circle at 35% 30%, #ffe9a8, var(--yellow) 62%);
-  box-shadow: 0 0 0 1px rgba(227, 179, 65, .35), 0 0 7px 1px rgba(227, 179, 65, .6);
+  border: 2px solid var(--yellow);
+  background: linear-gradient(90deg, var(--yellow) 50%, transparent 50%);
 }
 
 .dot-red {
-  background: radial-gradient(circle at 35% 30%, #ffb1aa, var(--red) 62%);
-  box-shadow: 0 0 0 1px rgba(240, 86, 74, .35), 0 0 7px 1px rgba(240, 86, 74, .6);
+  background:
+    linear-gradient(#fff, #fff) center / 60% 20% no-repeat,
+    var(--red);
 }
 
-.dot-gray {
-  background: #36443d;
-  box-shadow: inset 0 0 0 1px var(--border-strong);
-}
-
-@keyframes led-pulse {
-  0%, 100% { box-shadow: 0 0 0 1px rgba(var(--green-rgb), .3), 0 0 6px 1px rgba(var(--green-rgb), .5); }
-  50%      { box-shadow: 0 0 0 1px rgba(var(--green-rgb), .5), 0 0 11px 2px rgba(var(--green-rgb), .85); }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .dot-green { animation: none; }
-}
+.dot-gray { border: 2px solid var(--faint); background: transparent; }
 
 /* ---- Dashboard status board (port tiles) -------------------------------- */
 
 .cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(216px, 1fr));
-  gap: 14px;
+  gap: 12px;
   margin-top: 4px;
 }
 
 .exportcard {
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 15px 16px;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  gap: 6px;
+  padding: 14px 16px;
+  background: var(--panel);
   border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 9px;
+  border-radius: 6px;
   color: var(--text);
   text-decoration: none;
-  transition: border-color .12s ease, transform .12s ease;
 }
 
-.exportcard:hover { transform: translateY(-1px); border-color: var(--border-strong); }
+.exportcard:hover { border-color: var(--border-strong); }
 
-.exportcard.s-live     { border-left-color: var(--green); }
-.exportcard.s-degraded { border-left-color: var(--yellow); }
-.exportcard.s-down     { border-left-color: var(--red); }
-.exportcard.s-off      { border-left-color: var(--faint); }
+.port-top { display: flex; align-items: center; gap: 8px; }
 
-.port-top {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+.port-top .dot { width: 12px; height: 12px; }
 
-.port-top .dot { width: 11px; height: 11px; }
-
-.port-state {
-  font-size: .625rem;
-  font-weight: 700;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+.port-state { font-size: .875rem; font-weight: 600; color: var(--muted); }
 
 .s-live     .port-state { color: var(--green); }
 .s-degraded .port-state { color: var(--yellow); }
@@ -322,25 +341,22 @@ code, .mono { font-family: var(--mono); }
 .port-name {
   font-family: var(--mono);
   font-weight: 600;
-  letter-spacing: -.01em;
   word-break: break-all;
 }
 
-.port-meta {
-  font-family: var(--mono);
-  font-size: .75rem;
-  letter-spacing: .03em;
-  color: var(--muted);
-}
+.port-meta { font-size: .875rem; color: var(--muted); }
 
 .port-reason { font-size: .875em; color: var(--faint); }
 
 /* ---- Tables ------------------------------------------------------------- */
 
+/* Pico paints cells with --pico-background-color (the page surface); scope it
+   to the panel so the table reads as one sheet. */
 table {
+  --pico-background-color: var(--panel);
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 6px;
   overflow: hidden;
 }
 
@@ -352,45 +368,39 @@ th, td {
 th {
   color: var(--muted);
   font-weight: 600;
-  font-size: .75rem;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-  background: var(--bg-rail);
+  font-size: .875rem;
+  background: var(--panel-2);
 }
 
-tbody tr:hover td { background: rgba(255, 255, 255, .015); }
+tbody tr:hover td { background: var(--panel-2); }
 tr:last-child td { border-bottom: none; }
 
-td code { font-size: .875em; color: var(--text); }
+td code { font-size: .875em; color: var(--text); background: none; padding: 0; }
 
 .usagebar {
   display: inline-block;
   width: 84px;
-  height: 7px;
+  height: 8px;
   margin-right: 8px;
   background: var(--inset);
-  border: 1px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid var(--border-strong);
+  border-radius: 2px;
   vertical-align: middle;
   overflow: hidden;
 }
 
-.usagebar-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--green), #5fe07f);
-  box-shadow: 0 0 6px rgba(var(--green-rgb), .5);
-}
+.usagebar-fill { height: 100%; background: var(--green); }
 
 /* ---- Forms -------------------------------------------------------------- */
-/* Pico paints the controls and owns the field rhythm (label spacing, control
-   margins) — the rules here only add the card chrome and the mono textarea. */
+/* Pico paints the controls and owns the field rhythm — the rules here only
+   add the card chrome and the mono textarea. */
 
 .card {
   max-width: 480px;
   padding: 18px 18px 20px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 6px;
 }
 
 .card label { color: var(--muted); }
@@ -403,14 +413,13 @@ td code { font-size: .875em; color: var(--text); }
 /* Inline action forms stay compact and horizontal (Pico stretches to 100%). */
 .inline input, .inline select { margin: 0; width: auto; }
 
-/* Pico paints buttons (padding, radius, border, transitions); the brand only
-   swaps the colour tokens. The quiet panel button is the default — green primary
-   is reserved for a card's submit. <a role="button"> (e.g. Diagnose) rides the
-   same tokens. */
+/* The quiet panel button is the default — green primary is reserved for a
+   card's submit. <a role="button"> (e.g. Diagnose) rides the same tokens. */
 button, [type=button], [role=button] {
-  --pico-background-color: var(--panel-2);
+  --pico-background-color: var(--panel);
   --pico-border-color: var(--border-strong);
   --pico-color: var(--text);
+  font-weight: 600;
 }
 button:is(:hover, :focus, :active),
 [type=button]:is(:hover, :focus, :active),
@@ -425,18 +434,17 @@ button:is(:hover, :focus, :active),
   --pico-background-color: var(--green);
   --pico-border-color: var(--green);
   --pico-color: var(--green-ink);
-  font-weight: 650;
-  letter-spacing: .01em;
 }
 .card button[type="submit"]:is(:hover, :focus, :active),
 .login-card button[type="submit"]:is(:hover, :focus, :active) {
   --pico-background-color: var(--green-bright);
   --pico-border-color: var(--green-bright);
+  --pico-color: var(--green-ink);
 }
 
 button.danger { --pico-color: var(--red); }
 button.danger:is(:hover, :focus, :active) {
-  --pico-background-color: rgba(var(--red-rgb), .08);
+  --pico-background-color: var(--red-tint);
   --pico-border-color: var(--red);
   --pico-color: var(--red);
 }
@@ -476,15 +484,10 @@ form.inline {
   padding: 12px 14px 8px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 6px;
 }
 
-.chartcard .muted {
-  font-family: var(--mono);
-  font-size: .75rem;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-}
+.chartcard .muted { font-size: .875rem; }
 
 svg.chart { width: 100%; height: auto; margin-top: 4px; overflow: visible; }
 
@@ -493,41 +496,32 @@ svg.chart polyline {
   stroke-width: 1.5;
   stroke-linejoin: round;
   stroke-linecap: round;
-  filter: drop-shadow(0 0 3px rgba(var(--green-rgb), .55));
 }
 
 /* Mirror charts: read/rx above the centre in green, write/tx below in amber. */
-svg.chart polyline.chart-down {
-  stroke: var(--yellow);
-  filter: drop-shadow(0 0 3px rgba(var(--yellow-rgb), .55));
-}
-.chart-up-label, .chart-down-label {
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: .03em;
-}
+svg.chart polyline.chart-down { stroke: var(--yellow); }
+.chart-up-label, .chart-down-label { font-family: var(--ui); font-size: 11px; font-weight: 600; }
 .chart-up-label { fill: var(--accent); }
 .chart-down-label { fill: var(--yellow); }
 
 /* SVG viewBox coordinate space, not page typography — px is correct here. */
-.chart-label { fill: var(--faint); font-family: var(--mono); font-size: 11px; }
+.chart-label { fill: var(--faint); font-family: var(--ui); font-size: 11px; font-variant-numeric: tabular-nums; }
 .chart-tick-y { text-anchor: end; }
 svg.chart line.chart-grid { stroke: var(--border); stroke-width: 1; }
 svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
 
 /* Charts page: resource-type section headers and the metric filter chips. */
 .chart-section {
-  font-family: var(--mono);
-  font-size: .75rem;
-  letter-spacing: .06em;
-  text-transform: uppercase;
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 1rem;
   color: var(--muted);
   margin: 22px 0 2px;
 }
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0; }
 .chip {
-  font-size: .75rem;
+  font-size: .875rem;
   padding: 2px 11px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
@@ -535,49 +529,28 @@ svg.chart line.chart-axis { stroke: var(--border-strong); stroke-width: 1; }
   text-decoration: none;
 }
 .chip:hover { border-color: var(--accent); color: var(--text); }
-.chip.active { background: var(--accent); color: var(--bg); border-color: var(--accent); }
+.chip.active { background: var(--accent); color: var(--green-ink); border-color: var(--accent); }
 
-.chart-title {
-  font-family: var(--mono);
-  font-size: .75rem;
-  letter-spacing: .04em;
-  text-transform: uppercase;
-  color: var(--muted);
-}
+.chart-title { font-family: var(--display); font-weight: 600; color: var(--text); }
 
-/* The full smartctl dump, shown verbatim and scrollable. */
-.smart-report {
+/* ---- Logs / task stream / SMART dump ------------------------------------ */
+
+.log, .smart-report {
   max-height: 440px;
   overflow: auto;
   margin: 6px 0 0;
   padding: 12px 14px;
   background: var(--inset);
   border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 7px;
+  border-radius: 6px;
   font-family: var(--mono);
   font-size: .875em;
   line-height: 1.5;
-  white-space: pre;
 }
 
-/* ---- Logs / task stream ------------------------------------------------- */
-
-.log {
-  max-height: 440px;
-  overflow: auto;
-  margin: 6px 0 0;
-  padding: 12px 14px;
-  background: var(--inset);
-  border: 1px solid var(--border);
-  border-left: 2px solid var(--border-strong);
-  border-radius: 7px;
-  font-family: var(--mono);
-  font-size: .875em;
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* The full smartctl dump, shown verbatim; task logs wrap. */
+.smart-report { white-space: pre; }
+.log { white-space: pre-wrap; word-break: break-word; }
 
 details { margin: 10px 0; }
 /* Plain disclosure toggles — Pico would right-align the label and float a chevron. */
@@ -596,66 +569,58 @@ details summary:hover { color: var(--text); }
 
 /* ---- Login -------------------------------------------------------------- */
 
-.login-body {
-  align-items: center;
-  justify-content: center;
-  background:
-    radial-gradient(60% 50% at 50% 0%, rgba(var(--green-rgb), .06), transparent 70%),
-    var(--bg);
-}
+.login-body { align-items: center; justify-content: center; }
 
 .login-card {
-  width: 340px;
-  padding: 32px 32px 34px;
+  width: 360px;
+  margin: 16px;
+  padding: 30px 30px 32px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-top: 2px solid var(--green);
-  border-radius: 11px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+  border-radius: 8px;
 }
 
 .login-card h1 {
   display: flex;
   align-items: center;
-  gap: 9px;
-  font-size: 1.25rem;
-  margin: 0 0 4px;
+  gap: 10px;
+  font-size: 1.75rem;
+  margin: 0;
 }
 
-.login-card h1::after { display: none; }
+.login-card .brand-sub { padding-left: 26px; margin-bottom: 18px; color: var(--muted); }
 
 .login-card label { color: var(--muted); }
 
 /* ---- Dialogs ------------------------------------------------------------ */
-/* Form dialogs replace the old disclosure dropdowns; one shared #gd-confirm
-   modal upgrades every hx-confirm. Native <dialog> gives ESC + focus-trap; Pico
-   paints article/header/footer and the brand drops it onto the panel. */
+/* Form dialogs and the shared #gd-confirm modal. Native <dialog> gives ESC +
+   focus-trap; Pico paints article/header/footer and the brand drops it onto
+   the panel. Dialogs are the one thing that floats, so they get the shadow. */
 
 /* Trigger is a normal quiet panel button (Pico paints it); only margins are local. */
 .dialog-trigger { margin: 10px 0; }
 .rowactions .dialog-trigger { margin: 0; }
 
 dialog { border: none; background: transparent; padding: 0; }
-dialog::backdrop { background: rgba(0, 0, 0, .55); }
+dialog::backdrop { background: rgba(14, 19, 17, .55); }
 dialog > article {
   margin: 0;
   width: min(92vw, 460px);
   padding: 20px 20px 22px;
   background: var(--panel);
   border: 1px solid var(--border);
-  border-top: 2px solid var(--green);
-  border-radius: 11px;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, .45);
+  border-radius: 8px;
+  box-shadow: var(--shadow-float);
 }
 dialog > article > header {
-  margin: 0 0 6px;
+  margin: 0 0 8px;
   padding: 0;
   background: none;
   border: none;
-  color: var(--muted);
-  font-size: .75rem;
+  color: var(--text);
+  font-family: var(--display);
+  font-size: 1.25rem;
   font-weight: 600;
-  letter-spacing: .04em;
 }
 /* A .card form fills the dialog — the <article> already owns the panel chrome. */
 dialog .card { max-width: none; padding: 0; background: none; border: none; }
@@ -665,10 +630,17 @@ dialog footer {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  margin: 0;
+  margin: 16px 0 0;
   padding: 0;
   background: none;
   border: none;
+}
+/* Footer actions are sized to their label and share one line: :is() outranks
+   Pico's button[type=submit] (width: 100%) and [type=button] (margin) rules. */
+dialog footer :is(button, [type=button], [type=submit]) {
+  width: auto;
+  margin-bottom: 0;
+  font-weight: 600;
 }
 
 /* Quiet secondary (Cancel) button. */
@@ -688,3 +660,33 @@ button.secondary:is(:hover, :focus, :active) {
 #gd-confirm-name { color: var(--red); font-family: var(--mono); }
 #gd-confirm-input { width: 100%; margin: 8px 0 0; font-family: var(--mono); }
 #gd-confirm-ok:disabled { opacity: .4; cursor: not-allowed; }
+
+/* ---- Narrow screens ----------------------------------------------------- */
+/* The rail folds into a top bar: brand + wrapping links, group labels dropped. */
+
+@media (max-width: 760px) {
+  body { flex-direction: column; }
+
+  .sidebar {
+    width: auto;
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: flex-start;   /* Pico spreads <nav> children apart */
+    align-items: center;
+    padding: 12px 10px;
+    gap: 2px;
+  }
+
+  .sidebar .brand { width: 100%; padding: 0 6px 8px; }
+  .sidebar .brand-sub, .nav-label { display: none; }
+
+  .sidebar a { padding: 4px 8px; border-left: none; border-radius: 4px; }
+  .sidebar a[aria-current="page"] { box-shadow: inset 0 -2px 0 var(--green); }
+
+  .sidebar-footer { width: 100%; margin-top: 8px; padding: 8px 6px 0; }
+
+  body > main { padding: 20px 16px 40px; }
+
+  /* Wide tables scroll inside themselves instead of the page. */
+  main table { display: block; overflow-x: auto; }
+}

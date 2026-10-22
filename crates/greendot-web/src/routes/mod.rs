@@ -37,6 +37,18 @@ const STYLE_CSS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../static/style.css"
 ));
+const BARLOW_REGULAR: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../static/fonts/Barlow-Regular.woff2"
+));
+const BARLOW_SEMIBOLD: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../static/fonts/Barlow-SemiBold.woff2"
+));
+const BARLOW_SEMICONDENSED_SEMIBOLD: &[u8] = include_bytes!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../static/fonts/BarlowSemiCondensed-SemiBold.woff2"
+));
 
 pub struct AppState {
     pub helper: HelperClient,
@@ -104,10 +116,22 @@ pub fn app(state: Arc<AppState>) -> Router {
             "/static/style.css",
             get(async || asset("text/css", STYLE_CSS)),
         )
+        .route(
+            "/static/fonts/Barlow-Regular.woff2",
+            get(async || asset("font/woff2", BARLOW_REGULAR)),
+        )
+        .route(
+            "/static/fonts/Barlow-SemiBold.woff2",
+            get(async || asset("font/woff2", BARLOW_SEMIBOLD)),
+        )
+        .route(
+            "/static/fonts/BarlowSemiCondensed-SemiBold.woff2",
+            get(async || asset("font/woff2", BARLOW_SEMICONDENSED_SEMIBOLD)),
+        )
         .with_state(state)
 }
 
-fn asset(content_type: &'static str, body: &'static str) -> Response {
+fn asset(content_type: &'static str, body: impl IntoResponse) -> Response {
     (
         [
             (header::CONTENT_TYPE, content_type),
