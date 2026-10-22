@@ -387,6 +387,8 @@ pub(crate) mod testutil {
             csi_host_grant, CsiHostGrantStream, pb::CsiHostGrant;
             csi_host_revoke, CsiHostRevokeStream, pb::CsiHostRevoke;
             csi_volume_expand, CsiVolumeExpandStream, pb::CsiVolumeExpand;
+            csi_publish, CsiPublishStream, pb::CsiPublish;
+            csi_unpublish, CsiUnpublishStream, pb::CsiUnpublish;
             pipe_key_add, PipeKeyAddStream, pb::PipeKeyAdd;
             pipe_key_revoke, PipeKeyRevokeStream, pb::PipeKeyRevoke;
         }
@@ -403,6 +405,7 @@ pub(crate) mod testutil {
             reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
             zvol_info, pb::ZvolInfo, pb::ZvolInfoReply;
             pipe_access_report, pb::Empty, pb::PipeAccessReportReply;
+            csi_attachment, pb::CsiNvmeDelete, pb::CsiAttachmentReply;
         }
     }
 
