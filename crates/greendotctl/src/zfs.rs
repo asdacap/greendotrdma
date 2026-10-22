@@ -3,8 +3,8 @@
 use crate::cmd::{self, TaskSpec};
 use crate::util::s;
 use greendot_proto::{
-    DatasetName, DevicePath, MountPoint, PoolName, SnapName, SubStatus, Task, VdevClass,
-    VdevLayout, VdevTarget,
+    Compression, DatasetName, DevicePath, LogBias, MountPoint, PoolName, PrimaryCache, SnapName,
+    SubStatus, Task, VdevClass, VdevLayout, VdevTarget, VolMode, ZvolSync, ops,
 };
 use std::io;
 use std::path::Path;
@@ -17,20 +17,26 @@ fn zpool_spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zpool", args)
 }
 
-pub fn zvol_create(
-    dataset: &DatasetName,
-    size: u64,
-    volblocksize: Option<u32>,
-    sparse: bool,
-) -> TaskSpec {
+pub fn zvol_create(z: &ops::ZvolCreate) -> TaskSpec {
     let mut args = s(&["create"]);
-    if sparse {
+    if z.sparse {
         args.push("-s".into());
     }
-    if let Some(vbs) = volblocksize {
+    if let Some(vbs) = z.volblocksize {
         args.extend(s(&["-o", &format!("volblocksize={vbs}")]));
     }
-    args.extend(s(&["-V", &size.to_string(), dataset.as_str()]));
+    // Unset properties are left out so the zvol inherits them.
+    let props = [
+        z.compression.map(|v| (Compression::PROP, v.keyword())),
+        z.sync.map(|v| (ZvolSync::PROP, v.keyword())),
+        z.volmode.map(|v| (VolMode::PROP, v.keyword())),
+        z.primarycache.map(|v| (PrimaryCache::PROP, v.keyword())),
+        z.logbias.map(|v| (LogBias::PROP, v.keyword())),
+    ];
+    for (prop, value) in props.into_iter().flatten() {
+        args.extend(s(&["-o", &format!("{prop}={value}")]));
+    }
+    args.extend(s(&["-V", &z.size.to_string(), z.dataset.as_str()]));
     spec(args)
 }
 
@@ -324,6 +330,19 @@ pub fn zfs_set_mountpoint(dataset: &DatasetName, mountpoint: &MountPoint) -> Tas
     ]))
 }
 
+/// `zfs set compression=<v> <dataset>`, or `zfs inherit compression <dataset>`
+/// when `None`.
+pub fn zfs_set_compression(dataset: &DatasetName, compression: Option<Compression>) -> TaskSpec {
+    match compression {
+        Some(c) => spec(s(&[
+            "set",
+            &format!("{}={}", Compression::PROP, c.keyword()),
+            dataset.as_str(),
+        ])),
+        None => spec(s(&["inherit", Compression::PROP, dataset.as_str()])),
+    }
+}
+
 /// `zfs mount <dataset>`.
 pub fn zfs_mount(dataset: &DatasetName) -> TaskSpec {
     spec(s(&["mount", dataset.as_str()]))
@@ -356,22 +375,47 @@ mod tests {
     }
 
     #[rstest]
-    #[case::plain(None, false, &["create", "-V", "10737418240", "tank/vm1"])]
-    #[case::sparse(None, true, &["create", "-s", "-V", "10737418240", "tank/vm1"])]
-    #[case::volblocksize(Some(16384), false,
+    #[case::plain(None, false, false, &["create", "-V", "10737418240", "tank/vm1"])]
+    #[case::sparse(None, true, false, &["create", "-s", "-V", "10737418240", "tank/vm1"])]
+    #[case::volblocksize(Some(16384), false, false,
         &["create", "-o", "volblocksize=16384", "-V", "10737418240", "tank/vm1"])]
+    #[case::all_props(None, true, true,
+        &["create", "-s", "-o", "compression=zstd", "-o", "sync=disabled", "-o", "volmode=dev",
+          "-o", "primarycache=metadata", "-o", "logbias=throughput",
+          "-V", "10737418240", "tank/vm1"])]
     fn zvol_create_args(
         #[case] volblocksize: Option<u32>,
         #[case] sparse: bool,
+        #[case] props: bool,
         #[case] expected: &[&str],
     ) {
-        let spec = zvol_create(&ds("tank/vm1"), 10 << 30, volblocksize, sparse);
+        let spec = zvol_create(&ops::ZvolCreate {
+            dataset: ds("tank/vm1"),
+            size: 10 << 30,
+            volblocksize,
+            sparse,
+            compression: props.then_some(Compression::Zstd),
+            sync: props.then_some(ZvolSync::Disabled),
+            volmode: props.then_some(VolMode::Dev),
+            primarycache: props.then_some(PrimaryCache::Metadata),
+            logbias: props.then_some(LogBias::Throughput),
+        });
         assert_eq!(spec.command, "zfs");
         assert_eq!(
             spec.args,
             expected.iter().map(|s| s.to_string()).collect::<Vec<_>>()
         );
         assert_eq!(spec.stdin, None);
+    }
+
+    #[rstest]
+    #[case::set(Some(Compression::Lz4), &["set", "compression=lz4", "tank"])]
+    #[case::off(Some(Compression::Off), &["set", "compression=off", "tank"])]
+    #[case::inherit(None, &["inherit", "compression", "tank"])]
+    fn set_compression_args(#[case] compression: Option<Compression>, #[case] expected: &[&str]) {
+        let spec = zfs_set_compression(&ds("tank"), compression);
+        assert_eq!(spec.command, "zfs");
+        assert_eq!(spec.args, expected);
     }
 
     fn dp(s: &str) -> DevicePath {

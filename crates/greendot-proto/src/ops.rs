@@ -11,14 +11,15 @@
 //!   is the security choke point.
 
 use crate::convert::{
-    dec_lvm_report, dec_transport, dec_vdev, dec_vdev_class, map_new, parse_ip, strs, to_u8, to_u16,
+    dec_lvm_report, dec_opt, dec_transport, dec_vdev, dec_vdev_class, map_new, parse_ip, strs,
+    to_u8, to_u16,
 };
 use crate::pb;
 use crate::{
-    BlockDev, ConvertError, CsiNqn, DatasetName, DevicePath, LvName, LvmReport as LvmReportKind,
-    MountPoint, NetdevName, Nqn, NsUuid, PackageName, PartLabel, PoolName, Secret, SnapName,
-    SshFingerprint, Transport, Username, ValidationError, VdevClass, VdevLayout, VdevTarget,
-    VgName,
+    BlockDev, Compression, ConvertError, CsiNqn, DatasetName, DevicePath, LogBias, LvName,
+    LvmReport as LvmReportKind, MountPoint, NetdevName, Nqn, NsUuid, PackageName, PartLabel,
+    PoolName, PrimaryCache, Secret, SnapName, SshFingerprint, Transport, Username, ValidationError,
+    VdevClass, VdevLayout, VdevTarget, VgName, VolMode, ZvolSync,
 };
 use std::net::IpAddr;
 
@@ -80,6 +81,12 @@ pub struct ZvolCreate {
     pub size: u64,
     pub volblocksize: Option<u32>,
     pub sparse: bool,
+    // ZFS properties set at create; `None` = inherit from the parent.
+    pub compression: Option<Compression>,
+    pub sync: Option<ZvolSync>,
+    pub volmode: Option<VolMode>,
+    pub primarycache: Option<PrimaryCache>,
+    pub logbias: Option<LogBias>,
 }
 
 impl TryFrom<pb::ZvolCreate> for ZvolCreate {
@@ -90,6 +97,11 @@ impl TryFrom<pb::ZvolCreate> for ZvolCreate {
             size: z.size,
             volblocksize: z.volblocksize,
             sparse: z.sparse,
+            compression: dec_opt(z.compression)?,
+            sync: dec_opt(z.sync)?,
+            volmode: dec_opt(z.volmode)?,
+            primarycache: dec_opt(z.primarycache)?,
+            logbias: dec_opt(z.logbias)?,
         })
     }
 }
@@ -100,6 +112,11 @@ impl From<ZvolCreate> for pb::ZvolCreate {
             size: z.size,
             volblocksize: z.volblocksize,
             sparse: z.sparse,
+            compression: z.compression.map(i32::from),
+            sync: z.sync.map(i32::from),
+            volmode: z.volmode.map(i32::from),
+            primarycache: z.primarycache.map(i32::from),
+            logbias: z.logbias.map(i32::from),
         }
     }
 }
@@ -311,6 +328,32 @@ impl From<ZfsSetMountpoint> for pb::ZfsSetMountpoint {
         pb::ZfsSetMountpoint {
             dataset: z.dataset.as_str().to_owned(),
             mountpoint: z.mountpoint.as_str().to_owned(),
+        }
+    }
+}
+
+/// Set a dataset's (or zvol's, or a pool root's) compression; `None` reverts
+/// it to inheriting from the parent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZfsSetCompression {
+    pub dataset: DatasetName,
+    pub compression: Option<Compression>,
+}
+
+impl TryFrom<pb::ZfsSetCompression> for ZfsSetCompression {
+    type Error = ConvertError;
+    fn try_from(z: pb::ZfsSetCompression) -> Result<Self, ConvertError> {
+        Ok(ZfsSetCompression {
+            dataset: DatasetName::new(z.dataset)?,
+            compression: dec_opt(z.compression)?,
+        })
+    }
+}
+impl From<ZfsSetCompression> for pb::ZfsSetCompression {
+    fn from(z: ZfsSetCompression) -> Self {
+        pb::ZfsSetCompression {
+            dataset: z.dataset.as_str().to_owned(),
+            compression: z.compression.map(i32::from),
         }
     }
 }
@@ -1572,12 +1615,22 @@ mod tests {
             size: 10 << 30,
             volblocksize: Some(16384),
             sparse: true,
+            compression: Some(Compression::Zstd),
+            sync: Some(ZvolSync::Disabled),
+            volmode: Some(VolMode::Dev),
+            primarycache: Some(PrimaryCache::Metadata),
+            logbias: Some(LogBias::Throughput),
         } => pb::ZvolCreate);
         roundtrip!(ZvolCreate {
             dataset: DatasetName::new("tank/vols/vm1").unwrap(),
             size: 10 << 30,
             volblocksize: None,
             sparse: false,
+            compression: None,
+            sync: None,
+            volmode: None,
+            primarycache: None,
+            logbias: None,
         } => pb::ZvolCreate);
         roundtrip!(ZvolDelete { dataset: DatasetName::new("tank/x").unwrap() } => pb::ZvolDelete);
         roundtrip!(ZvolResize { dataset: DatasetName::new("tank/x").unwrap(), new_size: 7 << 30 } => pb::ZvolResize);
@@ -1597,6 +1650,14 @@ mod tests {
             dataset: DatasetName::new("tank/share").unwrap(),
             mountpoint: MountPoint::new("/srv/share").unwrap(),
         } => pb::ZfsSetMountpoint);
+        roundtrip!(ZfsSetCompression {
+            dataset: DatasetName::new("tank").unwrap(),
+            compression: Some(Compression::Lz4),
+        } => pb::ZfsSetCompression);
+        roundtrip!(ZfsSetCompression {
+            dataset: DatasetName::new("tank/vm1").unwrap(),
+            compression: None,
+        } => pb::ZfsSetCompression);
         roundtrip!(ZfsMount { dataset: DatasetName::new("tank/share").unwrap() } => pb::ZfsMount);
         roundtrip!(ZfsUnmount { dataset: DatasetName::new("tank/share").unwrap() } => pb::ZfsUnmount);
         roundtrip!(ZfsDestroy { dataset: DatasetName::new("tank/share").unwrap(), recursive: true } => pb::ZfsDestroy);
@@ -1995,6 +2056,25 @@ mod tests {
             ZfsSetMountpoint::try_from(pb::ZfsSetMountpoint {
                 dataset: "tank/share".into(),
                 mountpoint: "/tank/../etc".into(),
+            })
+            .is_err()
+        );
+        // A present-but-unspecified (or unknown) enum is not "inherit".
+        for compression in [Some(pb::Compression::Unspecified as i32), Some(99)] {
+            assert!(
+                ZfsSetCompression::try_from(pb::ZfsSetCompression {
+                    dataset: "tank".into(),
+                    compression,
+                })
+                .is_err()
+            );
+        }
+        assert!(
+            ZvolCreate::try_from(pb::ZvolCreate {
+                dataset: "tank/vm1".into(),
+                size: 1 << 30,
+                sync: Some(pb::ZvolSync::Unspecified as i32),
+                ..Default::default()
             })
             .is_err()
         );

@@ -11,7 +11,8 @@ use axum::http::HeaderMap;
 use axum::response::Response;
 use axum::{Extension, Router, routing::post};
 use greendot_proto::{
-    DatasetName, DevicePath, MountPoint, PoolName, VdevClass, VdevLayout, VdevTarget, ops,
+    Compression, DatasetName, DevicePath, LogBias, MountPoint, PoolName, PrimaryCache, VdevClass,
+    VdevLayout, VdevTarget, VolMode, ZvolSync, ops,
 };
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -44,6 +45,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/zfs/fs/unmount", post(fs_unmount))
         .route("/zfs/fs/set-mountpoint", post(fs_set_mountpoint))
         .route("/zfs/fs/destroy", post(fs_destroy))
+        .route("/zfs/compression", post(set_compression))
 }
 
 pub struct PoolRow {
@@ -409,6 +411,8 @@ pub struct PoolDetailView {
     pub add_devices: Vec<PoolDeviceOption>,
     /// The pool's properties (curated summary + full `zpool get all`).
     pub props: PropertyTables,
+    /// The pool root dataset's compression (inherited by everything in it).
+    pub compression: Option<CompressionSection>,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -461,6 +465,7 @@ async fn gather_pool_detail(
             // same candidates as pool creation (no zvols, LVs, or formatted parts).
             if view.pool.is_some() {
                 view.props = pool_property_tables(name).await;
+                view.compression = compression_section(name, "pool").await;
                 view.add_devices = gather_pool_create(state, &HashSet::new(), None)
                     .await
                     .devices;
@@ -584,6 +589,7 @@ pub struct ZvolDetailView {
     pub zvol: Option<ZvolRow>,
     /// The zvol's properties (curated summary + full `zfs get all`).
     pub props: PropertyTables,
+    pub compression: Option<CompressionSection>,
     pub not_installed: bool,
     pub error: Option<String>,
     pub flash: Option<String>,
@@ -635,6 +641,7 @@ async fn gather_zvol_detail(
                 });
             if view.zvol.is_some() {
                 view.props = dataset_property_tables(&dataset, DATASET_PROPS).await;
+                view.compression = compression_section(&dataset, "zvol").await;
             }
         }
         // Absent `zfs` ⇒ ZFS isn't installed on this host.
@@ -714,6 +721,11 @@ pub struct DatasetDetailView {
     pub props: PropertyTables,
     pub not_installed: bool,
     pub error: Option<String>,
+    pub compression: Option<CompressionSection>,
+    pub flash: Option<String>,
+    /// The just-dispatched task to link from the flash notice (`/tasks/{id}`).
+    pub task_id: Option<i64>,
+    pub form_error: Option<String>,
 }
 
 #[derive(Template)]
@@ -723,10 +735,24 @@ struct DatasetDetailTemplate {
     view: DatasetDetailView,
 }
 
-async fn gather_dataset_detail(name: &str) -> DatasetDetailView {
+#[derive(Template)]
+#[template(path = "_dataset_detail.html")]
+struct DatasetDetailPartial {
+    view: DatasetDetailView,
+}
+
+async fn gather_dataset_detail(
+    name: &str,
+    flash: Option<String>,
+    form_error: Option<String>,
+    task_id: Option<i64>,
+) -> DatasetDetailView {
     let mut view = DatasetDetailView {
         name: name.to_owned(),
         pool: pool_of(name).to_owned(),
+        flash,
+        form_error,
+        task_id,
         ..Default::default()
     };
     match tokio::try_join!(zfs::datasets(), zfs::snapshots()) {
@@ -772,6 +798,7 @@ async fn gather_dataset_detail(name: &str) -> DatasetDetailView {
                 .collect();
             if view.dataset.is_some() {
                 view.props = dataset_property_tables(name, DATASET_PROPS).await;
+                view.compression = compression_section(name, "dataset").await;
             }
         }
         // Either binary missing → ZFS isn't installed on this host.
@@ -788,8 +815,153 @@ async fn dataset_detail_page(
 ) -> Response {
     page(DatasetDetailTemplate {
         user,
-        view: gather_dataset_detail(&name).await,
+        view: gather_dataset_detail(&name, None, None, None).await,
     })
+}
+
+/// Runs a dataset request as a recorded task and re-renders the dataset's
+/// detail partial with the outcome.
+async fn run_dataset_op(
+    state: &Arc<AppState>,
+    rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
+    kind: &str,
+    title: &str,
+    name: &str,
+) -> Response {
+    let view = match crate::task_runner::start(state, rx, kind, title) {
+        Ok(id) => {
+            gather_dataset_detail(name, Some(format!("started {title}")), None, Some(id)).await
+        }
+        Err(e) => gather_dataset_detail(name, None, Some(format!("{e:#}")), None).await,
+    };
+    page(DatasetDetailPartial { view })
+}
+
+async fn dataset_detail_failed(name: &str, message: impl Into<String>) -> Response {
+    page(DatasetDetailPartial {
+        view: gather_dataset_detail(name, None, Some(message.into()), None).await,
+    })
+}
+
+/// Parses an optional ZFS property form value: `""` means inherit (`None`).
+fn parse_prop<T>(
+    value: &str,
+    prop: &str,
+    parse: fn(&str) -> Option<T>,
+) -> Result<Option<T>, String> {
+    match value {
+        "" => Ok(None),
+        v => parse(v)
+            .map(Some)
+            .ok_or_else(|| format!("invalid {prop} {v:?}")),
+    }
+}
+
+// ---- Compression (shared by the pool, dataset, and zvol pages) ----
+
+/// The "Compression" section of a detail page: the effective value, where it
+/// comes from, and which page the change form re-renders.
+pub struct CompressionSection {
+    pub dataset: String,
+    /// `pool` / `dataset` / `zvol` — the [`DetailPage`] the form posts back.
+    pub page: &'static str,
+    /// Effective value (`lz4`, `off`, …).
+    pub value: String,
+    /// `local`, `default`, `inherited from tank`, …
+    pub source: String,
+}
+
+impl CompressionSection {
+    /// The form value to preselect: the local setting, else `""` (inherit).
+    pub fn selected(&self) -> &str {
+        if self.source == "local" {
+            &self.value
+        } else {
+            ""
+        }
+    }
+}
+
+/// Best-effort: a read failure just hides the section.
+async fn compression_section(dataset: &str, page: &'static str) -> Option<CompressionSection> {
+    let (value, source) = zfs::compression(dataset).await.ok()??;
+    Some(CompressionSection {
+        dataset: dataset.to_owned(),
+        page,
+        value,
+        source,
+    })
+}
+
+/// Which detail page a shared ZFS action re-renders.
+#[derive(Deserialize, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+enum DetailPage {
+    Pool,
+    Dataset,
+    Zvol,
+}
+
+impl DetailPage {
+    async fn run(
+        self,
+        state: &Arc<AppState>,
+        rx: tokio::sync::mpsc::Receiver<greendot_proto::TaskEvent>,
+        kind: &str,
+        title: &str,
+        dataset: &str,
+    ) -> Response {
+        let pool = pool_of(dataset);
+        match self {
+            DetailPage::Pool => run_pool_op(state, rx, kind, title, pool).await,
+            DetailPage::Dataset => run_dataset_op(state, rx, kind, title, dataset).await,
+            DetailPage::Zvol => {
+                run_zvol_op(state, rx, kind, title, pool, zvol_rel(pool, dataset)).await
+            }
+        }
+    }
+
+    async fn failed(self, state: &AppState, dataset: &str, message: String) -> Response {
+        let pool = pool_of(dataset);
+        match self {
+            DetailPage::Pool => pool_op_failed(state, pool, message).await,
+            DetailPage::Dataset => dataset_detail_failed(dataset, message).await,
+            DetailPage::Zvol => zvol_detail_failed(pool, zvol_rel(pool, dataset), message).await,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct CompressionForm {
+    dataset: String,
+    page: DetailPage,
+    #[serde(default)]
+    compression: String,
+}
+
+async fn set_compression(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<CompressionForm>,
+) -> Response {
+    let Ok(dataset) = DatasetName::new(form.dataset.clone()) else {
+        let message = "invalid dataset name".to_owned();
+        return form.page.failed(&state, &form.dataset, message).await;
+    };
+    let compression = match parse_prop(&form.compression, Compression::PROP, Compression::parse) {
+        Ok(c) => c,
+        Err(e) => return form.page.failed(&state, &form.dataset, e).await,
+    };
+    let title = format!(
+        "set {dataset} compression={}",
+        compression.map_or("inherit", Compression::keyword)
+    );
+    let rx = state.helper.zfs_set_compression(ops::ZfsSetCompression {
+        dataset,
+        compression,
+    });
+    form.page
+        .run(&state, rx, "zfs-set-compression", &title, &form.dataset)
+        .await
 }
 
 #[derive(Deserialize)]
@@ -802,6 +974,16 @@ struct CreateForm {
     sparse: Option<String>,
     #[serde(default)]
     volblocksize: String,
+    #[serde(default)]
+    compression: String,
+    #[serde(default)]
+    sync: String,
+    #[serde(default)]
+    volmode: String,
+    #[serde(default)]
+    primarycache: String,
+    #[serde(default)]
+    logbias: String,
 }
 
 async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<CreateForm>) -> Response {
@@ -819,11 +1001,29 @@ async fn zvol_create(State(state): State<Arc<AppState>>, Form(form): Form<Create
             Err(_) => return pool_op_failed(&state, &pool, "invalid volblocksize").await,
         },
     };
+    let props = || -> Result<_, String> {
+        Ok((
+            parse_prop(&form.compression, Compression::PROP, Compression::parse)?,
+            parse_prop(&form.sync, ZvolSync::PROP, ZvolSync::parse)?,
+            parse_prop(&form.volmode, VolMode::PROP, VolMode::parse)?,
+            parse_prop(&form.primarycache, PrimaryCache::PROP, PrimaryCache::parse)?,
+            parse_prop(&form.logbias, LogBias::PROP, LogBias::parse)?,
+        ))
+    };
+    let (compression, sync, volmode, primarycache, logbias) = match props() {
+        Ok(p) => p,
+        Err(e) => return pool_op_failed(&state, &pool, e).await,
+    };
     let req = ops::ZvolCreate {
         dataset: dataset.clone(),
         size,
         volblocksize,
         sparse: form.sparse.is_some(),
+        compression,
+        sync,
+        volmode,
+        primarycache,
+        logbias,
     };
     run_pool_op(
         &state,
@@ -1674,6 +1874,58 @@ mod tests {
             )
             .await;
             assert!(body.contains("started destroy tank/share"), "{body}");
+        }
+
+        #[tokio::test]
+        async fn zvol_create_properties_and_set_compression() {
+            let app = test_app();
+            let (cookie, csrf) = login(&app).await;
+            let auth = |mut req: HttpRequest<Body>| {
+                req.headers_mut()
+                    .insert(header::COOKIE, cookie.parse().unwrap());
+                req.headers_mut()
+                    .insert("x-greendot-csrf", csrf.parse().unwrap());
+                req
+            };
+            let post = |path, body: String| send(&app, auth(form_post(path, &body)));
+
+            // Create with every property set reaches the (fake) helper; a bad
+            // property value is rejected before it.
+            let (_, _, body) = post(
+                "/zfs/zvol",
+                "parent=tank&name=vm1&size=10&unit=GiB&volblocksize=&compression=zstd\
+                 &sync=disabled&volmode=dev&primarycache=metadata&logbias=throughput"
+                    .into(),
+            )
+            .await;
+            assert!(body.contains("started create zvol tank/vm1"), "{body}");
+            let (_, _, body) = post(
+                "/zfs/zvol",
+                "parent=tank&name=vm1&size=10&unit=GiB&volblocksize=&sync=bogus".into(),
+            )
+            .await;
+            assert!(body.contains("invalid sync"), "{body}");
+
+            // Set compression from each detail page: each re-renders its own
+            // partial; "" means inherit; a bad value never reaches the helper.
+            for (page, dataset, target) in [
+                ("pool", "tank", "pool-detail-content"),
+                ("dataset", "tank%2Fshare", "dataset-detail-content"),
+                ("zvol", "tank%2Fvm1", "zvol-detail-content"),
+            ] {
+                let shown = dataset.replace("%2F", "/");
+                for (value, expected) in [
+                    ("lz4", format!("started set {shown} compression=lz4")),
+                    ("", format!("started set {shown} compression=inherit")),
+                    ("gzip", "invalid compression".to_owned()),
+                ] {
+                    let form = format!("page={page}&dataset={dataset}&compression={value}");
+                    let (status, _, body) = post("/zfs/compression", form).await;
+                    assert_eq!(status, StatusCode::OK);
+                    assert!(body.contains(target), "{body}");
+                    assert!(body.contains(&expected), "{body}");
+                }
+            }
         }
 
         #[tokio::test]

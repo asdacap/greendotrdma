@@ -1,0 +1,72 @@
+<div id="dataset-detail-content">
+  {% if let Some(error) = view.error %}<p class="error">{{ error }}</p>{% endif %}
+  {% if let Some(form_error) = view.form_error %}<p class="error">{{ form_error }}</p>{% endif %}
+  {% if let Some(flash) = view.flash %}<p class="flash">{{ flash }}</p>{% endif %}
+  {% if let Some(id) = view.task_id %}<p class="muted small"><a href="/tasks/{{ id }}" data-task-watch="{{ id }}">view task ↗</a></p>{% endif %}
+
+  {% if view.not_installed %}
+  <p class="empty">ZFS is not installed on this host.</p>
+  {% else if view.dataset.is_none() %}
+  <p class="empty">Dataset {{ view.name }} not found.</p>
+  {% else %}
+  {% if let Some(dataset) = view.dataset %}
+  <table>
+    <thead><tr><th>Kind</th><th>Used</th><th>Available</th><th>Mountpoint</th><th>Mounted</th></tr></thead>
+    <tbody>
+      <tr>
+        <td>{{ dataset.kind }}</td>
+        <td>{{ dataset.used }}</td>
+        <td>{{ dataset.avail }}</td>
+        <td>{{ dataset.mountpoint }}</td>
+        <td>
+          {% if dataset.mounted %}<span class="dot dot-green"></span> yes
+          {% else %}<span class="dot dot-gray"></span> no{% endif %}
+        </td>
+      </tr>
+    </tbody>
+  </table>
+  {% endif %}
+
+  {% include "_compression.html" %}
+
+  {% include "_properties.html" %}
+
+  <h2>Zvols</h2>
+  {% if view.zvols.is_empty() %}
+  <p class="empty">This dataset has no zvols under it.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Name</th><th>Used</th><th>Volsize</th><th></th></tr></thead>
+    <tbody>
+      {% for z in view.zvols %}
+      <tr>
+        <td>{{ z.name }}</td>
+        <td>{{ z.used }}</td>
+        <td>{{ z.volsize }}</td>
+        <td><a href="/zfs/pool/{{ z.pool }}/zvol/{{ z.rel }}">Manage</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <h2>Snapshots</h2>
+  {% if view.snapshots.is_empty() %}
+  <p class="empty">This dataset has no snapshots.</p>
+  {% else %}
+  <table>
+    <thead><tr><th>Snapshot</th><th>Used</th><th>Created</th><th></th></tr></thead>
+    <tbody>
+      {% for s in view.snapshots %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td>{{ s.used }}</td>
+        <td>{{ s.created }}</td>
+        <td><a href="/snapshots/snap/{{ s.name }}">Manage</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+  {% endif %}
+</div>

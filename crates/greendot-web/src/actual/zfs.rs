@@ -380,6 +380,24 @@ pub async fn dataset_properties(name: &str) -> Result<Option<Vec<(String, String
         .transpose()
 }
 
+/// A dataset's effective compression and where it comes from (`zfs get -H -o
+/// value,source compression <name>`), e.g. `("lz4", "inherited from tank")`.
+/// `None` when `zfs` isn't installed.
+pub async fn compression(name: &str) -> Result<Option<(String, String)>> {
+    run(&[
+        "zfs",
+        "get",
+        "-H",
+        "-o",
+        "value,source",
+        "compression",
+        name,
+    ])
+    .await?
+    .map(|out| Ok(parse_get(&out)?.into_iter().next().unwrap_or_default()))
+    .transpose()
+}
+
 /// Every property of a pool (`zpool get -H -o property,value all <name>`).
 /// `ashift` here is the pool's ashift *property* (the default for new vdevs,
 /// not a per-vdev probe — that needs `zdb`, which is privileged); pools this

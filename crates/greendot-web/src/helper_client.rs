@@ -171,6 +171,7 @@ impl HelperClient {
         snapshot_destroy(ops::SnapshotDestroy => pb::SnapshotDestroy);
         zfs_fs_create(ops::ZfsFsCreate => pb::ZfsFsCreate);
         zfs_set_mountpoint(ops::ZfsSetMountpoint => pb::ZfsSetMountpoint);
+        zfs_set_compression(ops::ZfsSetCompression => pb::ZfsSetCompression);
         zfs_mount(ops::ZfsMount => pb::ZfsMount);
         zfs_unmount(ops::ZfsUnmount => pb::ZfsUnmount);
         zfs_destroy(ops::ZfsDestroy => pb::ZfsDestroy);

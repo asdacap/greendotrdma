@@ -30,6 +30,8 @@
   </table>
   {% endif %}
 
+  {% include "_compression.html" %}
+
   {% include "_properties.html" %}
 
   <h2>Traffic</h2>
@@ -312,7 +314,50 @@
         <option value="131072">128 KiB</option>
       </select>
     </label>
+    <label>Compression
+      <select name="compression">
+        <option value="">Inherit</option>
+        <option value="off">Off</option>
+        <option value="lz4">lz4</option>
+        <option value="zstd">zstd</option>
+      </select>
+    </label>
     <label class="checkbox"><input type="checkbox" name="sparse" value="1"> Sparse (thin-provisioned)</label>
+    <details>
+      <summary>Advanced</summary>
+      <label>Sync
+        <select name="sync">
+          <option value="">Default (inherit)</option>
+          <option value="standard">standard</option>
+          <option value="always">always — every write is synchronous</option>
+          <option value="disabled">disabled — fast, may lose recent writes on power loss</option>
+        </select>
+      </label>
+      <label>Volume mode
+        <select name="volmode">
+          <option value="">Default (inherit)</option>
+          <option value="full">full — host also exposes partitions</option>
+          <option value="dev">dev — raw block device only</option>
+          <option value="none">none — not exposed on the host</option>
+          <option value="default">default — the module setting</option>
+        </select>
+      </label>
+      <label>Primary cache (ARC)
+        <select name="primarycache">
+          <option value="">Default (inherit)</option>
+          <option value="all">all</option>
+          <option value="metadata">metadata only</option>
+          <option value="none">none</option>
+        </select>
+      </label>
+      <label>Log bias
+        <select name="logbias">
+          <option value="">Default (inherit)</option>
+          <option value="latency">latency</option>
+          <option value="throughput">throughput</option>
+        </select>
+      </label>
+    </details>
     <footer>
       <button type="button" class="secondary" data-dialog-close>Cancel</button>
       <button type="submit">Create</button>

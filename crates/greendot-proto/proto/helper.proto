@@ -44,6 +44,7 @@ service Helper {
   // ZFS filesystem datasets (mount lifecycle).
   rpc ZfsFsCreate(.greendot.helper.v1.ZfsFsCreate) returns (stream TaskEvent);
   rpc ZfsSetMountpoint(.greendot.helper.v1.ZfsSetMountpoint) returns (stream TaskEvent);
+  rpc ZfsSetCompression(.greendot.helper.v1.ZfsSetCompression) returns (stream TaskEvent);
   rpc ZfsMount(.greendot.helper.v1.ZfsMount) returns (stream TaskEvent);
   rpc ZfsUnmount(.greendot.helper.v1.ZfsUnmount) returns (stream TaskEvent);
   rpc ZfsDestroy(.greendot.helper.v1.ZfsDestroy) returns (stream TaskEvent);
@@ -156,6 +157,44 @@ enum VdevClass {
   VDEV_CLASS_DEDUP = 4;
   VDEV_CLASS_CACHE = 5;
   VDEV_CLASS_SPARE = 6;
+}
+
+// ZFS property values (zvol create / set compression). Fields carrying them are
+// `optional`: absent = inherit from the parent (or the ZFS default).
+
+enum Compression {
+  COMPRESSION_UNSPECIFIED = 0;
+  COMPRESSION_OFF = 1;
+  COMPRESSION_LZ4 = 2;
+  COMPRESSION_ZSTD = 3;
+}
+
+enum ZvolSync {
+  ZVOL_SYNC_UNSPECIFIED = 0;
+  ZVOL_SYNC_STANDARD = 1;
+  ZVOL_SYNC_ALWAYS = 2;
+  ZVOL_SYNC_DISABLED = 3;
+}
+
+enum VolMode {
+  VOL_MODE_UNSPECIFIED = 0;
+  VOL_MODE_DEFAULT = 1;
+  VOL_MODE_FULL = 2;
+  VOL_MODE_DEV = 3;
+  VOL_MODE_NONE = 4;
+}
+
+enum PrimaryCache {
+  PRIMARY_CACHE_UNSPECIFIED = 0;
+  PRIMARY_CACHE_ALL = 1;
+  PRIMARY_CACHE_METADATA = 2;
+  PRIMARY_CACHE_NONE = 3;
+}
+
+enum LogBias {
+  LOG_BIAS_UNSPECIFIED = 0;
+  LOG_BIAS_LATENCY = 1;
+  LOG_BIAS_THROUGHPUT = 2;
 }
 
 enum LvmReportKind {
@@ -273,6 +312,11 @@ message ZvolCreate {
   uint64 size = 2;
   optional uint32 volblocksize = 3;
   bool sparse = 4;
+  optional Compression compression = 5;
+  optional ZvolSync sync = 6;
+  optional VolMode volmode = 7;
+  optional PrimaryCache primarycache = 8;
+  optional LogBias logbias = 9;
 }
 message ZvolDelete { string dataset = 1; }
 message ZvolResize { string dataset = 1; uint64 new_size = 2; }
@@ -281,6 +325,8 @@ message SnapshotDestroy { string dataset = 1; string snap = 2; }
 
 message ZfsFsCreate { string dataset = 1; optional string mountpoint = 2; }
 message ZfsSetMountpoint { string dataset = 1; string mountpoint = 2; }
+// Absent `compression` = `zfs inherit compression`.
+message ZfsSetCompression { string dataset = 1; optional Compression compression = 2; }
 message ZfsMount { string dataset = 1; }
 message ZfsUnmount { string dataset = 1; }
 message ZfsDestroy { string dataset = 1; bool recursive = 2; }

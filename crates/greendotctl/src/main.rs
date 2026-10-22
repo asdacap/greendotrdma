@@ -533,6 +533,7 @@ helper_impl! {
             snapshot_destroy, SnapshotDestroyStream, pb::SnapshotDestroy, ops::SnapshotDestroy;
             zfs_fs_create, ZfsFsCreateStream, pb::ZfsFsCreate, ops::ZfsFsCreate;
             zfs_set_mountpoint, ZfsSetMountpointStream, pb::ZfsSetMountpoint, ops::ZfsSetMountpoint;
+            zfs_set_compression, ZfsSetCompressionStream, pb::ZfsSetCompression, ops::ZfsSetCompression;
             zfs_mount, ZfsMountStream, pb::ZfsMount, ops::ZfsMount;
             zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount, ops::ZfsUnmount;
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy, ops::ZfsDestroy;

@@ -267,6 +267,51 @@ impl VdevClass {
     }
 }
 
+/// A ZFS property whose value comes from a closed set. `PROP` is the property
+/// name and `keyword()` the value token (`-o PROP=keyword`), which doubles as
+/// the form value `parse()` accepts. "Inherit" is not a variant — callers hold
+/// `Option<Self>`, `None` meaning inherit from the parent / ZFS default.
+macro_rules! zfs_value_enum {
+    ($(#[$doc:meta])* $name:ident($prop:literal) { $($variant:ident => $kw:literal),+ $(,)? }) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum $name { $($variant),+ }
+
+        impl $name {
+            pub const PROP: &'static str = $prop;
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            pub fn keyword(self) -> &'static str {
+                match self { $(Self::$variant => $kw),+ }
+            }
+
+            pub fn parse(s: &str) -> Option<Self> {
+                match s { $($kw => Some(Self::$variant),)+ _ => None }
+            }
+        }
+    };
+}
+
+zfs_value_enum!(Compression("compression") { Off => "off", Lz4 => "lz4", Zstd => "zstd" });
+zfs_value_enum!(ZvolSync("sync") {
+    Standard => "standard",
+    Always => "always",
+    Disabled => "disabled",
+});
+zfs_value_enum!(VolMode("volmode") {
+    Default => "default",
+    Full => "full",
+    Dev => "dev",
+    None => "none",
+});
+zfs_value_enum!(PrimaryCache("primarycache") {
+    All => "all",
+    Metadata => "metadata",
+    None => "none",
+});
+zfs_value_enum!(LogBias("logbias") { Latency => "latency", Throughput => "throughput" });
+
 /// Which LVM reporting command the helper should run on the web side's behalf.
 /// LVM reporting needs root, so these reads go through the helper (unlike ZFS).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -796,6 +841,34 @@ mod tests {
         let form = keyword.unwrap_or("stripe");
         assert_eq!(VdevLayout::parse(form), Some(layout));
         assert_eq!(VdevLayout::parse("nonsense"), None);
+    }
+
+    /// Every ZFS value enum: `parse(keyword())` round-trips each variant, and
+    /// inherit (`""`) or junk is not a value.
+    #[test]
+    fn zfs_value_enums_roundtrip() {
+        fn check<T: Copy + PartialEq + std::fmt::Debug>(
+            all: &[T],
+            keyword: fn(T) -> &'static str,
+            parse: fn(&str) -> Option<T>,
+        ) {
+            for &v in all {
+                assert_eq!(parse(keyword(v)), Some(v));
+            }
+            assert_eq!(parse(""), None);
+            assert_eq!(parse("bogus"), None);
+        }
+        check(Compression::ALL, Compression::keyword, Compression::parse);
+        check(ZvolSync::ALL, ZvolSync::keyword, ZvolSync::parse);
+        check(VolMode::ALL, VolMode::keyword, VolMode::parse);
+        check(
+            PrimaryCache::ALL,
+            PrimaryCache::keyword,
+            PrimaryCache::parse,
+        );
+        check(LogBias::ALL, LogBias::keyword, LogBias::parse);
+        assert_eq!(Compression::Zstd.keyword(), "zstd");
+        assert_eq!(VolMode::PROP, "volmode");
     }
 
     #[rstest]

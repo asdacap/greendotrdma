@@ -103,7 +103,7 @@ macro_rules! spec_op {
 
 spec_op! {
     ops::ZvolCreate = pb::ZvolCreate,
-        |o| zfs::zvol_create(&o.dataset, o.size, o.volblocksize, o.sparse);
+        |o| zfs::zvol_create(&o);
     ops::ZvolDelete = pb::ZvolDelete, |o| zfs::zvol_delete(&o.dataset);
     ops::ZvolResize = pb::ZvolResize, |o| zfs::zvol_resize(&o.dataset, o.new_size);
     ops::SnapshotCreate = pb::SnapshotCreate, |o| zfs::snapshot_create(&o.dataset, &o.snap);
@@ -111,6 +111,8 @@ spec_op! {
     ops::ZfsFsCreate = pb::ZfsFsCreate, |o| zfs::zfs_fs_create(&o.dataset, o.mountpoint.as_ref());
     ops::ZfsSetMountpoint = pb::ZfsSetMountpoint,
         |o| zfs::zfs_set_mountpoint(&o.dataset, &o.mountpoint);
+    ops::ZfsSetCompression = pb::ZfsSetCompression,
+        |o| zfs::zfs_set_compression(&o.dataset, o.compression);
     ops::ZfsMount = pb::ZfsMount, |o| zfs::zfs_mount(&o.dataset);
     ops::ZfsUnmount = pb::ZfsUnmount, |o| zfs::zfs_unmount(&o.dataset);
     ops::ZfsDestroy = pb::ZfsDestroy, |o| zfs::zfs_destroy(&o.dataset, o.recursive);

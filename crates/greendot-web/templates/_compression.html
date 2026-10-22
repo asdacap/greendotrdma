@@ -1,0 +1,27 @@
+{% if let Some(c) = view.compression %}
+<h2>Compression</h2>
+<p>{{ c.value }} <span class="muted">({{ c.source }})</span></p>
+<button type="button" class="dialog-trigger" data-dialog-open>Change compression</button>
+<dialog>
+<article>
+<header>Compression — {{ c.dataset }}</header>
+<form class="card" hx-post="/zfs/compression" hx-target="#{{ c.page }}-detail-content" hx-swap="outerHTML">
+  <input type="hidden" name="dataset" value="{{ c.dataset }}">
+  <input type="hidden" name="page" value="{{ c.page }}">
+  <p class="muted small">Applies to data written from now on; existing blocks keep their compression.</p>
+  <label>Compression
+    <select name="compression">
+      <option value="">Inherit (parent or ZFS default)</option>
+      <option value="off"{% if c.selected() == "off" %} selected{% endif %}>Off</option>
+      <option value="lz4"{% if c.selected() == "lz4" %} selected{% endif %}>lz4 — fast</option>
+      <option value="zstd"{% if c.selected() == "zstd" %} selected{% endif %}>zstd — smaller, more CPU</option>
+    </select>
+  </label>
+  <footer>
+    <button type="button" class="secondary" data-dialog-close>Cancel</button>
+    <button type="submit">Save</button>
+  </footer>
+</form>
+</article>
+</dialog>
+{% endif %}

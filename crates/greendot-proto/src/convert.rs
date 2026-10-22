@@ -14,11 +14,11 @@
 
 use crate::pb;
 use crate::{
-    AuthResult, BackstoreName, BlockDev, DatasetName, DevicePath, ErrKind, Iqn, LioBackstoreSpec,
-    LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LvmReport, NfsClient, NfsClientSpec,
-    NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired, NvmetNsSpec, NvmetPortSpec,
-    NvmetSubsysSpec, PackageName, PciAddress, SubStatus, TaskEvent, Transport, ValidationError,
-    VdevClass, VdevLayout, actual,
+    AuthResult, BackstoreName, BlockDev, Compression, DatasetName, DevicePath, ErrKind, Iqn,
+    LioBackstoreSpec, LioDesired, LioLunSpec, LioPortalSpec, LioTargetSpec, LogBias, LvmReport,
+    NfsClient, NfsClientSpec, NfsDesired, NfsExportPath, NfsExportSpec, Nqn, NvmetDesired,
+    NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, PackageName, PciAddress, PrimaryCache, SubStatus,
+    TaskEvent, Transport, ValidationError, VdevClass, VdevLayout, VolMode, ZvolSync, actual,
 };
 use std::collections::{BTreeSet, HashMap};
 use std::net::IpAddr;
@@ -237,6 +237,51 @@ impl TryFrom<pb::ErrKind> for ErrKind {
 
 /// Decode a prost `i32` enumeration field into its domain enum, rejecting
 /// values outside the schema.
+/// Wire ↔ domain for the ZFS value enums (`types::zfs_value_enum!`). Variant
+/// names match one-to-one; the `Unspecified` sentinel is rejected on ingress.
+/// The `i32` impls let optional fields go through [`dec_opt`] / `map(i32::from)`.
+macro_rules! zfs_value_pb {
+    ($($name:ident { $($variant:ident),+ })*) => {$(
+        impl From<$name> for pb::$name {
+            fn from(v: $name) -> Self {
+                match v { $($name::$variant => pb::$name::$variant),+ }
+            }
+        }
+        impl From<$name> for i32 {
+            fn from(v: $name) -> Self {
+                pb::$name::from(v) as i32
+            }
+        }
+        impl TryFrom<i32> for $name {
+            type Error = ConvertError;
+            fn try_from(i: i32) -> Result<Self, ConvertError> {
+                let p = pb::$name::try_from(i)
+                    .map_err(|_| ConvertError(format!("unknown {} {i}", $name::PROP)))?;
+                Ok(match p {
+                    $(pb::$name::$variant => $name::$variant,)+
+                    pb::$name::Unspecified => {
+                        return Err(ConvertError(format!("unspecified {}", $name::PROP)));
+                    }
+                })
+            }
+        }
+    )*};
+}
+zfs_value_pb! {
+    Compression { Off, Lz4, Zstd }
+    ZvolSync { Standard, Always, Disabled }
+    VolMode { Default, Full, Dev, None }
+    PrimaryCache { All, Metadata, None }
+    LogBias { Latency, Throughput }
+}
+
+/// An `optional` wire enum → an optional domain value (absent = inherit).
+pub(crate) fn dec_opt<T: TryFrom<i32, Error = ConvertError>>(
+    i: Option<i32>,
+) -> Result<Option<T>, ConvertError> {
+    i.map(T::try_from).transpose()
+}
+
 pub(crate) fn dec_transport(i: i32) -> Result<Transport, ConvertError> {
     let p =
         pb::Transport::try_from(i).map_err(|_| ConvertError(format!("unknown transport {i}")))?;

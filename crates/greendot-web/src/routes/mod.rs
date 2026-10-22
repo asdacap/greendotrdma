@@ -375,6 +375,7 @@ pub(crate) mod testutil {
             snapshot_destroy, SnapshotDestroyStream, pb::SnapshotDestroy;
             zfs_fs_create, ZfsFsCreateStream, pb::ZfsFsCreate;
             zfs_set_mountpoint, ZfsSetMountpointStream, pb::ZfsSetMountpoint;
+            zfs_set_compression, ZfsSetCompressionStream, pb::ZfsSetCompression;
             zfs_mount, ZfsMountStream, pb::ZfsMount;
             zfs_unmount, ZfsUnmountStream, pb::ZfsUnmount;
             zfs_destroy, ZfsDestroyStream, pb::ZfsDestroy;
