@@ -8,6 +8,7 @@ use greendot_proto::{
 };
 use std::io;
 use std::path::Path;
+use std::sync::Mutex;
 
 fn spec(args: Vec<String>) -> TaskSpec {
     TaskSpec::new("zfs", args)
@@ -288,18 +289,24 @@ pub fn pool_device_online(pool: &PoolName, device: &DevicePath) -> TaskSpec {
 /// `zpool remove` then `zpool wait -t remove` as one task, so the task only
 /// finishes when evacuation completes (instant for log/cache/spare devices).
 /// The wait is skipped when the remove itself failed — it would otherwise
-/// succeed vacuously and paint a green subtask after the failure.
+/// succeed vacuously and paint a green subtask after the failure. Only the
+/// remove holds `mutate_lock`: evacuation can take hours, and holding it
+/// through the wait would stall every other mutation until then.
 pub fn pool_device_remove_and_wait(
+    mutate_lock: &Mutex<()>,
     task: &mut Task,
     pool: &PoolName,
     target: &VdevTarget,
 ) -> io::Result<()> {
-    if cmd::run(
-        task,
-        format!("Remove {target} from {pool}"),
-        &pool_device_remove(pool, target),
-    )? != SubStatus::Success
-    {
+    let removed = {
+        let _guard = mutate_lock.lock().unwrap();
+        cmd::run(
+            task,
+            format!("Remove {target} from {pool}"),
+            &pool_device_remove(pool, target),
+        )?
+    };
+    if removed != SubStatus::Success {
         return Ok(());
     }
     cmd::run(

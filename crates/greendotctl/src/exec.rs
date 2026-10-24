@@ -52,8 +52,8 @@ pub struct Ctx {
 pub trait TaskOp: TryFrom<Self::Wire, Error = ConvertError> + Send + Sized + 'static {
     type Wire: Send + 'static;
     /// Whether the middleware holds the daemon-wide mutate lock for the whole
-    /// run. Only `Reconcile` opts out — it takes the lock itself, around its
-    /// entire pass including the config load.
+    /// run. Read-only reports opt out; `Reconcile` and `PoolDeviceRemove` opt
+    /// out and take the lock themselves, around exactly what mutates.
     const MUTATES: bool = true;
     /// `Err` only on a sink failure (the client is gone); operational failures
     /// are recorded on the task.
@@ -131,7 +131,6 @@ spec_op! {
         |o| partition::partition_create(&o.disk, o.start_sector, o.size_sectors, &o.label);
     ops::PartitionDelete = pb::PartitionDelete,
         |o| partition::partition_delete(&o.disk, o.number);
-    ops::LvmReport = pb::LvmReport, |o| lvm::report(o.what);
     ops::VgCreate = pb::VgCreate, |o| lvm::vg_create(&o.name, &o.devices);
     ops::VgExtend = pb::VgExtend, |o| lvm::vg_extend(&o.vg, &o.device);
     ops::VgReduce = pb::VgReduce, |o| lvm::vg_reduce(&o.vg, &o.device);
@@ -144,17 +143,38 @@ spec_op! {
     ops::LvShrink = pb::LvShrink, |o| lvm::lv_shrink(&o.vg, &o.name, o.new_size);
     ops::LvRename = pb::LvRename, |o| lvm::lv_rename(&o.vg, &o.name, &o.new_name);
     ops::LvDelete = pb::LvDelete, |o| lvm::lv_delete(&o.vg, &o.name);
+    ops::SetMtu = pb::SetMtu, |o| net::set_mtu(&o.netdev, o.mtu);
+}
+
+/// The tool-output reports: single-command like `spec_op!`, but read-only, so
+/// they skip the mutate lock and never queue behind a long-running mutation.
+macro_rules! report_op {
+    ($($op:ty = $wire:ty, |$s:ident| $spec:expr;)*) => {$(
+        impl TaskOp for $op {
+            type Wire = $wire;
+            const MUTATES: bool = false;
+            fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+                let $s = self;
+                run_spec(task, $spec)
+            }
+        }
+    )*};
+}
+
+report_op! {
+    ops::LvmReport = pb::LvmReport, |o| lvm::report(o.what);
     ops::SmartReport = pb::SmartReport, |o| smart::report(&o.device);
     ops::RdmaResources = pb::Empty, |_o| modules::rdma_resources();
-    ops::SetMtu = pb::SetMtu, |o| net::set_mtu(&o.netdev, o.mtu);
 }
 
 // ---- Compound / special task ops ----
 
 impl TaskOp for ops::PoolDeviceRemove {
     type Wire = pb::PoolDeviceRemove;
-    fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
-        zfs::pool_device_remove_and_wait(task, &self.pool, &self.target)
+    /// Takes the mutate lock itself, around the remove but not the wait.
+    const MUTATES: bool = false;
+    fn exec(self, ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        zfs::pool_device_remove_and_wait(&ctx.mutate_lock, task, &self.pool, &self.target)
     }
 }
 
