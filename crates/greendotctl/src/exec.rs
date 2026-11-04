@@ -24,6 +24,8 @@ use std::sync::Mutex;
 const LIO_ROOT: &str = "/sys/kernel/config/target";
 /// RDMA device class root.
 const IB_ROOT: &str = "/sys/class/infiniband";
+/// Block device class root (one entry per disk and partition).
+const SYS_CLASS_BLOCK: &str = "/sys/class/block";
 
 pub struct Ctx {
     pub auth: crate::pam::AuthConfig,
@@ -131,6 +133,8 @@ spec_op! {
         |o| partition::partition_create(&o.disk, o.start_sector, o.size_sectors, &o.label);
     ops::PartitionDelete = pb::PartitionDelete,
         |o| partition::partition_delete(&o.disk, o.number);
+    ops::DeviceWipe = pb::DeviceWipe,
+        |o| partition::wipe(&o.device, &partition::partitions_of(Path::new(SYS_CLASS_BLOCK), &o.device));
     ops::VgCreate = pb::VgCreate, |o| lvm::vg_create(&o.name, &o.devices);
     ops::VgExtend = pb::VgExtend, |o| lvm::vg_extend(&o.vg, &o.device);
     ops::VgReduce = pb::VgReduce, |o| lvm::vg_reduce(&o.vg, &o.device);
@@ -403,7 +407,7 @@ impl ReadOp for ops::ZvolInfo {
     fn read(self, _ctx: &Ctx) -> Self::Reply {
         let (exists, size_bytes) = zfs::zvol_info(
             Path::new("/dev/zvol"),
-            Path::new("/sys/class/block"),
+            Path::new(SYS_CLASS_BLOCK),
             &self.dataset,
         );
         pb::ZvolInfoReply { exists, size_bytes }

@@ -684,6 +684,29 @@ impl From<PartitionDelete> for pb::PartitionDelete {
     }
 }
 
+/// Erase every signature on a disk or partition (`wipefs --all`); on a whole
+/// disk the daemon wipes its partitions first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeviceWipe {
+    pub device: BlockDev,
+}
+
+impl TryFrom<pb::DeviceWipe> for DeviceWipe {
+    type Error = ConvertError;
+    fn try_from(p: pb::DeviceWipe) -> Result<Self, ConvertError> {
+        Ok(DeviceWipe {
+            device: BlockDev::new(p.device)?,
+        })
+    }
+}
+impl From<DeviceWipe> for pb::DeviceWipe {
+    fn from(p: DeviceWipe) -> Self {
+        pb::DeviceWipe {
+            device: p.device.as_str().to_owned(),
+        }
+    }
+}
+
 /// Shrink a partition *and its filesystem* in place (start sector preserved),
 /// as one operation: the daemon probes the filesystem itself, refuses mounted
 /// or unshrinkable filesystems, shrinks the filesystem first, then the
@@ -1724,6 +1747,7 @@ mod tests {
             number: 2,
             size_sectors: 2097152,
         } => pb::PartitionShrink);
+        roundtrip!(DeviceWipe { device: BlockDev::new("nvme0n1p1").unwrap() } => pb::DeviceWipe);
         roundtrip!(SmartReport { device: BlockDev::new("sda").unwrap() } => pb::SmartReport);
         roundtrip!(SmartHealth {
             devices: vec![BlockDev::new("sda").unwrap(), BlockDev::new("nvme0n1").unwrap()],

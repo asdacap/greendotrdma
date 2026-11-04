@@ -389,6 +389,7 @@ pub(crate) mod testutil {
             partition_create, PartitionCreateStream, pb::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete;
             partition_shrink, PartitionShrinkStream, pb::PartitionShrink;
+            device_wipe, DeviceWipeStream, pb::DeviceWipe;
             vg_create, VgCreateStream, pb::VgCreate;
             vg_extend, VgExtendStream, pb::VgExtend;
             vg_reduce, VgReduceStream, pb::VgReduce;

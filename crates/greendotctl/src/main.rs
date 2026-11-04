@@ -547,6 +547,7 @@ helper_impl! {
             partition_create, PartitionCreateStream, pb::PartitionCreate, ops::PartitionCreate;
             partition_delete, PartitionDeleteStream, pb::PartitionDelete, ops::PartitionDelete;
             partition_shrink, PartitionShrinkStream, pb::PartitionShrink, ops::PartitionShrink;
+            device_wipe, DeviceWipeStream, pb::DeviceWipe, ops::DeviceWipe;
             lvm_report, LvmReportStream, pb::LvmReport, ops::LvmReport;
             vg_create, VgCreateStream, pb::VgCreate, ops::VgCreate;
             vg_extend, VgExtendStream, pb::VgExtend, ops::VgExtend;

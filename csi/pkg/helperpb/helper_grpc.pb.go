@@ -50,6 +50,7 @@ const (
 	Helper_PartitionCreate_FullMethodName      = "/greendot.helper.v1.Helper/PartitionCreate"
 	Helper_PartitionDelete_FullMethodName      = "/greendot.helper.v1.Helper/PartitionDelete"
 	Helper_PartitionShrink_FullMethodName      = "/greendot.helper.v1.Helper/PartitionShrink"
+	Helper_DeviceWipe_FullMethodName           = "/greendot.helper.v1.Helper/DeviceWipe"
 	Helper_LvmReport_FullMethodName            = "/greendot.helper.v1.Helper/LvmReport"
 	Helper_VgCreate_FullMethodName             = "/greendot.helper.v1.Helper/VgCreate"
 	Helper_VgExtend_FullMethodName             = "/greendot.helper.v1.Helper/VgExtend"
@@ -141,10 +142,12 @@ type HelperClient interface {
 	PoolDeviceDetach(ctx context.Context, in *PoolDeviceDetach, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	PoolDeviceOnline(ctx context.Context, in *PoolDeviceOnline, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	// Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
+	// DeviceWipe (wipefs) erases signatures so a stale label stops blocking reuse.
 	PartitionTableCreate(ctx context.Context, in *PartitionTableCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	PartitionCreate(ctx context.Context, in *PartitionCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	PartitionDelete(ctx context.Context, in *PartitionDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	PartitionShrink(ctx context.Context, in *PartitionShrink, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
+	DeviceWipe(ctx context.Context, in *DeviceWipe, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	// LVM.
 	LvmReport(ctx context.Context, in *LvmReport, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	VgCreate(ctx context.Context, in *VgCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
@@ -629,9 +632,28 @@ func (c *helperClient) PartitionShrink(ctx context.Context, in *PartitionShrink,
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_PartitionShrinkClient = grpc.ServerStreamingClient[TaskEvent]
 
+func (c *helperClient) DeviceWipe(ctx context.Context, in *DeviceWipe, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[21], Helper_DeviceWipe_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[DeviceWipe, TaskEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_DeviceWipeClient = grpc.ServerStreamingClient[TaskEvent]
+
 func (c *helperClient) LvmReport(ctx context.Context, in *LvmReport, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[21], Helper_LvmReport_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[22], Helper_LvmReport_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -650,7 +672,7 @@ type Helper_LvmReportClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) VgCreate(ctx context.Context, in *VgCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[22], Helper_VgCreate_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[23], Helper_VgCreate_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +691,7 @@ type Helper_VgCreateClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) VgExtend(ctx context.Context, in *VgExtend, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[23], Helper_VgExtend_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[24], Helper_VgExtend_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +710,7 @@ type Helper_VgExtendClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) VgReduce(ctx context.Context, in *VgReduce, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[24], Helper_VgReduce_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[25], Helper_VgReduce_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -707,7 +729,7 @@ type Helper_VgReduceClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) VgRemove(ctx context.Context, in *VgRemove, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[25], Helper_VgRemove_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[26], Helper_VgRemove_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -726,7 +748,7 @@ type Helper_VgRemoveClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) LvCreate(ctx context.Context, in *LvCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[26], Helper_LvCreate_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[27], Helper_LvCreate_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -745,7 +767,7 @@ type Helper_LvCreateClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) ThinPoolCreate(ctx context.Context, in *ThinPoolCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[27], Helper_ThinPoolCreate_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[28], Helper_ThinPoolCreate_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -764,7 +786,7 @@ type Helper_ThinPoolCreateClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) ThinLvCreate(ctx context.Context, in *ThinLvCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[28], Helper_ThinLvCreate_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[29], Helper_ThinLvCreate_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -783,7 +805,7 @@ type Helper_ThinLvCreateClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) LvResize(ctx context.Context, in *LvResize, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[29], Helper_LvResize_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[30], Helper_LvResize_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -802,7 +824,7 @@ type Helper_LvResizeClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) LvShrink(ctx context.Context, in *LvShrink, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[30], Helper_LvShrink_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[31], Helper_LvShrink_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -821,7 +843,7 @@ type Helper_LvShrinkClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) LvRename(ctx context.Context, in *LvRename, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[31], Helper_LvRename_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[32], Helper_LvRename_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -840,7 +862,7 @@ type Helper_LvRenameClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) LvDelete(ctx context.Context, in *LvDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[32], Helper_LvDelete_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[33], Helper_LvDelete_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -859,7 +881,7 @@ type Helper_LvDeleteClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) Reconcile(ctx context.Context, in *Reconcile, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[33], Helper_Reconcile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[34], Helper_Reconcile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -878,7 +900,7 @@ type Helper_ReconcileClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiPublish(ctx context.Context, in *CsiPublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[34], Helper_CsiPublish_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[35], Helper_CsiPublish_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -897,7 +919,7 @@ type Helper_CsiPublishClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiUnpublish(ctx context.Context, in *CsiUnpublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[35], Helper_CsiUnpublish_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[36], Helper_CsiUnpublish_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -926,7 +948,7 @@ func (c *helperClient) CsiAttachment(ctx context.Context, in *CsiNvmeDelete, opt
 
 func (c *helperClient) CsiNvmeApply(ctx context.Context, in *CsiNvmeApply, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[36], Helper_CsiNvmeApply_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_CsiNvmeApply_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -945,7 +967,7 @@ type Helper_CsiNvmeApplyClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiNvmeDelete(ctx context.Context, in *CsiNvmeDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_CsiNvmeDelete_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_CsiNvmeDelete_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -964,7 +986,7 @@ type Helper_CsiNvmeDeleteClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiHostGrant(ctx context.Context, in *CsiHostGrant, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_CsiHostGrant_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_CsiHostGrant_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -983,7 +1005,7 @@ type Helper_CsiHostGrantClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiHostRevoke(ctx context.Context, in *CsiHostRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_CsiHostRevoke_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_CsiHostRevoke_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1002,7 +1024,7 @@ type Helper_CsiHostRevokeClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiVolumeExpand(ctx context.Context, in *CsiVolumeExpand, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_CsiVolumeExpand_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_CsiVolumeExpand_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1021,7 +1043,7 @@ type Helper_CsiVolumeExpandClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) ZfsClone(ctx context.Context, in *ZfsClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_ZfsClone_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[42], Helper_ZfsClone_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1040,7 +1062,7 @@ type Helper_ZfsCloneClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) PipeKeyAdd(ctx context.Context, in *PipeKeyAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[42], Helper_PipeKeyAdd_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[43], Helper_PipeKeyAdd_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1059,7 +1081,7 @@ type Helper_PipeKeyAddClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) PipeKeyRevoke(ctx context.Context, in *PipeKeyRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[43], Helper_PipeKeyRevoke_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[44], Helper_PipeKeyRevoke_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1078,7 +1100,7 @@ type Helper_PipeKeyRevokeClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) RxeAdd(ctx context.Context, in *RxeAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[44], Helper_RxeAdd_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[45], Helper_RxeAdd_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1097,7 +1119,7 @@ type Helper_RxeAddClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) EnableRoce(ctx context.Context, in *EnableRoce, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[45], Helper_EnableRoce_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[46], Helper_EnableRoce_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1116,7 +1138,7 @@ type Helper_EnableRoceClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) SetMtu(ctx context.Context, in *SetMtu, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[46], Helper_SetMtu_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[47], Helper_SetMtu_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1135,7 +1157,7 @@ type Helper_SetMtuClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) InstallPackages(ctx context.Context, in *InstallPackages, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[47], Helper_InstallPackages_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[48], Helper_InstallPackages_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1154,7 +1176,7 @@ type Helper_InstallPackagesClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) SmartReport(ctx context.Context, in *SmartReport, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[48], Helper_SmartReport_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[49], Helper_SmartReport_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1173,7 +1195,7 @@ type Helper_SmartReportClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) RdmaResources(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[49], Helper_RdmaResources_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[50], Helper_RdmaResources_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1375,10 +1397,12 @@ type HelperServer interface {
 	PoolDeviceDetach(*PoolDeviceDetach, grpc.ServerStreamingServer[TaskEvent]) error
 	PoolDeviceOnline(*PoolDeviceOnline, grpc.ServerStreamingServer[TaskEvent]) error
 	// Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
+	// DeviceWipe (wipefs) erases signatures so a stale label stops blocking reuse.
 	PartitionTableCreate(*PartitionTableCreate, grpc.ServerStreamingServer[TaskEvent]) error
 	PartitionCreate(*PartitionCreate, grpc.ServerStreamingServer[TaskEvent]) error
 	PartitionDelete(*PartitionDelete, grpc.ServerStreamingServer[TaskEvent]) error
 	PartitionShrink(*PartitionShrink, grpc.ServerStreamingServer[TaskEvent]) error
+	DeviceWipe(*DeviceWipe, grpc.ServerStreamingServer[TaskEvent]) error
 	// LVM.
 	LvmReport(*LvmReport, grpc.ServerStreamingServer[TaskEvent]) error
 	VgCreate(*VgCreate, grpc.ServerStreamingServer[TaskEvent]) error
@@ -1512,6 +1536,9 @@ func (UnimplementedHelperServer) PartitionDelete(*PartitionDelete, grpc.ServerSt
 }
 func (UnimplementedHelperServer) PartitionShrink(*PartitionShrink, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method PartitionShrink not implemented")
+}
+func (UnimplementedHelperServer) DeviceWipe(*DeviceWipe, grpc.ServerStreamingServer[TaskEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method DeviceWipe not implemented")
 }
 func (UnimplementedHelperServer) LvmReport(*LvmReport, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method LvmReport not implemented")
@@ -1932,6 +1959,17 @@ func _Helper_PartitionShrink_Handler(srv interface{}, stream grpc.ServerStream) 
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_PartitionShrinkServer = grpc.ServerStreamingServer[TaskEvent]
+
+func _Helper_DeviceWipe_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(DeviceWipe)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HelperServer).DeviceWipe(m, &grpc.GenericServerStream[DeviceWipe, TaskEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_DeviceWipeServer = grpc.ServerStreamingServer[TaskEvent]
 
 func _Helper_LvmReport_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(LvmReport)
@@ -2702,6 +2740,11 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "PartitionShrink",
 			Handler:       _Helper_PartitionShrink_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "DeviceWipe",
+			Handler:       _Helper_DeviceWipe_Handler,
 			ServerStreams: true,
 		},
 		{

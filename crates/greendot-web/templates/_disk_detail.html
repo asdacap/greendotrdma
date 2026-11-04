@@ -87,6 +87,16 @@
   </form>
 
   <h2>Reset disk</h2>
+  {% if disk.wipeable %}
+  <form class="inline" hx-post="/disks/wipe" hx-target="#disk-detail-content" hx-swap="outerHTML"
+        hx-confirm="Erase every signature on /dev/{{ view.name }} and its partitions (filesystems, ZFS/LVM labels, the partition table)? ALL data on the disk becomes unreachable."
+        data-confirm-path="/dev/{{ view.name }}">
+    <input type="hidden" name="disk" value="{{ view.name }}">
+    <button class="danger">Wipe signatures</button>
+  </form>
+  {% else %}
+  <p class="muted small">Wipe signatures unavailable: the disk or one of its partitions is in use (mounted, in an imported pool, an LVM PV, or exported).</p>
+  {% endif %}
   <form class="inline" hx-post="/disks/table" hx-target="#disk-detail-content" hx-swap="outerHTML"
         hx-confirm="Write a brand-new empty GPT to /dev/{{ view.name }}? ALL existing partitions and data are lost."
         data-confirm-path="/dev/{{ view.name }}">

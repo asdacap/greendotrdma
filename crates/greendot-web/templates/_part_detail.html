@@ -42,6 +42,19 @@
   <p class="muted small">Shrink unavailable: {{ part.shrink_reason }}</p>
   {% endif %}
 
+  <h2>Wipe signatures</h2>
+  {% if part.wipeable %}
+  <form class="inline" hx-post="/disks/part/wipe" hx-target="#part-detail-content" hx-swap="outerHTML"
+        hx-confirm="Erase every signature on {{ part.name }} (filesystem, ZFS/LVM label)? The partition stays; its data becomes unreachable."
+        data-confirm-path="{{ part.name }}">
+    <input type="hidden" name="disk" value="{{ view.disk }}">
+    <input type="hidden" name="number" value="{{ number }}">
+    <button class="danger">Wipe signatures</button>
+  </form>
+  {% else %}
+  <p class="muted small">Wipe unavailable: in use (mounted, in an imported pool, an LVM PV, or exported).</p>
+  {% endif %}
+
   <h2>Delete</h2>
   <form class="inline" hx-post="/disks/part/delete" hx-target="#part-detail-content" hx-swap="outerHTML"
         hx-confirm="Delete {{ part.name }}? Data on it becomes unreachable."

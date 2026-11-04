@@ -77,7 +77,7 @@ fn usage_for(
         // member sends the user hunting for a pool that does not exist.
         Some("zfs_member") => match ctx.members.get(device_path) {
             Some(pool) => format!("ZFS pool: {pool}"),
-            None => "stale ZFS label (no imported pool) — wipe to reuse".to_string(),
+            None => "stale ZFS label (no imported pool) — Wipe signatures to reuse".to_string(),
         },
         Some("LVM2_member") => "LVM physical volume".to_string(),
         Some(fs) if ctx.in_use.contains(device_path) => format!("exported ({fs})"),
@@ -86,6 +86,21 @@ fn usage_for(
         None if partitions > 0 => format!("partitioned ({partitions} partitions)"),
         None => "available".to_string(),
     }
+}
+
+/// Whether "Wipe signatures" may be offered for one device: nothing live
+/// claims it — unmounted, not an imported pool's vdev, not an LVM PV, not an
+/// export's backing. A stale ZFS label passes; it is what the action is for.
+fn wipeable(
+    device_path: &str,
+    mountpoint: Option<&str>,
+    fstype: Option<&str>,
+    ctx: &DeviceContext,
+) -> bool {
+    mountpoint.is_none_or(str::is_empty)
+        && fstype != Some("LVM2_member")
+        && !ctx.members.contains_key(device_path)
+        && !ctx.in_use.contains(device_path)
 }
 
 pub fn router() -> Router<Arc<AppState>> {
@@ -97,6 +112,8 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/disks/part/create", post(part_create))
         .route("/disks/part/delete", post(part_delete))
         .route("/disks/part/shrink", post(part_shrink))
+        .route("/disks/wipe", post(disk_wipe))
+        .route("/disks/part/wipe", post(part_wipe))
 }
 
 pub struct PartRow {
@@ -118,6 +135,8 @@ pub struct PartRow {
     pub pool: Option<String>,
     /// Whether a new ZFS pool may be built from this partition.
     pub poolable: bool,
+    /// Whether "Wipe signatures" is offered (see [`wipeable`]).
+    pub wipeable: bool,
 }
 
 pub struct DiskRow {
@@ -146,6 +165,9 @@ pub struct DiskRow {
     pub pool: Option<String>,
     /// Whether a new ZFS pool may be built from the whole disk.
     pub poolable: bool,
+    /// Whether "Wipe signatures" is offered: the disk and every partition on
+    /// it are [`wipeable`].
+    pub wipeable: bool,
 }
 
 pub struct DisksView {
@@ -253,6 +275,7 @@ fn disk_row(d: block::Disk, ctx: &DeviceContext) -> DiskRow {
         ctx,
     );
     let pool = pool_for(&device_path, d.fstype.as_deref(), ctx);
+    let partitions: Vec<PartRow> = d.partitions.into_iter().map(|p| part_row(p, ctx)).collect();
     DiskRow {
         size: human_bytes(d.size),
         model: d.model.unwrap_or_default(),
@@ -267,9 +290,15 @@ fn disk_row(d: block::Disk, ctx: &DeviceContext) -> DiskRow {
         dot_class: smart::dot_class(health),
         temp: smart::temp_display(health),
         poolable: ctx.poolable.contains(&device_path),
+        wipeable: wipeable(
+            &device_path,
+            d.mountpoint.as_deref(),
+            d.fstype.as_deref(),
+            ctx,
+        ) && partitions.iter().all(|p| p.wipeable),
         usage,
         pool,
-        partitions: d.partitions.into_iter().map(|p| part_row(p, ctx)).collect(),
+        partitions,
         device_path,
         name: d.name,
     }
@@ -286,6 +315,12 @@ fn part_row(p: block::Partition, ctx: &DeviceContext) -> PartRow {
     );
     let poolable = ctx.poolable.contains(&device_path);
     let pool = pool_for(&device_path, p.fstype.as_deref(), ctx);
+    let wipeable = wipeable(
+        &device_path,
+        p.mountpoint.as_deref(),
+        p.fstype.as_deref(),
+        ctx,
+    );
     let mountpoint = p.mountpoint.unwrap_or_default();
     let mounted = !mountpoint.is_empty();
     let fstype = fs_display(p.fstype.as_deref());
@@ -302,6 +337,7 @@ fn part_row(p: block::Partition, ctx: &DeviceContext) -> PartRow {
         shrinkable,
         shrink_reason,
         poolable,
+        wipeable,
         usage,
         pool,
         device_path,
@@ -773,9 +809,111 @@ async fn part_shrink(
     }
 }
 
+/// Re-derives a wipe target from live `lsblk` — the form is not trusted: the
+/// whole disk, or its partition `number`. An advisory gate like
+/// [`shrinkability`]: wipefs' `O_EXCL` refuses whatever is held open, but an
+/// export's backing device is not always held exclusively.
+async fn wipe_target(
+    state: &AppState,
+    disk: &str,
+    number: Option<u32>,
+) -> Result<BlockDev, String> {
+    let disks = block::disks()
+        .await
+        .map_err(|e| format!("could not read disks: {e:#}"))?;
+    let d = disks
+        .into_iter()
+        .find(|d| d.name == disk)
+        .ok_or_else(|| format!("disk {disk} no longer exists"))?;
+    let ctx = device_context(state, std::slice::from_ref(&d)).await;
+    let row = disk_row(d, &ctx);
+    let (name, wipeable) = match number {
+        None => (row.name, row.wipeable),
+        Some(n) => row
+            .partitions
+            .into_iter()
+            .find(|p| p.number == Some(n))
+            .map(|p| (p.name, p.wipeable))
+            .ok_or_else(|| format!("partition {n} on {disk} no longer exists"))?,
+    };
+    if !wipeable {
+        return Err(format!(
+            "cannot wipe /dev/{name}: in use (mounted, in an imported pool, an LVM PV, or exported)"
+        ));
+    }
+    BlockDev::new(&name).map_err(|_| format!("invalid device name {name:?}"))
+}
+
+/// Wipes every signature on a whole disk and its partitions (a stay-op: the
+/// disk detail re-renders, now blank).
+async fn disk_wipe(State(state): State<Arc<AppState>>, Form(form): Form<TableForm>) -> Response {
+    let scope = form.disk.trim().to_owned();
+    if BlockDev::new(&scope).is_err() {
+        return disk_detail_failed(&state, &scope, format!("invalid disk name {:?}", form.disk))
+            .await;
+    }
+    match wipe_target(&state, &scope, None).await {
+        Ok(device) => {
+            let title = format!("wipe signatures on /dev/{device}");
+            run(
+                &state,
+                state.helper.device_wipe(ops::DeviceWipe { device }),
+                "device-wipe",
+                &title,
+                &scope,
+            )
+            .await
+        }
+        Err(message) => disk_detail_failed(&state, &scope, message).await,
+    }
+}
+
+/// Wipes every signature on one partition, keeping the partition itself.
+async fn part_wipe(
+    State(state): State<Arc<AppState>>,
+    Form(form): Form<PartDeleteForm>,
+) -> Response {
+    let scope = form.disk.trim().to_owned();
+    if BlockDev::new(&scope).is_err() {
+        return part_detail_failed(
+            &state,
+            &scope,
+            form.number,
+            format!("invalid disk name {:?}", form.disk),
+        )
+        .await;
+    }
+    let device = match wipe_target(&state, &scope, Some(form.number)).await {
+        Ok(device) => device,
+        Err(message) => return part_detail_failed(&state, &scope, form.number, message).await,
+    };
+    let title = format!("wipe signatures on /dev/{device}");
+    match crate::task_runner::start(
+        &state,
+        state.helper.device_wipe(ops::DeviceWipe { device }),
+        "device-wipe",
+        &title,
+    ) {
+        Ok(id) => page(PartDetailPartial {
+            view: gather_part_detail(
+                &state,
+                &scope,
+                form.number,
+                Some(format!("started {title}")),
+                None,
+                Some(id),
+            )
+            .await,
+        }),
+        Err(e) => part_detail_failed(&state, &scope, form.number, format!("{e:#}")).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DeviceContext, Shrink, fs_display, shrinkability, transport_display, usage_for};
+    use super::{
+        DeviceContext, Shrink, fs_display, shrinkability, transport_display, usage_for, wipeable,
+    };
     use crate::routes::testutil::{form_post, login, send, test_app};
     use axum::body::Body;
     use axum::http::{Request as HttpRequest, StatusCode, header};
@@ -801,7 +939,7 @@ mod tests {
         );
         assert_eq!(
             usage_for("/dev/sdd", None, Some("zfs_member"), 0, &ctx),
-            "stale ZFS label (no imported pool) — wipe to reuse"
+            "stale ZFS label (no imported pool) — Wipe signatures to reuse"
         );
         assert_eq!(
             usage_for("/dev/sde", None, Some("LVM2_member"), 0, &ctx),
@@ -818,6 +956,29 @@ mod tests {
         );
         assert_eq!(usage_for("/dev/sdg", None, None, 0, &ctx), "available");
         assert_eq!(usage_for("/dev/sdh1", None, Some("ext4"), 0, &ctx), "ext4");
+    }
+
+    #[rstest]
+    #[case::stale_zfs_label("/dev/sdd", None, Some("zfs_member"), true)]
+    #[case::unmounted_fs("/dev/sdh1", None, Some("ext4"), true)]
+    #[case::blank("/dev/sdg", None, None, true)]
+    #[case::empty_mountpoint("/dev/sdg", Some(""), None, true)]
+    #[case::mounted("/dev/sda1", Some("/boot"), Some("vfat"), false)]
+    #[case::imported_pool_vdev("/dev/sdb", None, Some("zfs_member"), false)]
+    #[case::lvm_pv("/dev/sde", None, Some("LVM2_member"), false)]
+    #[case::export_backing("/dev/sdc", None, None, false)]
+    fn wipeable_only_when_nothing_live_claims_it(
+        #[case] device: &str,
+        #[case] mountpoint: Option<&str>,
+        #[case] fstype: Option<&str>,
+        #[case] expected: bool,
+    ) {
+        let ctx = DeviceContext {
+            members: HashMap::from([("/dev/sdb".to_string(), "tank".to_string())]),
+            in_use: HashSet::from(["/dev/sdc".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(wipeable(device, mountpoint, fstype, &ctx), expected);
     }
 
     #[rstest]
@@ -927,5 +1088,17 @@ mod tests {
         ));
         let (_, _, body) = send(&app, req).await;
         assert!(body.contains("invalid size"), "{body}");
+
+        // Wipe re-derives its target from live lsblk: a bad name or a device
+        // this host lacks is refused before touching the helper.
+        let req = auth(form_post("/disks/wipe", "disk=..%2Fsda"));
+        let (_, _, body) = send(&app, req).await;
+        assert!(body.contains("invalid disk name"), "{body}");
+        let req = auth(form_post("/disks/wipe", "disk=sdzz"));
+        let (_, _, body) = send(&app, req).await;
+        assert!(body.contains("disk sdzz no longer exists"), "{body}");
+        let req = auth(form_post("/disks/part/wipe", "disk=sdzz&number=1"));
+        let (_, _, body) = send(&app, req).await;
+        assert!(body.contains("disk sdzz no longer exists"), "{body}");
     }
 }

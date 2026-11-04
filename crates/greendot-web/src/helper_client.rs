@@ -185,6 +185,7 @@ impl HelperClient {
         partition_create(ops::PartitionCreate => pb::PartitionCreate);
         partition_delete(ops::PartitionDelete => pb::PartitionDelete);
         partition_shrink(ops::PartitionShrink => pb::PartitionShrink);
+        device_wipe(ops::DeviceWipe => pb::DeviceWipe);
         lvm_report(ops::LvmReport => pb::LvmReport);
         vg_create(ops::VgCreate => pb::VgCreate);
         vg_extend(ops::VgExtend => pb::VgExtend);

@@ -58,10 +58,12 @@ service Helper {
   rpc PoolDeviceOnline(.greendot.helper.v1.PoolDeviceOnline) returns (stream TaskEvent);
 
   // Partitioning (sfdisk); PartitionShrink is the compound fs+partition op.
+  // DeviceWipe (wipefs) erases signatures so a stale label stops blocking reuse.
   rpc PartitionTableCreate(.greendot.helper.v1.PartitionTableCreate) returns (stream TaskEvent);
   rpc PartitionCreate(.greendot.helper.v1.PartitionCreate) returns (stream TaskEvent);
   rpc PartitionDelete(.greendot.helper.v1.PartitionDelete) returns (stream TaskEvent);
   rpc PartitionShrink(.greendot.helper.v1.PartitionShrink) returns (stream TaskEvent);
+  rpc DeviceWipe(.greendot.helper.v1.DeviceWipe) returns (stream TaskEvent);
 
   // LVM.
   rpc LvmReport(.greendot.helper.v1.LvmReport) returns (stream TaskEvent);
@@ -347,6 +349,14 @@ message PartitionDelete { string disk = 1; uint32 number = 2; }
 // filesystem shrinks (ext* offline, btrfs via a helper-owned temp mount — it
 // has no offline shrink) is the helper's business and never crosses this wire.
 message PartitionShrink { string disk = 1; uint32 number = 2; uint64 size_sectors = 3; }
+
+// Erase every filesystem/RAID/partition-table signature on a disk or a
+// partition (a bare kernel name). On a whole disk the helper wipes each of its
+// partitions first, then the disk: a removed vdev's ZFS label lives inside its
+// partition, where wiping the disk alone never reaches it. Devices something
+// holds open exclusively (mounted, an imported pool's vdev, an active PV) are
+// refused by the kernel.
+message DeviceWipe { string device = 1; }
 
 message PoolCreate {
   string name = 1;
