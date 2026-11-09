@@ -22,8 +22,11 @@ image:
 	docker build -t greendot-csi:latest .
 
 # csi-sanity against the controller backed by a stateful in-process fake
-# helper. Node specs are skipped (they need real fabrics — the NixOS VM test
-# covers that path); the spec skips are documented in sanity/sanity_test.go.
+# helper, once per backend. Node specs are skipped (they need real fabrics —
+# the NixOS VM test covers that path); the spec skips are documented in
+# sanity/sanity_test.go.
 sanity:
-	go test -tags sanity ./sanity -args \
+	go test -tags sanity ./sanity -args -backend=zfs \
 	  -ginkgo.skip='Node Service|different source volume ID|should fail when the node does not exist'
+	go test -tags sanity ./sanity -args -backend=lvm-thin \
+	  -ginkgo.skip='Node Service|should fail when the node does not exist'

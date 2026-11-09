@@ -63,6 +63,8 @@ const (
 	Helper_LvShrink_FullMethodName             = "/greendot.helper.v1.Helper/LvShrink"
 	Helper_LvRename_FullMethodName             = "/greendot.helper.v1.Helper/LvRename"
 	Helper_LvDelete_FullMethodName             = "/greendot.helper.v1.Helper/LvDelete"
+	Helper_LvThinSnapshot_FullMethodName       = "/greendot.helper.v1.Helper/LvThinSnapshot"
+	Helper_LvThinClone_FullMethodName          = "/greendot.helper.v1.Helper/LvThinClone"
 	Helper_Reconcile_FullMethodName            = "/greendot.helper.v1.Helper/Reconcile"
 	Helper_CsiPublish_FullMethodName           = "/greendot.helper.v1.Helper/CsiPublish"
 	Helper_CsiUnpublish_FullMethodName         = "/greendot.helper.v1.Helper/CsiUnpublish"
@@ -94,6 +96,7 @@ const (
 	Helper_SmartHealth_FullMethodName          = "/greendot.helper.v1.Helper/SmartHealth"
 	Helper_ReconcileDryRun_FullMethodName      = "/greendot.helper.v1.Helper/ReconcileDryRun"
 	Helper_ZvolInfo_FullMethodName             = "/greendot.helper.v1.Helper/ZvolInfo"
+	Helper_LvInfo_FullMethodName               = "/greendot.helper.v1.Helper/LvInfo"
 	Helper_PipeAccessReport_FullMethodName     = "/greendot.helper.v1.Helper/PipeAccessReport"
 )
 
@@ -161,6 +164,8 @@ type HelperClient interface {
 	LvShrink(ctx context.Context, in *LvShrink, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	LvRename(ctx context.Context, in *LvRename, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	LvDelete(ctx context.Context, in *LvDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
+	LvThinSnapshot(ctx context.Context, in *LvThinSnapshot, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
+	LvThinClone(ctx context.Context, in *LvThinClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	// Desired-state reconcile pass (the only apply path for NVMe-oF/iSCSI/NFS).
 	Reconcile(ctx context.Context, in *Reconcile, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error)
 	// CSI exports: imperative, idempotent, and restricted by type to the CSI NQN
@@ -202,6 +207,7 @@ type HelperClient interface {
 	SmartHealth(ctx context.Context, in *SmartHealth, opts ...grpc.CallOption) (*SmartHealthReply, error)
 	ReconcileDryRun(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*ReconcileDryRunReply, error)
 	ZvolInfo(ctx context.Context, in *ZvolInfo, opts ...grpc.CallOption) (*ZvolInfoReply, error)
+	LvInfo(ctx context.Context, in *LvInfo, opts ...grpc.CallOption) (*LvInfoReply, error)
 	PipeAccessReport(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PipeAccessReportReply, error)
 }
 
@@ -879,9 +885,47 @@ func (c *helperClient) LvDelete(ctx context.Context, in *LvDelete, opts ...grpc.
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_LvDeleteClient = grpc.ServerStreamingClient[TaskEvent]
 
+func (c *helperClient) LvThinSnapshot(ctx context.Context, in *LvThinSnapshot, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[34], Helper_LvThinSnapshot_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[LvThinSnapshot, TaskEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_LvThinSnapshotClient = grpc.ServerStreamingClient[TaskEvent]
+
+func (c *helperClient) LvThinClone(ctx context.Context, in *LvThinClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[35], Helper_LvThinClone_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[LvThinClone, TaskEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_LvThinCloneClient = grpc.ServerStreamingClient[TaskEvent]
+
 func (c *helperClient) Reconcile(ctx context.Context, in *Reconcile, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[34], Helper_Reconcile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[36], Helper_Reconcile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -900,7 +944,7 @@ type Helper_ReconcileClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiPublish(ctx context.Context, in *CsiPublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[35], Helper_CsiPublish_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_CsiPublish_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -919,7 +963,7 @@ type Helper_CsiPublishClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiUnpublish(ctx context.Context, in *CsiUnpublish, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[36], Helper_CsiUnpublish_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_CsiUnpublish_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -948,7 +992,7 @@ func (c *helperClient) CsiAttachment(ctx context.Context, in *CsiNvmeDelete, opt
 
 func (c *helperClient) CsiNvmeApply(ctx context.Context, in *CsiNvmeApply, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[37], Helper_CsiNvmeApply_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_CsiNvmeApply_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -967,7 +1011,7 @@ type Helper_CsiNvmeApplyClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiNvmeDelete(ctx context.Context, in *CsiNvmeDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[38], Helper_CsiNvmeDelete_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_CsiNvmeDelete_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -986,7 +1030,7 @@ type Helper_CsiNvmeDeleteClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiHostGrant(ctx context.Context, in *CsiHostGrant, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[39], Helper_CsiHostGrant_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_CsiHostGrant_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1005,7 +1049,7 @@ type Helper_CsiHostGrantClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiHostRevoke(ctx context.Context, in *CsiHostRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[40], Helper_CsiHostRevoke_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[42], Helper_CsiHostRevoke_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1024,7 +1068,7 @@ type Helper_CsiHostRevokeClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) CsiVolumeExpand(ctx context.Context, in *CsiVolumeExpand, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[41], Helper_CsiVolumeExpand_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[43], Helper_CsiVolumeExpand_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1043,7 +1087,7 @@ type Helper_CsiVolumeExpandClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) ZfsClone(ctx context.Context, in *ZfsClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[42], Helper_ZfsClone_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[44], Helper_ZfsClone_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,7 +1106,7 @@ type Helper_ZfsCloneClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) PipeKeyAdd(ctx context.Context, in *PipeKeyAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[43], Helper_PipeKeyAdd_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[45], Helper_PipeKeyAdd_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1081,7 +1125,7 @@ type Helper_PipeKeyAddClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) PipeKeyRevoke(ctx context.Context, in *PipeKeyRevoke, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[44], Helper_PipeKeyRevoke_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[46], Helper_PipeKeyRevoke_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1100,7 +1144,7 @@ type Helper_PipeKeyRevokeClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) RxeAdd(ctx context.Context, in *RxeAdd, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[45], Helper_RxeAdd_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[47], Helper_RxeAdd_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1119,7 +1163,7 @@ type Helper_RxeAddClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) EnableRoce(ctx context.Context, in *EnableRoce, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[46], Helper_EnableRoce_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[48], Helper_EnableRoce_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1138,7 +1182,7 @@ type Helper_EnableRoceClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) SetMtu(ctx context.Context, in *SetMtu, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[47], Helper_SetMtu_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[49], Helper_SetMtu_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1157,7 +1201,7 @@ type Helper_SetMtuClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) InstallPackages(ctx context.Context, in *InstallPackages, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[48], Helper_InstallPackages_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[50], Helper_InstallPackages_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1176,7 +1220,7 @@ type Helper_InstallPackagesClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) SmartReport(ctx context.Context, in *SmartReport, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[49], Helper_SmartReport_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[51], Helper_SmartReport_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,7 +1239,7 @@ type Helper_SmartReportClient = grpc.ServerStreamingClient[TaskEvent]
 
 func (c *helperClient) RdmaResources(ctx context.Context, in *Empty, opts ...grpc.CallOption) (grpc.ServerStreamingClient[TaskEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[50], Helper_RdmaResources_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &Helper_ServiceDesc.Streams[52], Helper_RdmaResources_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -1342,6 +1386,16 @@ func (c *helperClient) ZvolInfo(ctx context.Context, in *ZvolInfo, opts ...grpc.
 	return out, nil
 }
 
+func (c *helperClient) LvInfo(ctx context.Context, in *LvInfo, opts ...grpc.CallOption) (*LvInfoReply, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(LvInfoReply)
+	err := c.cc.Invoke(ctx, Helper_LvInfo_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *helperClient) PipeAccessReport(ctx context.Context, in *Empty, opts ...grpc.CallOption) (*PipeAccessReportReply, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PipeAccessReportReply)
@@ -1416,6 +1470,8 @@ type HelperServer interface {
 	LvShrink(*LvShrink, grpc.ServerStreamingServer[TaskEvent]) error
 	LvRename(*LvRename, grpc.ServerStreamingServer[TaskEvent]) error
 	LvDelete(*LvDelete, grpc.ServerStreamingServer[TaskEvent]) error
+	LvThinSnapshot(*LvThinSnapshot, grpc.ServerStreamingServer[TaskEvent]) error
+	LvThinClone(*LvThinClone, grpc.ServerStreamingServer[TaskEvent]) error
 	// Desired-state reconcile pass (the only apply path for NVMe-oF/iSCSI/NFS).
 	Reconcile(*Reconcile, grpc.ServerStreamingServer[TaskEvent]) error
 	// CSI exports: imperative, idempotent, and restricted by type to the CSI NQN
@@ -1457,6 +1513,7 @@ type HelperServer interface {
 	SmartHealth(context.Context, *SmartHealth) (*SmartHealthReply, error)
 	ReconcileDryRun(context.Context, *Empty) (*ReconcileDryRunReply, error)
 	ZvolInfo(context.Context, *ZvolInfo) (*ZvolInfoReply, error)
+	LvInfo(context.Context, *LvInfo) (*LvInfoReply, error)
 	PipeAccessReport(context.Context, *Empty) (*PipeAccessReportReply, error)
 	mustEmbedUnimplementedHelperServer()
 }
@@ -1576,6 +1633,12 @@ func (UnimplementedHelperServer) LvRename(*LvRename, grpc.ServerStreamingServer[
 func (UnimplementedHelperServer) LvDelete(*LvDelete, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method LvDelete not implemented")
 }
+func (UnimplementedHelperServer) LvThinSnapshot(*LvThinSnapshot, grpc.ServerStreamingServer[TaskEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method LvThinSnapshot not implemented")
+}
+func (UnimplementedHelperServer) LvThinClone(*LvThinClone, grpc.ServerStreamingServer[TaskEvent]) error {
+	return status.Errorf(codes.Unimplemented, "method LvThinClone not implemented")
+}
 func (UnimplementedHelperServer) Reconcile(*Reconcile, grpc.ServerStreamingServer[TaskEvent]) error {
 	return status.Errorf(codes.Unimplemented, "method Reconcile not implemented")
 }
@@ -1668,6 +1731,9 @@ func (UnimplementedHelperServer) ReconcileDryRun(context.Context, *Empty) (*Reco
 }
 func (UnimplementedHelperServer) ZvolInfo(context.Context, *ZvolInfo) (*ZvolInfoReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ZvolInfo not implemented")
+}
+func (UnimplementedHelperServer) LvInfo(context.Context, *LvInfo) (*LvInfoReply, error) {
+	return nil, status.Errorf(codes.Unimplemented, "method LvInfo not implemented")
 }
 func (UnimplementedHelperServer) PipeAccessReport(context.Context, *Empty) (*PipeAccessReportReply, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method PipeAccessReport not implemented")
@@ -2102,6 +2168,28 @@ func _Helper_LvDelete_Handler(srv interface{}, stream grpc.ServerStream) error {
 
 // This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
 type Helper_LvDeleteServer = grpc.ServerStreamingServer[TaskEvent]
+
+func _Helper_LvThinSnapshot_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(LvThinSnapshot)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HelperServer).LvThinSnapshot(m, &grpc.GenericServerStream[LvThinSnapshot, TaskEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_LvThinSnapshotServer = grpc.ServerStreamingServer[TaskEvent]
+
+func _Helper_LvThinClone_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(LvThinClone)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(HelperServer).LvThinClone(m, &grpc.GenericServerStream[LvThinClone, TaskEvent]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type Helper_LvThinCloneServer = grpc.ServerStreamingServer[TaskEvent]
 
 func _Helper_Reconcile_Handler(srv interface{}, stream grpc.ServerStream) error {
 	m := new(Reconcile)
@@ -2542,6 +2630,24 @@ func _Helper_ZvolInfo_Handler(srv interface{}, ctx context.Context, dec func(int
 	return interceptor(ctx, in, info, handler)
 }
 
+func _Helper_LvInfo_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(LvInfo)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(HelperServer).LvInfo(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: Helper_LvInfo_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(HelperServer).LvInfo(ctx, req.(*LvInfo))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _Helper_PipeAccessReport_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(Empty)
 	if err := dec(in); err != nil {
@@ -2630,6 +2736,10 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ZvolInfo",
 			Handler:    _Helper_ZvolInfo_Handler,
+		},
+		{
+			MethodName: "LvInfo",
+			Handler:    _Helper_LvInfo_Handler,
 		},
 		{
 			MethodName: "PipeAccessReport",
@@ -2805,6 +2915,16 @@ var Helper_ServiceDesc = grpc.ServiceDesc{
 		{
 			StreamName:    "LvDelete",
 			Handler:       _Helper_LvDelete_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "LvThinSnapshot",
+			Handler:       _Helper_LvThinSnapshot_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "LvThinClone",
+			Handler:       _Helper_LvThinClone_Handler,
 			ServerStreams: true,
 		},
 		{

@@ -47,6 +47,12 @@ const (
 	// both ride the volume id (the only per-volume state Kubernetes replays).
 	// DeleteVolume tears down the export but never destroys such a zvol.
 	importedPrefix = "imp1-"
+
+	// lvmPrefix and lvmImportedPrefix mark thin-LVM volume ids:
+	// lvm1-<vg>:<lv> for an LV the driver created, lvmi1-<vg>:<lv> for an
+	// adopted one (export only, never removed). See lvm.go.
+	lvmPrefix         = "lvm1-"
+	lvmImportedPrefix = "lvmi1-"
 )
 
 // Serve runs the given CSI services on `endpoint` (unix:///… or tcp://…)

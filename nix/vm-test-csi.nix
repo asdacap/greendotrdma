@@ -4,7 +4,8 @@
 #   client VM ── nvme connect -t rdma :4421 ─────────────────────────────────▶ nvmet
 #
 # Exercise lazy exports, generation fencing, raw-block retries, detached/online
-# growth and target-daemon restart recovery using only disposable VM resources.
+# growth and target-daemon restart recovery using only disposable VM resources,
+# then the thin-LVM backend: create, online growth, snapshot and restore.
 { pkgs, greendot, greendot-csi }:
 
 let
@@ -41,6 +42,10 @@ pkgs.testers.runNixOSTest {
       "d /var/lib/greendotrdma 0750 greendot greendot -"
       "d /var/lib/greendotrdma/csi 0750 greendot-csi greendot-csi -"
     ];
+    # The lvm-thin backend: thin_check & co. wired into lvm.conf, and the LVM
+    # CLIs on the daemon's PATH (Ubuntu has them in /usr/sbin).
+    services.lvm.boot.thin.enable = true;
+    systemd.services.greendotctl.path = [ config.services.lvm.package ];
   };
 
   nodes.client = { config, lib, ... }: {
@@ -239,6 +244,68 @@ pkgs.testers.runNixOSTest {
     client.succeed(f"{fsnode} -action node-unstage")
     client.succeed(f"{e2e} -action unpublish -volume pvc-fs -hostnqn {hostnqn}")
     client.succeed(f"{e2e} -action delete -volume pvc-fs")
+
+    # --- thin LVM: the same lifecycle on backend lvm-thin, plus snapshot → restore ---
+    target.succeed("truncate -s 1G /var/tmp/lvm.img")
+    lvmdev = target.succeed("losetup -f --show /var/tmp/lvm.img").strip()
+    target.succeed(f"vgcreate vg0 {lvmdev}")
+    target.succeed("lvcreate -y --type thin-pool -L 512M -n pool0 vg0")
+    lvm = f"{e2e} -backend lvm-thin -volume-group vg0 -thin-pool pool0"
+
+    def lv_node(volume, ctx, staging):
+        return (
+            f"csi-e2e -volume lvm1-vg0:{volume} -nqn {ctx['nqn']} -device-uuid {ctx['deviceUUID']}"
+            f" -traddr {target_ip} -trsvcid 4421 -transport rdma -hostnqn {hostnqn} -hostid {hostid}"
+            f" -soft-roce-netdev {netdev} -filesystem -staging-path {staging}"
+        )
+
+    out = client.succeed(f"{lvm} -action create -volume pvc-lv -size 67108864")
+    lvctx = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    assert lvctx["volumeId"] == "lvm1-vg0:pvc-lv", lvctx
+    client.succeed(f"{lvm} -action create -volume pvc-lv -size 67108864")  # idempotent retry
+    assert target.succeed("lvs --noheadings -o pool_lv vg0/pvc-lv").strip() == "pool0"
+    client.succeed(f"{lvm} -action publish -volume pvc-lv -hostnqn {hostnqn}")
+    lvsubsys = f"/sys/kernel/config/nvmet/subsystems/{lvctx['nqn']}"
+    assert target.succeed(f"cat {lvsubsys}/namespaces/1/device_path").strip() == "/dev/vg0/pvc-lv"
+    lvnode = lv_node("pvc-lv", lvctx, "/tmp/csi-lv-stage")
+    client.succeed(f"{lvnode} -action node-stage")
+    client.succeed("echo from-snapshot > /tmp/csi-lv-stage/proof && sync")
+
+    # Online growth through CsiVolumeExpand's thin-LV branch.
+    before = int(client.succeed("stat -f -c %b /tmp/csi-lv-stage").strip())
+    client.succeed(f"{lvm} -action expand -volume pvc-lv -size 134217728")
+    assert target.succeed("lvs --noheadings --units b --nosuffix -o lv_size vg0/pvc-lv").strip() == "134217728"
+    client.succeed(f"{lvnode} -action node-expand -size 134217728")
+    after = int(client.succeed("stat -f -c %b /tmp/csi-lv-stage").strip())
+    assert after > before, "thin-LV filesystem did not grow"
+    client.succeed("sync")
+
+    # Snapshot: an inactive thin LV with the volume as its origin (retry-safe).
+    client.succeed(f"{lvm} -action snapshot -volume pvc-lv -snapshot snap-lv")
+    client.succeed(f"{lvm} -action snapshot -volume pvc-lv -snapshot snap-lv")
+    assert target.succeed("lvs --noheadings -o origin vg0/snap-lv").strip() == "pvc-lv"
+    target.fail("test -e /dev/vg0/snap-lv")
+
+    # Restore into a bigger volume: active, grown, and holding the snapshot's data.
+    out = client.succeed(f"{lvm} -action restore -volume pvc-lv2 -source pvc-lv -snapshot snap-lv -size 167772160")
+    lv2ctx = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    assert target.succeed("lvs --noheadings --units b --nosuffix -o lv_size vg0/pvc-lv2").strip() == "167772160"
+    target.succeed("test -e /dev/vg0/pvc-lv2")
+    client.succeed(f"{lvm} -action publish -volume pvc-lv2 -hostnqn {hostnqn}")
+    lv2node = lv_node("pvc-lv2", lv2ctx, "/tmp/csi-lv2-stage")
+    client.succeed(f"{lv2node} -action node-stage")
+    assert client.succeed("cat /tmp/csi-lv2-stage/proof").strip() == "from-snapshot"
+
+    # Teardown: unstage, fence, then remove snapshot and volumes (all retry-safe).
+    for volume, node in [("pvc-lv", lvnode), ("pvc-lv2", lv2node)]:
+        client.succeed(f"{node} -action node-unstage")
+        client.succeed(f"{lvm} -action unpublish -volume {volume} -hostnqn {hostnqn}")
+    client.succeed(f"{lvm} -action delete-snapshot -volume pvc-lv -snapshot snap-lv")
+    client.succeed(f"{lvm} -action delete-snapshot -volume pvc-lv -snapshot snap-lv")
+    for volume in ["pvc-lv", "pvc-lv2"]:
+        client.succeed(f"{lvm} -action delete -volume {volume}")
+        client.succeed(f"{lvm} -action delete -volume {volume}")
+    assert target.succeed("lvs --noheadings -o lv_name vg0").split() == ["pool0"]
 
     # --- revoke: the controller loses the box at once ---
     # The fingerprint carries `+` and `/`, so it must be form-encoded, not

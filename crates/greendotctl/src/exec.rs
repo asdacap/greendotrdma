@@ -147,6 +147,8 @@ spec_op! {
     ops::LvShrink = pb::LvShrink, |o| lvm::lv_shrink(&o.vg, &o.name, o.new_size);
     ops::LvRename = pb::LvRename, |o| lvm::lv_rename(&o.vg, &o.name, &o.new_name);
     ops::LvDelete = pb::LvDelete, |o| lvm::lv_delete(&o.vg, &o.name);
+    ops::LvThinSnapshot = pb::LvThinSnapshot,
+        |o| lvm::thin_snapshot(&o.vg, &o.origin, &o.name);
     ops::SetMtu = pb::SetMtu, |o| net::set_mtu(&o.netdev, o.mtu);
 }
 
@@ -227,6 +229,13 @@ impl TaskOp for ops::ZfsClone {
             self.new_size,
             self.restore_request_id.as_deref(),
         )
+    }
+}
+
+impl TaskOp for ops::LvThinClone {
+    type Wire = pb::LvThinClone;
+    fn exec(self, _ctx: &Ctx, task: &mut Task) -> io::Result<()> {
+        lvm::thin_clone_and_resize(task, &self.vg, &self.snap, &self.target, self.new_size)
     }
 }
 
@@ -411,6 +420,14 @@ impl ReadOp for ops::ZvolInfo {
             &self.dataset,
         );
         pb::ZvolInfoReply { exists, size_bytes }
+    }
+}
+
+impl ReadOp for ops::LvInfo {
+    type Wire = pb::LvInfo;
+    type Reply = pb::LvInfoReply;
+    fn read(self, _ctx: &Ctx) -> Self::Reply {
+        lvm::info(&self.vg, &self.name)
     }
 }
 

@@ -1,7 +1,8 @@
 # greendot-csi
 
 The Kubernetes CSI driver for a GreenDotRDMA box: dynamic NVMe-oF/RDMA
-PersistentVolumes backed by ZFS zvols, with **per-node host-NQN fencing**.
+PersistentVolumes backed by ZFS zvols or thin LVs, with **per-node host-NQN
+fencing**.
 
 ## How it connects
 
@@ -43,7 +44,9 @@ error, and the connector path is traversal-guarded. The controller is original
 ## Deploy
 
 1. On the box: `zfs create tank/csi` (each StorageClass names its pool via the
-   `datasetParent` parameter — create one dataset per class), then paste the
+   `datasetParent` parameter — create one dataset per class) or, for thin LVM,
+   `vgcreate vg0 /dev/…` and `lvcreate --type thin-pool -L 500G -n pool0 vg0`
+   (the class names them via `volumeGroup`/`thinPool`), then paste the
    controller's **public** key into greendot-web's **SSH access** page
    (`/ssh-access`). The daemon writes the `command="…greendotctl pipe",restrict`
    options itself — the web never supplies them — and the page renders the
@@ -62,14 +65,29 @@ error, and the connector path is traversal-guarded. The controller is original
    node plugin, which stands up a Soft-RoCE (`rxe`) link on that netdev when no
    RDMA device is present.
 
+## StorageClass parameters
+
+`deploy/storageclass-example.yaml` has a class for each case.
+
+| Parameter | Backend | Meaning |
+|---|---|---|
+| `backend` | — | `zfs` (default) or `lvm-thin` |
+| `datasetParent` | zfs | dataset volumes are created under (required) |
+| `zvolName` | zfs | leaf name template (`${pvc.namespace}`, `${pvc.name}`, `${pv.name}`) |
+| `volblocksize`, `sparse` | zfs | zvol create options |
+| `importDataset` | zfs | adopt an existing zvol (export only, never destroyed) |
+| `volumeGroup`, `thinPool` | lvm-thin | where thin LVs are created (required) |
+| `lvName` | lvm-thin | LV name template, same tokens as `zvolName` |
+| `importLv` | lvm-thin | adopt an existing LV as `<vg>/<lv>` (export only, never removed) |
+
 ## Testing
 
 - `make test` — unit tests (controller decision tables, task-stream mapping).
 - `make sanity` — csi-sanity against the controller with a stateful fake
-  daemon (skips documented in sanity/sanity_test.go).
+  daemon, once per backend (skips documented in sanity/sanity_test.go).
 - `nix build ..#checks.x86_64-linux.vmTestCsi` — the end-to-end fence proof on
   real kernels + Soft-RoCE (create → publish → connect → fence → severed →
-  delete).
+  delete), then the thin-LVM lifecycle (create → grow → snapshot → restore).
 
 ## Audit trail
 

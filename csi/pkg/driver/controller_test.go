@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -38,6 +39,7 @@ type fakeHelper struct {
 	reqs  map[string]any
 	fail  map[string]string // op -> Finished error
 	zvol  *helperpb.ZvolInfoReply
+	lvs   map[string]*helperpb.LvInfoReply // "vg/lv" -> state; absent = missing
 }
 
 func newFake() *fakeHelper {
@@ -45,6 +47,7 @@ func newFake() *fakeHelper {
 		reqs: map[string]any{},
 		fail: map[string]string{},
 		zvol: &helperpb.ZvolInfoReply{Exists: false},
+		lvs:  map[string]*helperpb.LvInfoReply{},
 	}
 }
 
@@ -110,7 +113,40 @@ func (f *fakeHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVolume
 	if f.fail["CsiVolumeExpand"] == "" && f.zvol.Exists && f.zvol.SizeBytes < in.NewSize {
 		f.zvol.SizeBytes = in.NewSize
 	}
+	if rest, ok := strings.CutPrefix(in.Nqn, CSINQNPrefix+lvmPrefix); ok && f.fail["CsiVolumeExpand"] == "" {
+		if lv := f.lvs[strings.Replace(rest, ":", "/", 1)]; lv != nil && lv.SizeBytes < in.NewSize {
+			lv.SizeBytes = in.NewSize
+		}
+	}
 	return f.task("CsiVolumeExpand", in)
+}
+
+func (f *fakeHelper) LvInfo(ctx context.Context, in *helperpb.LvInfo, opts ...grpc.CallOption) (*helperpb.LvInfoReply, error) {
+	f.calls = append(f.calls, "LvInfo")
+	if lv := f.lvs[in.Vg+"/"+in.Name]; lv != nil {
+		return lv, nil
+	}
+	return &helperpb.LvInfoReply{}, nil
+}
+
+func (f *fakeHelper) ThinLvCreate(ctx context.Context, in *helperpb.ThinLvCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("ThinLvCreate", in)
+}
+
+func (f *fakeHelper) LvDelete(ctx context.Context, in *helperpb.LvDelete, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("LvDelete", in)
+}
+
+func (f *fakeHelper) LvResize(ctx context.Context, in *helperpb.LvResize, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("LvResize", in)
+}
+
+func (f *fakeHelper) LvThinSnapshot(ctx context.Context, in *helperpb.LvThinSnapshot, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("LvThinSnapshot", in)
+}
+
+func (f *fakeHelper) LvThinClone(ctx context.Context, in *helperpb.LvThinClone, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	return f.task("LvThinClone", in)
 }
 
 func (f *fakeHelper) SnapshotCreate(ctx context.Context, in *helperpb.SnapshotCreate, opts ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
@@ -344,8 +380,8 @@ func orDefault(v, def string) string {
 }
 
 // resolveVolumeID inverts CreateVolume's ids: managed ids are dataset paths
-// with ':' separators, imp1- ids decode to an adopted path, and corrupt/empty/
-// parentless ids error.
+// with ':' separators, imp1- ids decode to an adopted path, lvm1-/lvmi1- ids
+// name a vg and lv, and corrupt/empty/parentless ids error.
 func TestResolveVolumeID(t *testing.T) {
 	cs := testController(t, newFake())
 	imp := encodeImportID("tank/legacy/db")
@@ -353,11 +389,19 @@ func TestResolveVolumeID(t *testing.T) {
 		id           string
 		wantErr      bool
 		wantDataset  string
+		wantVg       string
+		wantLv       string
 		wantToken    string
 		wantImported bool
 	}{
 		{id: "tank:csi:pvc-abc", wantDataset: "tank/csi/pvc-abc", wantToken: "tank:csi:pvc-abc"},
 		{id: imp, wantDataset: "tank/legacy/db", wantToken: imp, wantImported: true},
+		{id: "lvm1-vg0:pvc-abc", wantVg: "vg0", wantLv: "pvc-abc", wantToken: "lvm1-vg0:pvc-abc"},
+		{id: "lvmi1-vg1:legacy", wantVg: "vg1", wantLv: "legacy", wantToken: "lvmi1-vg1:legacy", wantImported: true},
+		{id: "lvm1-vg0", wantErr: true},      // no lv
+		{id: "lvm1-vg0:a:b", wantErr: true},  // lv may not contain ':'
+		{id: "lvmi1-:legacy", wantErr: true}, // empty vg
+		{id: "lvm1-vg0:../x", wantErr: true}, // traversal
 		{id: "", wantErr: true},
 		{id: "../etc", wantErr: true},
 		{id: "pvc-abc", wantErr: true},   // no pool component
@@ -376,7 +420,8 @@ func TestResolveVolumeID(t *testing.T) {
 		if err != nil {
 			t.Fatalf("resolveVolumeID(%q): %v", tc.id, err)
 		}
-		if ref.dataset != tc.wantDataset || ref.nqnToken != tc.wantToken || ref.imported != tc.wantImported {
+		if ref.dataset != tc.wantDataset || ref.vg != tc.wantVg || ref.lv != tc.wantLv ||
+			ref.nqnToken != tc.wantToken || ref.imported != tc.wantImported {
 			t.Fatalf("resolveVolumeID(%q) = %+v", tc.id, ref)
 		}
 	}
@@ -602,16 +647,20 @@ func TestNameValidationGatesEveryRPC(t *testing.T) {
 		t.Fatalf("RWX must be refused, got %v", err)
 	}
 
-	// The imp1- namespace is reserved for imported ids; a managed create may
-	// not claim it — via the CSI name, zvolName, or a datasetParent whose
-	// pool component would make the whole id decode as imported.
+	// The imp1-/lvm1-/lvmi1- namespaces are reserved for the other id kinds; a
+	// managed ZFS create may not claim them — via the CSI name, zvolName, or a
+	// datasetParent whose pool component would make the whole id decode as
+	// another kind.
 	for _, req := range []*csi.CreateVolumeRequest{
 		{Name: "imp1-abc", Parameters: parent, VolumeCapabilities: rwoCaps()},
 		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "tank/csi", "zvolName": "imp1-abc"}, VolumeCapabilities: rwoCaps()},
 		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "imp1-pool/csi"}, VolumeCapabilities: rwoCaps()},
+		{Name: "lvm1-abc", Parameters: parent, VolumeCapabilities: rwoCaps()},
+		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "lvm1-pool/csi"}, VolumeCapabilities: rwoCaps()},
+		{Name: "pvc-1", Parameters: map[string]string{"datasetParent": "lvmi1-pool/csi"}, VolumeCapabilities: rwoCaps()},
 	} {
 		if _, err := cs.CreateVolume(context.Background(), req); status.Code(err) != codes.InvalidArgument {
-			t.Fatalf("reserved imp1- name must be refused, got %v", err)
+			t.Fatalf("reserved id prefix must be refused, got %v", err)
 		}
 	}
 }
@@ -649,5 +698,357 @@ func TestCreateIdentifierBoundariesAndRestoreRetry(t *testing.T) {
 		if !ok || clone.GetRestoreRequestId() != "pvc-1" {
 			t.Fatalf("retry must verify provenance: %v", f.calls)
 		}
+	}
+}
+
+func snapSource(id string) *csi.VolumeContentSource {
+	return &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{
+		Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: id},
+	}}
+}
+
+// lvmCreate is CreateVolume for pvc-1 (10 GiB) on an lvm-thin class in
+// vg0/pool0, with `extra` merged over the class params.
+func lvmCreate(extra map[string]string, source *csi.VolumeContentSource) func(*ControllerServer) (any, error) {
+	return func(cs *ControllerServer) (any, error) {
+		params := map[string]string{"backend": "lvm-thin", "volumeGroup": "vg0", "thinPool": "pool0"}
+		maps.Copy(params, extra)
+		return cs.CreateVolume(context.Background(), &csi.CreateVolumeRequest{
+			Name: "pvc-1", Parameters: params, VolumeCapabilities: rwoCaps(),
+			CapacityRange:       &csi.CapacityRange{RequiredBytes: 10 << 30},
+			VolumeContentSource: source,
+		})
+	}
+}
+
+// The thin-LVM decision table, one row per controller decision: the rpc
+// under test, the LVs that already exist, an injected task failure, and the
+// expected status and exact helper call sequence; `check` inspects requests
+// or the response where the call sequence alone says too little.
+func TestThinLvDecisions(t *testing.T) {
+	const gib = uint64(1 << 30)
+	thin := func(size uint64, origin string, active bool) *helperpb.LvInfoReply {
+		return &helperpb.LvInfoReply{Exists: true, SizeBytes: size, Pool: "pool0", Origin: origin, Active: active}
+	}
+	volume := func(t *testing.T, resp any) *csi.Volume {
+		t.Helper()
+		return resp.(*csi.CreateVolumeResponse).Volume
+	}
+	ctx := context.Background()
+	cases := []struct {
+		name      string
+		lvs       map[string]*helperpb.LvInfoReply
+		failOp    string
+		failMsg   string
+		call      func(*ControllerServer) (any, error)
+		wantCode  codes.Code
+		wantCalls []string
+		check     func(t *testing.T, f *fakeHelper, resp any)
+	}{
+		{
+			name:      "create: fresh thin LV in the class's pool",
+			call:      lvmCreate(nil, nil),
+			wantCalls: []string{"LvInfo", "ThinLvCreate"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				vol := volume(t, resp)
+				nqn := CSINQNPrefix + "lvm1-vg0:pvc-1"
+				if vol.VolumeId != "lvm1-vg0:pvc-1" || vol.CapacityBytes != 10<<30 || vol.VolumeContext["nqn"] != nqn {
+					t.Fatalf("bad volume: %+v", vol)
+				}
+				create := f.reqs["ThinLvCreate"].(*helperpb.ThinLvCreate)
+				if create.Vg != "vg0" || create.Pool != "pool0" || create.Name != "pvc-1" || create.VirtualSize != 10*gib {
+					t.Fatalf("bad create: %+v", create)
+				}
+			},
+		},
+		{
+			name:      "create: retry adopts the extent-rounded LV at its real size",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(10*gib+4<<20, "", true)},
+			call:      lvmCreate(nil, nil),
+			wantCalls: []string{"LvInfo"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if got := volume(t, resp).CapacityBytes; got != 10<<30+4<<20 {
+					t.Fatalf("capacity = %d", got)
+				}
+			},
+		},
+		{
+			name:      "create: an existing smaller LV is AlreadyExists",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(5*gib, "", true)},
+			call:      lvmCreate(nil, nil),
+			wantCode:  codes.AlreadyExists,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:      "create: an existing LV in another pool is AlreadyExists",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/pvc-1": {Exists: true, SizeBytes: 10 * gib, Pool: "pool1"}},
+			call:      lvmCreate(nil, nil),
+			wantCode:  codes.AlreadyExists,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:     "create: missing thinPool is InvalidArgument",
+			call:     lvmCreate(map[string]string{"thinPool": ""}, nil),
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name:     "create: an unknown backend is InvalidArgument",
+			call:     lvmCreate(map[string]string{"backend": "btrfs"}, nil),
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "create: lvName ${pvc.*} tokens expand",
+			call: lvmCreate(map[string]string{
+				"lvName":                           "${pvc.namespace}-${pvc.name}",
+				"csi.storage.k8s.io/pvc/namespace": "db",
+				"csi.storage.k8s.io/pvc/name":      "data",
+			}, nil),
+			wantCalls: []string{"LvInfo", "ThinLvCreate"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if id := volume(t, resp).VolumeId; id != "lvm1-vg0:db-data" {
+					t.Fatalf("volume id = %q", id)
+				}
+			},
+		},
+		{
+			name:      "import: adopts an existing LV at its size, never creates",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg1/legacy": {Exists: true, SizeBytes: 20 * gib, Active: true}},
+			call:      lvmCreate(map[string]string{"importLv": "vg1/legacy"}, nil),
+			wantCalls: []string{"LvInfo"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if vol := volume(t, resp); vol.VolumeId != "lvmi1-vg1:legacy" || vol.CapacityBytes != 20<<30 {
+					t.Fatalf("bad volume: %+v", vol)
+				}
+			},
+		},
+		{
+			name:      "import: a missing LV is NotFound",
+			call:      lvmCreate(map[string]string{"importLv": "vg1/legacy"}, nil),
+			wantCode:  codes.NotFound,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:      "import: an LV smaller than the request is OutOfRange",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg1/legacy": {Exists: true, SizeBytes: 5 * gib}},
+			call:      lvmCreate(map[string]string{"importLv": "vg1/legacy"}, nil),
+			wantCode:  codes.OutOfRange,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:      "restore: clones the snapshot and grows it in one task",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(5*gib, "pvc-src", false)},
+			call:      lvmCreate(nil, snapSource("lvm1-vg0:pvc-src@snap1")),
+			wantCalls: []string{"LvInfo", "LvInfo", "LvThinClone"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				clone := f.reqs["LvThinClone"].(*helperpb.LvThinClone)
+				if clone.Vg != "vg0" || clone.Snap != "snap1" || clone.Target != "pvc-1" || clone.GetNewSize() != 10*gib {
+					t.Fatalf("bad clone: %+v", clone)
+				}
+			},
+		},
+		{
+			name: "restore: a retry only finishes the grow",
+			lvs: map[string]*helperpb.LvInfoReply{
+				"vg0/snap1": thin(5*gib, "pvc-src", false),
+				"vg0/pvc-1": thin(5*gib, "snap1", true),
+			},
+			call:      lvmCreate(nil, snapSource("lvm1-vg0:pvc-src@snap1")),
+			wantCalls: []string{"LvInfo", "LvResize"},
+		},
+		{
+			name:      "restore: a target restored from another snapshot is AlreadyExists",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(10*gib, "snap9", true)},
+			call:      lvmCreate(nil, snapSource("lvm1-vg0:pvc-src@snap1")),
+			wantCode:  codes.AlreadyExists,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:      "restore: a snapshot in another thin pool is InvalidArgument",
+			lvs:       map[string]*helperpb.LvInfoReply{"vg0/snap1": {Exists: true, SizeBytes: 5 * gib, Pool: "pool1", Origin: "pvc-src"}},
+			call:      lvmCreate(nil, snapSource("lvm1-vg0:pvc-src@snap1")),
+			wantCode:  codes.InvalidArgument,
+			wantCalls: []string{"LvInfo", "LvInfo"},
+		},
+		{
+			name:     "restore: a zfs snapshot into an lvm-thin class is InvalidArgument",
+			call:     lvmCreate(nil, snapSource("tank:csi:pvc-src@snap1")),
+			wantCode: codes.InvalidArgument,
+		},
+		{
+			name: "restore: an lvm-thin snapshot into a zfs class is InvalidArgument",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateVolume(ctx, &csi.CreateVolumeRequest{
+					Name: "pvc-1", Parameters: map[string]string{"datasetParent": "tank/csi"}, VolumeCapabilities: rwoCaps(),
+					VolumeContentSource: snapSource("lvm1-vg0:pvc-src@snap1"),
+				})
+			},
+			wantCode:  codes.InvalidArgument,
+			wantCalls: []string{"ZvolInfo"},
+		},
+		{
+			name: "delete: export first, then lvremove",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: "lvm1-vg0:pvc-1"})
+			},
+			wantCalls: []string{"CsiNvmeDelete", "LvDelete"},
+		},
+		{
+			name:    "delete: an already-removed LV is success",
+			failOp:  "LvDelete",
+			failMsg: `Failed to find logical volume "vg0/pvc-1"`,
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: "lvm1-vg0:pvc-1"})
+			},
+			wantCalls: []string{"CsiNvmeDelete", "LvDelete"},
+		},
+		{
+			name: "delete: an imported LV only loses its export",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: "lvmi1-vg1:legacy"})
+			},
+			wantCalls: []string{"CsiNvmeDelete"},
+		},
+		{
+			name: "publish: exports /dev/<vg>/<lv>",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(10*gib, "", true)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{
+					VolumeId: "lvm1-vg0:pvc-1", NodeId: "nqn.host", VolumeCapability: rwoCaps()[0],
+				})
+			},
+			wantCalls: []string{"LvInfo", "CsiPublish"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if dev := f.reqs["CsiPublish"].(*helperpb.CsiPublish).Export.DevicePath; dev != "/dev/vg0/pvc-1" {
+					t.Fatalf("device path = %q", dev)
+				}
+			},
+		},
+		{
+			name: "publish: an inactive LV is FailedPrecondition",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(10*gib, "", false)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{
+					VolumeId: "lvm1-vg0:pvc-1", NodeId: "nqn.host", VolumeCapability: rwoCaps()[0],
+				})
+			},
+			wantCode:  codes.FailedPrecondition,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name: "expand: target-side grow, then the new size is read back",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/pvc-1": thin(10*gib, "", true)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.ControllerExpandVolume(ctx, &csi.ControllerExpandVolumeRequest{
+					VolumeId: "lvm1-vg0:pvc-1", CapacityRange: &csi.CapacityRange{RequiredBytes: 20 << 30},
+				})
+			},
+			wantCalls: []string{"LvInfo", "CsiVolumeExpand", "LvInfo"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if got := resp.(*csi.ControllerExpandVolumeResponse).CapacityBytes; got != 20<<30 {
+					t.Fatalf("capacity = %d", got)
+				}
+			},
+		},
+		{
+			name: "expand: an imported LV is FailedPrecondition",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.ControllerExpandVolume(ctx, &csi.ControllerExpandVolumeRequest{
+					VolumeId: "lvmi1-vg1:legacy", CapacityRange: &csi.CapacityRange{RequiredBytes: 20 << 30},
+				})
+			},
+			wantCode: codes.FailedPrecondition,
+		},
+		{
+			name: "snapshot: a fresh thin snapshot of the volume",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: "lvm1-vg0:pvc-1", Name: "snap1"})
+			},
+			wantCalls: []string{"LvInfo", "LvThinSnapshot"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				snap := f.reqs["LvThinSnapshot"].(*helperpb.LvThinSnapshot)
+				if snap.Vg != "vg0" || snap.Origin != "pvc-1" || snap.Name != "snap1" {
+					t.Fatalf("bad snapshot: %+v", snap)
+				}
+				if id := resp.(*csi.CreateSnapshotResponse).Snapshot.SnapshotId; id != "lvm1-vg0:pvc-1@snap1" {
+					t.Fatalf("snapshot id = %q", id)
+				}
+			},
+		},
+		{
+			name: "snapshot: a retry finds it already taken from this volume",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(10*gib, "pvc-1", false)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: "lvm1-vg0:pvc-1", Name: "snap1"})
+			},
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name: "snapshot: the name taken from another volume is AlreadyExists",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(10*gib, "pvc-2", false)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: "lvm1-vg0:pvc-1", Name: "snap1"})
+			},
+			wantCode:  codes.AlreadyExists,
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name:    "snapshot: a missing source volume is NotFound",
+			failOp:  "LvThinSnapshot",
+			failMsg: `Failed to find logical volume "vg0/pvc-1"`,
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: "lvm1-vg0:pvc-1", Name: "snap1"})
+			},
+			wantCode:  codes.NotFound,
+			wantCalls: []string{"LvInfo", "LvThinSnapshot"},
+		},
+		{
+			name: "delete snapshot: removes the snapshot LV",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(10*gib, "pvc-1", false)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: "lvm1-vg0:pvc-1@snap1"})
+			},
+			wantCalls: []string{"LvInfo", "LvDelete"},
+		},
+		{
+			name: "delete snapshot: one that outlived its origin still deletes",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(10*gib, "", false)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: "lvm1-vg0:pvc-1@snap1"})
+			},
+			wantCalls: []string{"LvInfo", "LvDelete"},
+		},
+		{
+			name: "delete snapshot: already gone is success",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: "lvm1-vg0:pvc-1@snap1"})
+			},
+			wantCalls: []string{"LvInfo"},
+		},
+		{
+			name: "delete snapshot: an id naming a volume LV never deletes it",
+			lvs:  map[string]*helperpb.LvInfoReply{"vg0/pvc-2": thin(10*gib, "", true)},
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: "lvm1-vg0:pvc-1@pvc-2"})
+			},
+			wantCode:  codes.FailedPrecondition,
+			wantCalls: []string{"LvInfo"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFake()
+			maps.Copy(f.lvs, tc.lvs)
+			if tc.failOp != "" {
+				f.fail[tc.failOp] = orDefault(tc.failMsg, "boom")
+			}
+			resp, err := tc.call(testController(t, f))
+			wantCode(t, err, tc.wantCode)
+			if !slices.Equal(f.calls, tc.wantCalls) {
+				t.Fatalf("calls = %v, want %v", f.calls, tc.wantCalls)
+			}
+			if tc.check != nil {
+				tc.check(t, f, resp)
+			}
+		})
 	}
 }

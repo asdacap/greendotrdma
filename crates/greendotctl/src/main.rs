@@ -560,6 +560,8 @@ helper_impl! {
             lv_shrink, LvShrinkStream, pb::LvShrink, ops::LvShrink;
             lv_rename, LvRenameStream, pb::LvRename, ops::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete, ops::LvDelete;
+            lv_thin_snapshot, LvThinSnapshotStream, pb::LvThinSnapshot, ops::LvThinSnapshot;
+            lv_thin_clone, LvThinCloneStream, pb::LvThinClone, ops::LvThinClone;
             zfs_clone, ZfsCloneStream, pb::ZfsClone, ops::ZfsClone;
             csi_publish, CsiPublishStream, pb::CsiPublish, ops::CsiPublish;
             csi_unpublish, CsiUnpublishStream, pb::CsiUnpublish, ops::CsiUnpublish;
@@ -592,6 +594,7 @@ helper_impl! {
             smart_health, pb::SmartHealth, ops::SmartHealth;
             reconcile_dry_run, pb::Empty, ops::ReconcileDryRun;
             zvol_info, pb::ZvolInfo, ops::ZvolInfo;
+            lv_info, pb::LvInfo, ops::LvInfo;
             csi_attachment, pb::CsiNvmeDelete, ops::CsiNvmeDelete;
             pipe_access_report, pb::Empty, ops::PipeAccessReport;
     }

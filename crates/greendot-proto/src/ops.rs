@@ -1093,6 +1093,92 @@ impl From<LvDelete> for pb::LvDelete {
     }
 }
 
+/// `lvcreate -s -n <name> <vg>/<origin>` — an inactive thin snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LvThinSnapshot {
+    pub vg: VgName,
+    pub origin: LvName,
+    pub name: LvName,
+}
+
+impl TryFrom<pb::LvThinSnapshot> for LvThinSnapshot {
+    type Error = ConvertError;
+    fn try_from(l: pb::LvThinSnapshot) -> Result<Self, ConvertError> {
+        Ok(LvThinSnapshot {
+            vg: VgName::new(l.vg)?,
+            origin: LvName::new(l.origin)?,
+            name: LvName::new(l.name)?,
+        })
+    }
+}
+impl From<LvThinSnapshot> for pb::LvThinSnapshot {
+    fn from(l: LvThinSnapshot) -> Self {
+        pb::LvThinSnapshot {
+            vg: l.vg.as_str().to_owned(),
+            origin: l.origin.as_str().to_owned(),
+            name: l.name.as_str().to_owned(),
+        }
+    }
+}
+
+/// An activated thin snapshot of `snap` named `target`, optionally followed by
+/// an lvextend — restoring a bigger volume from a snapshot is one intent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LvThinClone {
+    pub vg: VgName,
+    pub snap: LvName,
+    pub target: LvName,
+    pub new_size: Option<u64>,
+}
+
+impl TryFrom<pb::LvThinClone> for LvThinClone {
+    type Error = ConvertError;
+    fn try_from(l: pb::LvThinClone) -> Result<Self, ConvertError> {
+        Ok(LvThinClone {
+            vg: VgName::new(l.vg)?,
+            snap: LvName::new(l.snap)?,
+            target: LvName::new(l.target)?,
+            new_size: l.new_size,
+        })
+    }
+}
+impl From<LvThinClone> for pb::LvThinClone {
+    fn from(l: LvThinClone) -> Self {
+        pb::LvThinClone {
+            vg: l.vg.as_str().to_owned(),
+            snap: l.snap.as_str().to_owned(),
+            target: l.target.as_str().to_owned(),
+            new_size: l.new_size,
+        }
+    }
+}
+
+/// Structural read: does the LV exist, its size, thin pool, snapshot origin,
+/// and whether it is active. (CSI idempotency and snapshot provenance.)
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LvInfo {
+    pub vg: VgName,
+    pub name: LvName,
+}
+
+impl TryFrom<pb::LvInfo> for LvInfo {
+    type Error = ConvertError;
+    fn try_from(l: pb::LvInfo) -> Result<Self, ConvertError> {
+        Ok(LvInfo {
+            vg: VgName::new(l.vg)?,
+            name: LvName::new(l.name)?,
+        })
+    }
+}
+impl From<LvInfo> for pb::LvInfo {
+    fn from(l: LvInfo) -> Self {
+        pb::LvInfo {
+            vg: l.vg.as_str().to_owned(),
+            name: l.name.as_str().to_owned(),
+        }
+    }
+}
+
 // ---- System ----
 
 /// Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
@@ -1801,6 +1887,21 @@ mod tests {
             vg: VgName::new("vg0").unwrap(),
             name: LvName::new("data").unwrap(),
         } => pb::LvDelete);
+        roundtrip!(LvThinSnapshot {
+            vg: VgName::new("vg0").unwrap(),
+            origin: LvName::new("pvc-1").unwrap(),
+            name: LvName::new("snapshot-1").unwrap(),
+        } => pb::LvThinSnapshot);
+        roundtrip!(LvThinClone {
+            vg: VgName::new("vg0").unwrap(),
+            snap: LvName::new("snapshot-1").unwrap(),
+            target: LvName::new("pvc-2").unwrap(),
+            new_size: Some(20 << 30),
+        } => pb::LvThinClone);
+        roundtrip!(LvInfo {
+            vg: VgName::new("vg0").unwrap(),
+            name: LvName::new("pvc-1").unwrap(),
+        } => pb::LvInfo);
         roundtrip!(RxeAdd { netdev: NetdevName::new("eth0").unwrap() } => pb::RxeAdd);
         roundtrip!(EnableRoce { netdev: NetdevName::new("ens16").unwrap() } => pb::EnableRoce);
         roundtrip!(SetMtu { netdev: NetdevName::new("eth0").unwrap(), mtu: 9000 } => pb::SetMtu);
@@ -2046,6 +2147,30 @@ mod tests {
             LvDelete::try_from(pb::LvDelete {
                 vg: "vg0".into(),
                 name: "../x".into(),
+            })
+            .is_err()
+        );
+        assert!(
+            LvThinSnapshot::try_from(pb::LvThinSnapshot {
+                vg: "vg0".into(),
+                origin: "pvc-1".into(),
+                name: "-snap".into(),
+            })
+            .is_err()
+        );
+        assert!(
+            LvThinClone::try_from(pb::LvThinClone {
+                vg: "vg0".into(),
+                snap: "snapshot-1".into(),
+                target: "a/b".into(),
+                new_size: None,
+            })
+            .is_err()
+        );
+        assert!(
+            LvInfo::try_from(pb::LvInfo {
+                vg: "vg 0".into(),
+                name: "pvc-1".into(),
             })
             .is_err()
         );

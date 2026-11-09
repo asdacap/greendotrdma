@@ -78,6 +78,8 @@ service Helper {
   rpc LvShrink(.greendot.helper.v1.LvShrink) returns (stream TaskEvent);
   rpc LvRename(.greendot.helper.v1.LvRename) returns (stream TaskEvent);
   rpc LvDelete(.greendot.helper.v1.LvDelete) returns (stream TaskEvent);
+  rpc LvThinSnapshot(.greendot.helper.v1.LvThinSnapshot) returns (stream TaskEvent);
+  rpc LvThinClone(.greendot.helper.v1.LvThinClone) returns (stream TaskEvent);
 
   // Desired-state reconcile pass (the only apply path for NVMe-oF/iSCSI/NFS).
   rpc Reconcile(.greendot.helper.v1.Reconcile) returns (stream TaskEvent);
@@ -125,6 +127,7 @@ service Helper {
   rpc SmartHealth(.greendot.helper.v1.SmartHealth) returns (SmartHealthReply);
   rpc ReconcileDryRun(Empty) returns (ReconcileDryRunReply);
   rpc ZvolInfo(.greendot.helper.v1.ZvolInfo) returns (ZvolInfoReply);
+  rpc LvInfo(.greendot.helper.v1.LvInfo) returns (LvInfoReply);
   rpc PipeAccessReport(Empty) returns (PipeAccessReportReply);
 }
 
@@ -402,6 +405,18 @@ message LvResize { string vg = 1; string name = 2; uint64 new_size = 3; }
 message LvShrink { string vg = 1; string name = 2; uint64 new_size = 3; }
 message LvRename { string vg = 1; string name = 2; string new_name = 3; }
 message LvDelete { string vg = 1; string name = 2; }
+// `lvcreate -s -n <name> <vg>/<origin>` — a thin snapshot; it keeps LVM's
+// activation-skip default, so it stays inactive.
+message LvThinSnapshot { string vg = 1; string origin = 2; string name = 3; }
+// A writable, activated thin snapshot of `snap` named `target`, optionally
+// followed by an lvextend (restoring a bigger volume from a snapshot is one
+// intent, like ZfsClone).
+message LvThinClone {
+  string vg = 1;
+  string snap = 2;
+  string target = 3;
+  optional uint64 new_size = 4;
+}
 
 // Deliberately empty: the daemon reconciles against its own --config, so the
 // peer cannot name a file for root to read.
@@ -436,9 +451,10 @@ message CsiHostGrant { string nqn = 1; string hostnqn = 2; }
 // unlink the subsystem from the CSI port (severs live controllers), relink.
 // The ACL edit precedes the relink so the fenced host cannot slip back in.
 message CsiHostRevoke { string nqn = 1; string hostnqn = 2; }
-// Target-side volume expansion as one intent: resize the zvol backing
-// namespace 1 (the dataset is derived from the subsystem's own device_path —
-// the CsiNqn scopes what can be resized), then revalidate the namespace size.
+// Target-side volume expansion as one intent: resize the zvol or thin LV
+// backing namespace 1 (the volume is derived from the CsiNqn token — which
+// scopes what can be resized — and must match the subsystem's own
+// device_path), then revalidate the namespace size.
 message CsiVolumeExpand { string nqn = 1; uint64 new_size = 2; }
 
 // Authorize one OpenSSH public key to run the pipe forced command. The request
@@ -510,6 +526,18 @@ message ZfsClone {
 // idempotency and expand no-op detection.)
 message ZvolInfo { string dataset = 1; }
 message ZvolInfoReply { bool exists = 1; uint64 size_bytes = 2; }
+
+// Structural read: does the LV exist, how big is it, which thin pool holds
+// it, which LV it is a snapshot of, and is it active (has a device node)?
+// (CSI idempotency and snapshot/restore provenance.)
+message LvInfo { string vg = 1; string name = 2; }
+message LvInfoReply {
+  bool exists = 1;
+  uint64 size_bytes = 2;
+  string pool = 3;
+  string origin = 4;
+  bool active = 5;
+}
 
 // Enable Soft-RoCE on `netdev` as one task: load the rxe kernel module
 // (skipped if already loaded), then add the rdma link.

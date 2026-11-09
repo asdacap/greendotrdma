@@ -15,8 +15,8 @@ parameters:
   volblocksize: "16384"
   sparse: "true"
 ---
-# Custom zvol name: pick the backing zvol's leaf under the driver's
-# --dataset-parent instead of the default pvc-<uuid>. Template it per PVC so
+# Custom zvol name: pick the backing zvol's leaf under the class's
+# datasetParent instead of the default pvc-<uuid>. Template it per PVC so
 # names stay unique — a *literal* zvolName shared across PVCs would make two
 # PVs silently share one zvol. (The ${...} tokens are expanded by the driver
 # from the PVC/PV metadata the external-provisioner passes; the provisioner
@@ -37,7 +37,7 @@ parameters:
 ---
 # Import a preexisting zvol: the driver exports it over NVMe-oF but NEVER
 # destroys it — DeleteVolume tears down only the export. importDataset is the
-# full zfs path; it may live anywhere, not just under --dataset-parent. Also
+# full zfs path; it may live anywhere, not just under a datasetParent. Also
 # set reclaimPolicy: Retain (defence in depth) and note that imported volumes
 # are not snapshottable or expandable in v1. One class imports one zvol; use a
 # per-PVC value (e.g. an annotation, which needs --extra-create-metadata) to
@@ -51,6 +51,53 @@ reclaimPolicy: Retain
 volumeBindingMode: Immediate
 parameters:
   importDataset: "tank/legacy/mydb"
+---
+# Thin LVM instead of ZFS: backend: lvm-thin provisions thin LVs in an existing
+# thin pool (`vgcreate vg0 /dev/…` then
+# `lvcreate --type thin-pool -L 500G -n pool0 vg0`). Volume ids are
+# lvm1-<vg>:<lv>; snapshots are inactive thin snapshots in the same VG, and
+# restoring one needs a class with the same volumeGroup and thinPool.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: greendot-rdma-thin
+provisioner: csi.greendot.io
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  backend: "lvm-thin"
+  volumeGroup: "vg0"
+  thinPool: "pool0"
+---
+# Custom LV name, templated per PVC exactly like zvolName above.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: greendot-rdma-thin-named
+provisioner: csi.greendot.io
+reclaimPolicy: Delete
+allowVolumeExpansion: true
+volumeBindingMode: Immediate
+parameters:
+  backend: "lvm-thin"
+  volumeGroup: "vg0"
+  thinPool: "pool0"
+  lvName: "${pvc.namespace}-${pvc.name}"
+---
+# Import a preexisting LV (thin or not) as <vg>/<lv>: exported, NEVER removed —
+# DeleteVolume tears down only the export. Like importDataset, set
+# reclaimPolicy: Retain; imported LVs are not snapshottable or expandable.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: greendot-rdma-thin-import
+provisioner: csi.greendot.io
+reclaimPolicy: Retain
+volumeBindingMode: Immediate
+parameters:
+  backend: "lvm-thin"
+  importLv: "vg0/legacy-db"
 ---
 apiVersion: snapshot.storage.k8s.io/v1
 kind: VolumeSnapshotClass

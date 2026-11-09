@@ -6,10 +6,12 @@
 
 use crate::util::read_trim;
 use greendot_proto::{
-    CSI_NQN_PREFIX, CSI_PORT_ID, CsiNqn, DatasetName, Nqn, NsUuid, NvmetDesired, NvmetNsSpec,
-    NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask, Task, Transport, ops,
+    CSI_NQN_PREFIX, CSI_PORT_ID, CsiNqn, DatasetName, LvName, Nqn, NsUuid, NvmetDesired,
+    NvmetNsSpec, NvmetPortSpec, NvmetSubsysSpec, OUR_NQN_PREFIX, SubStatus, SubTask, Task,
+    Transport, VgName, ops,
 };
 use std::collections::BTreeSet;
+use std::fmt;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -434,7 +436,59 @@ pub fn csi_host_revoke(root: &Path, nqn: &CsiNqn, host: &Nqn, task: &mut Task) -
     Ok(())
 }
 
-/// Grow the managed zvol even when detached, then revalidate any live export.
+/// The volume backing a CSI namespace — what [`csi_expand`] grows.
+#[derive(Debug)]
+enum Backing {
+    Zvol(DatasetName),
+    ThinLv(VgName, LvName),
+}
+
+impl Backing {
+    fn device_path(&self) -> String {
+        match self {
+            Backing::Zvol(dataset) => format!("/dev/zvol/{dataset}"),
+            Backing::ThinLv(vg, lv) => format!("/dev/{vg}/{lv}"),
+        }
+    }
+
+    /// Inverts the controller's volume-id grammar: `lvm1-<vg>:<lv>` is a thin
+    /// LV, `imp1-`/`lvmi1-` ids are imported (never resized), and any other
+    /// `:`-separated id is a zvol path. Older clients used bare leaf NQNs;
+    /// preserve their export-backed lookup. Current managed IDs encode the full
+    /// path, without a separate arbitrary volume argument that could escape
+    /// the NQN authorization scope.
+    fn from_token(token: &str, device: &str) -> Option<Self> {
+        if let Some(rest) = token.strip_prefix("lvm1-") {
+            let (vg, lv) = rest.split_once(':')?;
+            Some(Backing::ThinLv(
+                VgName::new(vg).ok()?,
+                LvName::new(lv).ok()?,
+            ))
+        } else if token.starts_with("imp1-") || token.starts_with("lvmi1-") {
+            None
+        } else if token.contains(':') {
+            DatasetName::new(token.replace(':', "/"))
+                .ok()
+                .map(Backing::Zvol)
+        } else {
+            device
+                .strip_prefix("/dev/zvol/")
+                .and_then(|name| DatasetName::new(name).ok())
+                .map(Backing::Zvol)
+        }
+    }
+}
+
+impl fmt::Display for Backing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Backing::Zvol(dataset) => write!(f, "{dataset}"),
+            Backing::ThinLv(vg, lv) => write!(f, "{vg}/{lv}"),
+        }
+    }
+}
+
+/// Grow the managed volume even when detached, then revalidate any live export.
 /// The daemon mutation lock covers both the size read and the grow, so retries
 /// (including older requests) never shrink a volume.
 pub fn csi_expand(root: &Path, nqn: &CsiNqn, new_size: u64, task: &mut Task) -> io::Result<()> {
@@ -443,40 +497,48 @@ pub fn csi_expand(root: &Path, nqn: &CsiNqn, new_size: u64, task: &mut Task) -> 
         nqn,
         new_size,
         task,
-        |task, dataset| {
-            let mut sub = task.begin_subtask(format!("Read capacity {dataset}"));
-            let command = crate::cmd::TaskSpec::new(
-                "zfs",
-                vec![
-                    "get".into(),
-                    "-Hp".into(),
-                    "-o".into(),
-                    "value".into(),
-                    "volsize".into(),
-                    dataset.to_string(),
-                ],
-            );
+        |task, backing| {
+            let mut sub = task.begin_subtask(format!("Read capacity {backing}"));
+            let command = match backing {
+                Backing::Zvol(dataset) => crate::cmd::TaskSpec::new(
+                    "zfs",
+                    vec![
+                        "get".into(),
+                        "-Hp".into(),
+                        "-o".into(),
+                        "value".into(),
+                        "volsize".into(),
+                        dataset.to_string(),
+                    ],
+                ),
+                Backing::ThinLv(vg, lv) => crate::lvm::lv_info(vg, lv),
+            };
             let output = crate::cmd::capture_into(&mut sub, &command)?;
-            match output
-                .ok()
-                .and_then(|value| value.trim().parse::<u64>().ok())
-            {
+            match output.ok().and_then(|value| match backing {
+                Backing::Zvol(_) => value.trim().parse::<u64>().ok(),
+                Backing::ThinLv(..) => Some(crate::lvm::parse_lv_info(&value).size_bytes),
+            }) {
                 Some(size) if size > 0 => {
                     sub.complete(SubStatus::Success);
                     Ok(Some(size))
                 }
                 _ => {
-                    sub.fail("cannot read backing zvol capacity");
+                    sub.fail("cannot read backing volume capacity");
                     Ok(None)
                 }
             }
         },
-        |task, dataset, size| {
-            crate::cmd::run(
+        |task, backing, size| match backing {
+            Backing::Zvol(dataset) => crate::cmd::run(
                 task,
                 format!("Resize zvol {dataset}"),
                 &crate::zfs::zvol_resize(dataset, size),
-            )
+            ),
+            Backing::ThinLv(vg, lv) => crate::cmd::run(
+                task,
+                format!("Resize LV {vg}/{lv}"),
+                &crate::lvm::lv_resize(vg, lv, size),
+            ),
         },
     )
 }
@@ -486,8 +548,8 @@ fn expand_volume(
     nqn: &CsiNqn,
     new_size: u64,
     task: &mut Task,
-    mut read_size: impl FnMut(&mut Task, &DatasetName) -> io::Result<Option<u64>>,
-    mut resize: impl FnMut(&mut Task, &DatasetName, u64) -> io::Result<SubStatus>,
+    mut read_size: impl FnMut(&mut Task, &Backing) -> io::Result<Option<u64>>,
+    mut resize: impl FnMut(&mut Task, &Backing, u64) -> io::Result<SubStatus>,
 ) -> io::Result<()> {
     let ns = root
         .join("subsystems")
@@ -498,32 +560,20 @@ fn expand_volume(
         .as_str()
         .strip_prefix(CSI_NQN_PREFIX)
         .unwrap_or_default();
-    // Older clients used bare leaf NQNs; preserve their export-backed lookup.
-    // Current managed IDs encode the full path, without a separate arbitrary
-    // dataset argument that could escape the NQN authorization scope.
-    let dataset = if token.contains(':') && !token.starts_with("imp1-") {
-        DatasetName::new(token.replace(':', "/")).ok()
-    } else if !token.starts_with("imp1-") {
-        device
-            .strip_prefix("/dev/zvol/")
-            .and_then(|name| DatasetName::new(name).ok())
-    } else {
-        None
-    };
-    let Some(dataset) =
-        dataset.filter(|dataset| !ns.exists() || device == format!("/dev/zvol/{dataset}"))
+    let Some(backing) = Backing::from_token(token, &device)
+        .filter(|backing| !ns.exists() || device == backing.device_path())
     else {
-        task.begin_subtask("Resolve backing zvol")
-            .fail("namespace is not backed by the managed zvol");
+        task.begin_subtask("Resolve backing volume")
+            .fail("namespace is not backed by the managed volume");
         return Ok(());
     };
-    let Some(current_size) = read_size(task, &dataset)? else {
+    let Some(current_size) = read_size(task, &backing)? else {
         return Ok(());
     };
-    if new_size > current_size && resize(task, &dataset, new_size)? != SubStatus::Success {
+    if new_size > current_size && resize(task, &backing, new_size)? != SubStatus::Success {
         return Ok(());
     }
-    // A retry after successful ZFS growth must still repair a failed revalidate.
+    // A retry after a successful grow must still repair a failed revalidate.
     // Disabled namespaces pick up capacity when enabled; detached volumes have
     // no namespace and must not acquire an export as a side effect of growth.
     if !ns.exists() || read_trim(&ns.join("enable")) != "1" {
@@ -962,8 +1012,8 @@ mod tests {
                     &op.nqn,
                     20,
                     task,
-                    |_, dataset| {
-                        assert_eq!(dataset.as_str(), "tank/csi/pvc-1");
+                    |_, backing| {
+                        assert_eq!(backing.to_string(), "tank/csi/pvc-1");
                         Ok(Some(current))
                     },
                     |task, _, requested| {
@@ -1004,7 +1054,7 @@ mod tests {
             }
             if attached && !revalidate {
                 // Grow succeeded; repair the interrupted revalidate without
-                // issuing a second grow, even though ZFS already has the size.
+                // issuing a second grow, even though the zvol already has the size.
                 std::fs::write(ns.join("revalidate_size"), "0").unwrap();
                 let retry = run_csi(&tmp, |root, task| {
                     expand_volume(
@@ -1029,30 +1079,46 @@ mod tests {
         }
     }
 
-    /// Legacy leaf NQNs require a zvol-backed namespace, and a failed
-    /// capacity read must not reach resize or revalidation.
-    #[test]
-    fn csi_expand_resolves_and_gates_on_the_zvol() {
-        let tmp = std::env::temp_dir().join(format!("gd-nvmet-csiexp{}", std::process::id()));
+    /// Each id kind resolves its backing volume, an export must match it, and
+    /// a failed capacity read (no zfs/lvs or no such volume here) must not
+    /// reach resize or revalidation.
+    #[rstest::rstest]
+    #[case::legacy_unexported("pvc-1", None, "Resolve backing volume")]
+    #[case::legacy_zvol(
+        "pvc-1",
+        Some("/dev/zvol/tank/csi/pvc-1"),
+        "Read capacity tank/csi/pvc-1"
+    )]
+    #[case::thin_lv("lvm1-vg0:pvc-1", Some("/dev/vg0/pvc-1"), "Read capacity vg0/pvc-1")]
+    #[case::thin_lv_detached("lvm1-vg0:pvc-1", None, "Read capacity vg0/pvc-1")]
+    #[case::thin_lv_other_device(
+        "lvm1-vg0:pvc-1",
+        Some("/dev/vg0/other"),
+        "Resolve backing volume"
+    )]
+    #[case::imported_lv("lvmi1-vg0:pvc-1", Some("/dev/vg0/pvc-1"), "Resolve backing volume")]
+    fn csi_expand_resolves_and_gates_on_the_backing(
+        #[case] token: &str,
+        #[case] device: Option<&str>,
+        #[case] subtask: &str,
+    ) {
+        let tmp = std::env::temp_dir().join(
+            format!(
+                "gd-nvmet-csiexp{}-{token}-{}",
+                std::process::id(),
+                device.unwrap_or("none")
+            )
+            .replace([':', '/'], "_"),
+        );
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let nqn = CsiNqn::new("nqn.2026-06.io.greendot.csi:pvc-1").unwrap();
+        let nqn = CsiNqn::new(format!("nqn.2026-06.io.greendot.csi:{token}")).unwrap();
+        if let Some(device) = device {
+            run_csi(&tmp, |r, t| csi_apply(r, &csi_op(token, device), t));
+        }
 
-        // No subsystem at all → not zvol-backed, one failed subtask.
         let events = run_csi(&tmp, |r, t| csi_expand(r, &nqn, 1 << 30, t));
-        assert_eq!(subtask_names(&events), ["Resolve backing zvol"]);
-        assert_eq!(task_status(&events), SubStatus::Failed);
-
-        // A zvol-backed namespace resolves, but its capacity read fails here
-        // (no zfs / no such dataset); resize and revalidate must not run.
-        let op = csi_op("pvc-1", "/dev/zvol/tank/csi/pvc-1");
-        run_csi(&tmp, |r, t| csi_apply(r, &op, t));
-        let events = run_csi(&tmp, |r, t| csi_expand(r, &nqn, 1 << 30, t));
-        assert_eq!(
-            subtask_names(&events),
-            ["Read capacity tank/csi/pvc-1"],
-            "stops after the failed resize"
-        );
+        assert_eq!(subtask_names(&events), [subtask]);
         assert_eq!(task_status(&events), SubStatus::Failed);
 
         std::fs::remove_dir_all(&tmp).unwrap();

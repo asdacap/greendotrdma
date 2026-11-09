@@ -2,9 +2,10 @@
 //! through the helper (LVM reporting needs root). Sizes are passed in bytes with
 //! the `B` suffix; LVM rounds up to the physical-extent boundary.
 
-use crate::cmd::TaskSpec;
+use crate::cmd::{self, TaskSpec};
 use crate::util::s;
-use greendot_proto::{DevicePath, LvName, LvmReport, VgName};
+use greendot_proto::{DevicePath, LvName, LvmReport, SubStatus, Task, VgName, pb};
+use std::io;
 
 /// `vgs`/`lvs`/`pvs` as machine-readable JSON in bytes. Run as a task so the web
 /// side gets the output stream; it parses the JSON.
@@ -129,6 +130,107 @@ pub fn lv_rename(vg: &VgName, name: &LvName, new_name: &LvName) -> TaskSpec {
 /// `lvremove -y <vg>/<lv>` — `-y` because lvremove prompts by default.
 pub fn lv_delete(vg: &VgName, name: &LvName) -> TaskSpec {
     TaskSpec::new("lvremove", s(&["-y", &format!("{vg}/{name}")]))
+}
+
+/// `lvcreate -s -n <name> <vg>/<origin>` — no `-L`, so a thin snapshot. It
+/// keeps LVM's activation-skip default: never active, never exportable.
+pub fn thin_snapshot(vg: &VgName, origin: &LvName, name: &LvName) -> TaskSpec {
+    TaskSpec::new(
+        "lvcreate",
+        s(&["-y", "-s", "-n", name.as_str(), &format!("{vg}/{origin}")]),
+    )
+}
+
+/// A thin snapshot of `snap` with the activation-skip flag cleared, so the new
+/// LV activates now and on every boot like any other volume.
+pub fn thin_clone(vg: &VgName, snap: &LvName, target: &LvName) -> TaskSpec {
+    TaskSpec::new(
+        "lvcreate",
+        s(&[
+            "-y",
+            "-s",
+            "--setactivationskip",
+            "n",
+            "-n",
+            target.as_str(),
+            &format!("{vg}/{snap}"),
+        ]),
+    )
+}
+
+/// [`thin_clone`] then the optional lvextend as one task (a clone inherits the
+/// snapshot's size). The resize is skipped when the clone itself failed.
+pub fn thin_clone_and_resize(
+    task: &mut Task,
+    vg: &VgName,
+    snap: &LvName,
+    target: &LvName,
+    new_size: Option<u64>,
+) -> io::Result<()> {
+    if cmd::run(
+        task,
+        format!("Clone {vg}/{snap} to {target}"),
+        &thin_clone(vg, snap, target),
+    )? != SubStatus::Success
+    {
+        return Ok(());
+    }
+    if let Some(size) = new_size {
+        cmd::run(
+            task,
+            format!("Resize {vg}/{target}"),
+            &lv_resize(vg, target, size),
+        )?;
+    }
+    Ok(())
+}
+
+/// `lvs` for one LV: size in bytes, thin pool, snapshot origin, attributes.
+pub fn lv_info(vg: &VgName, name: &LvName) -> TaskSpec {
+    TaskSpec::new(
+        "lvs",
+        s(&[
+            "--noheadings",
+            "--nosuffix",
+            "--units",
+            "b",
+            "--separator",
+            "|",
+            "-o",
+            "lv_size,pool_lv,origin,lv_attr",
+            &format!("{vg}/{name}"),
+        ]),
+    )
+}
+
+/// Parses [`lv_info`]'s one row. Anything else — a missing LV prints nothing —
+/// reads as absent. The fifth `lv_attr` character is the activation state.
+pub fn parse_lv_info(output: &str) -> pb::LvInfoReply {
+    let fields: Vec<&str> = output.trim().split('|').collect();
+    let [size, pool, origin, attr] = fields.as_slice() else {
+        return pb::LvInfoReply::default();
+    };
+    let Ok(size_bytes) = size.parse() else {
+        return pb::LvInfoReply::default();
+    };
+    pb::LvInfoReply {
+        exists: true,
+        size_bytes,
+        pool: pool.to_string(),
+        origin: origin.to_string(),
+        active: attr.chars().nth(4) == Some('a'),
+    }
+}
+
+/// The typed `LvInfo` read: runs [`lv_info`] directly (no task); a missing
+/// binary or LV degrades to absent.
+pub fn info(vg: &VgName, name: &LvName) -> pb::LvInfoReply {
+    let spec = lv_info(vg, name);
+    std::process::Command::new(&spec.command)
+        .args(&spec.args)
+        .output()
+        .map(|o| parse_lv_info(&String::from_utf8_lossy(&o.stdout)))
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -267,5 +369,60 @@ mod tests {
             "lvremove",
             &["-y", "vg0/data"],
         );
+    }
+
+    #[test]
+    fn thin_snapshot_and_info_args() {
+        assert_spec(
+            thin_snapshot(&vg(), &lv("pvc-1"), &lv("snapshot-1")),
+            "lvcreate",
+            &["-y", "-s", "-n", "snapshot-1", "vg0/pvc-1"],
+        );
+        assert_spec(
+            thin_clone(&vg(), &lv("snapshot-1"), &lv("pvc-2")),
+            "lvcreate",
+            &[
+                "-y",
+                "-s",
+                "--setactivationskip",
+                "n",
+                "-n",
+                "pvc-2",
+                "vg0/snapshot-1",
+            ],
+        );
+        assert_spec(
+            lv_info(&vg(), &lv("pvc-1")),
+            "lvs",
+            &[
+                "--noheadings",
+                "--nosuffix",
+                "--units",
+                "b",
+                "--separator",
+                "|",
+                "-o",
+                "lv_size,pool_lv,origin,lv_attr",
+                "vg0/pvc-1",
+            ],
+        );
+    }
+
+    #[rstest]
+    #[case::active_thin(
+        "  1073741824|pool0||Vwi-a-tz--\n",
+        pb::LvInfoReply { exists: true, size_bytes: 1 << 30, pool: "pool0".into(), origin: "".into(), active: true }
+    )]
+    #[case::inactive_snapshot(
+        "  1073741824|pool0|pvc-1|Vwi---tz-k\n",
+        pb::LvInfoReply { exists: true, size_bytes: 1 << 30, pool: "pool0".into(), origin: "pvc-1".into(), active: false }
+    )]
+    #[case::missing("", pb::LvInfoReply::default())]
+    #[case::garbage(
+        "  Failed to find logical volume \"vg0/x\"\n",
+        pb::LvInfoReply::default()
+    )]
+    fn parses_lv_info(#[case] output: &str, #[case] want: pb::LvInfoReply) {
+        assert_eq!(parse_lv_info(output), want);
     }
 }

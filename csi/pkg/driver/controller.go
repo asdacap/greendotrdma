@@ -158,11 +158,12 @@ func encodeImportID(dataset string) string {
 	return importedPrefix + strings.ToLower(importCodec.EncodeToString([]byte(dataset)))
 }
 
-// volumeRef is a resolved volume id: the backing dataset, the token appended to
-// CSINQNPrefix, and whether it adopts a preexisting zvol (which DeleteVolume
-// must never destroy).
+// volumeRef is a resolved volume id: the backing dataset (or, for thin LVM,
+// the vg and lv), the token appended to CSINQNPrefix, and whether it adopts a
+// preexisting volume (which DeleteVolume must never destroy).
 type volumeRef struct {
 	dataset  string
+	vg, lv   string
 	nqnToken string
 	imported bool
 }
@@ -171,11 +172,48 @@ func (cs *ControllerServer) nqnOf(ref *volumeRef) string {
 	return CSINQNPrefix + ref.nqnToken
 }
 
+// devicePath is the block device the target exports as namespace 1.
+func (r *volumeRef) devicePath() string {
+	if r.lv != "" {
+		return "/dev/" + r.vg + "/" + r.lv
+	}
+	return "/dev/zvol/" + r.dataset
+}
+
+// volumeInfo reads a resolved volume from its backend: LvInfo for an LV,
+// ZvolInfo for a zvol (which is active whenever it exists).
+func (cs *ControllerServer) volumeInfo(ctx context.Context, ref *volumeRef) (exists, active bool, size uint64, err error) {
+	if ref.lv != "" {
+		info, err := cs.lvInfo(ctx, ref.vg, ref.lv)
+		if err != nil {
+			return false, false, 0, err
+		}
+		return info.Exists, info.Active, info.SizeBytes, nil
+	}
+	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	if err != nil {
+		return false, false, 0, status.Errorf(codes.Unavailable, "querying zvol: %v", err)
+	}
+	return info.Exists, info.Exists, info.SizeBytes, nil
+}
+
+// hasReservedPrefix reports which non-ZFS-managed id prefix s starts with: a
+// ZFS name or pool beginning with one would make its id decode as that kind.
+func hasReservedPrefix(s string) (string, bool) {
+	for _, prefix := range []string{importedPrefix, lvmPrefix, lvmImportedPrefix} {
+		if strings.HasPrefix(s, prefix) {
+			return prefix, true
+		}
+	}
+	return "", false
+}
+
 // resolveVolumeID inverts the ids CreateVolume hands out: a managed id is its
 // dataset path with ':' separators (created under the StorageClass's
 // datasetParent); an imp1-<base32hex> id decodes to an adopted zvol at an
-// arbitrary path. The prefix is matched before the managed grammar, so a
-// corrupt imported id can never be misread as managed.
+// arbitrary path; lvm1-/lvmi1-<vg>:<lv> name a thin-LVM volume. The prefixes
+// are matched before the managed grammar, so a corrupt prefixed id can never
+// be misread as managed.
 func (cs *ControllerServer) resolveVolumeID(volID string) (*volumeRef, error) {
 	if volID == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume id is required")
@@ -190,6 +228,12 @@ func (cs *ControllerServer) resolveVolumeID(volID string) (*volumeRef, error) {
 			return nil, err
 		}
 		return &volumeRef{dataset: dataset, nqnToken: volID, imported: true}, nil
+	}
+	if rest, ok := strings.CutPrefix(volID, lvmImportedPrefix); ok {
+		return lvRef(volID, rest, true)
+	}
+	if rest, ok := strings.CutPrefix(volID, lvmPrefix); ok {
+		return lvRef(volID, rest, false)
 	}
 	dataset, err := datasetFromID(volID)
 	if err != nil {
@@ -247,13 +291,20 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if err := checkCapabilities(req.GetVolumeCapabilities()); err != nil {
 		return nil, err
 	}
+	switch backend := req.GetParameters()["backend"]; backend {
+	case "", "zfs":
+	case "lvm-thin":
+		return cs.createThinLv(ctx, req)
+	default:
+		return nil, status.Errorf(codes.InvalidArgument, "unknown backend %q (zfs or lvm-thin)", backend)
+	}
 	if imp := req.GetParameters()["importDataset"]; imp != "" {
 		return cs.createImportedVolume(ctx, req, imp)
 	}
 
 	// zvolName lets a StorageClass pick the leaf (typically templated per PVC,
 	// e.g. "${pvc.namespace}-${pvc.name}"); otherwise it is the provisioner's
-	// pvc-<uuid>. The imp1- namespace is reserved for imported ids.
+	// pvc-<uuid>. The imp1-/lvm1-/lvmi1- namespaces are reserved for other id kinds.
 	name := req.GetName()
 	if v := req.GetParameters()["zvolName"]; v != "" {
 		expanded, err := expandZvolName(v, req.GetParameters())
@@ -265,8 +316,8 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	if err := checkVolumeName(name); err != nil {
 		return nil, err
 	}
-	if strings.HasPrefix(name, importedPrefix) {
-		return nil, status.Errorf(codes.InvalidArgument, "volume name may not start with %q", importedPrefix)
+	if prefix, ok := hasReservedPrefix(name); ok {
+		return nil, status.Errorf(codes.InvalidArgument, "volume name may not start with %q", prefix)
 	}
 	// The pool is the StorageClass's choice, not the driver's.
 	parent := req.GetParameters()["datasetParent"]
@@ -283,9 +334,9 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}
 	dataset := parent + "/" + name
 	volID := idFromDataset(dataset)
-	if strings.HasPrefix(volID, importedPrefix) {
+	if prefix, ok := hasReservedPrefix(volID); ok {
 		// A pool component named imp1-* would make the id decode as imported.
-		return nil, status.Errorf(codes.InvalidArgument, "datasetParent may not start with %q", importedPrefix)
+		return nil, status.Errorf(codes.InvalidArgument, "datasetParent may not start with %q", prefix)
 	}
 	nqn := cs.nqn(volID)
 	if err := checkNQNLength(nqn); err != nil {
@@ -298,14 +349,17 @@ func (cs *ControllerServer) CreateVolume(ctx context.Context, req *csi.CreateVol
 	}
 	switch {
 	case req.GetVolumeContentSource().GetSnapshot() != nil:
-		srcDataset, snap, err := cs.parseSnapshotID(req.GetVolumeContentSource().GetSnapshot().GetSnapshotId())
+		src, snap, err := cs.parseSnapshotID(req.GetVolumeContentSource().GetSnapshot().GetSnapshotId())
 		if err != nil {
 			// A malformed source id cannot name an existing snapshot.
 			return nil, status.Errorf(codes.NotFound, "source snapshot: %v", err)
 		}
+		if src.lv != "" {
+			return nil, status.Error(codes.InvalidArgument, "an lvm-thin snapshot can only be restored by an lvm-thin StorageClass")
+		}
 		size := uint64(capacity)
 		stream, err := cs.helper.ZfsClone(ctx, &helperpb.ZfsClone{
-			Dataset: srcDataset, Snap: snap, Target: dataset, NewSize: &size,
+			Dataset: src.dataset, Snap: snap, Target: dataset, NewSize: &size,
 			RestoreRequestId: &req.Name,
 		})
 		res, err := helper.RunTask("ZfsClone", stream, err)
@@ -439,6 +493,9 @@ func (cs *ControllerServer) DeleteVolume(ctx context.Context, req *csi.DeleteVol
 		// An adopted zvol predates the driver: tear down only the export.
 		return &csi.DeleteVolumeResponse{}, nil
 	}
+	if ref.lv != "" {
+		return cs.deleteThinLv(ctx, ref)
+	}
 	zstream, err := cs.helper.ZvolDelete(ctx, &helperpb.ZvolDelete{Dataset: ref.dataset})
 	res, err := helper.RunTask("ZvolDelete", zstream, err)
 	if err != nil {
@@ -500,16 +557,21 @@ func (cs *ControllerServer) publishAttachment(ctx context.Context, volID, node, 
 	if !strings.HasPrefix(node, "nqn.") {
 		return status.Error(codes.InvalidArgument, "node id must be a host NQN")
 	}
-	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	exists, active, _, err := cs.volumeInfo(ctx, ref)
 	if err != nil {
-		return status.Errorf(codes.Unavailable, "querying zvol: %v", err)
+		return err
 	}
-	if !info.Exists {
+	if !exists {
 		return status.Errorf(codes.NotFound, "volume %s not found", volID)
+	}
+	if !active {
+		// No device node to export; the target would only time out waiting.
+		return status.Errorf(codes.FailedPrecondition,
+			"LV %s/%s is not active (lvchange -ay %s/%s on the storage box)", ref.vg, ref.lv, ref.vg, ref.lv)
 	}
 	nqn := cs.nqnOf(ref)
 	stream, err := cs.helper.CsiPublish(ctx, &helperpb.CsiPublish{
-		Export:  &helperpb.CsiNvmeApply{Nqn: nqn, DevicePath: "/dev/zvol/" + ref.dataset, DeviceUuid: DeviceUUID(nqn), Traddr: cs.cfg.TrAddr, Trsvcid: cs.cfg.TrSvcID, Transport: cs.transport()},
+		Export:  &helperpb.CsiNvmeApply{Nqn: nqn, DevicePath: ref.devicePath(), DeviceUuid: DeviceUUID(nqn), Traddr: cs.cfg.TrAddr, Trsvcid: cs.cfg.TrSvcID, Transport: cs.transport()},
 		Hostnqn: node, AttachmentId: attachment,
 	})
 	res, err := helper.RunTask("CsiPublish", stream, err)
@@ -575,15 +637,15 @@ func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	if capacity <= 0 {
 		return nil, status.Error(codes.InvalidArgument, "expansion needs a required capacity")
 	}
-	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	exists, _, _, err := cs.volumeInfo(ctx, ref)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "querying zvol: %v", err)
+		return nil, err
 	}
-	if !info.Exists {
+	if !exists {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	}
 	// The helper performs monotonic growth under its mutation lock and always
-	// retries namespace revalidation, even after the zvol already grew.
+	// retries namespace revalidation, even after the volume already grew.
 	stream, err := cs.helper.CsiVolumeExpand(ctx, &helperpb.CsiVolumeExpand{
 		Nqn: cs.nqnOf(ref), NewSize: uint64(capacity),
 	})
@@ -594,32 +656,42 @@ func (cs *ControllerServer) ControllerExpandVolume(ctx context.Context, req *csi
 	if err := res.Err("expanding " + req.GetVolumeId()); err != nil {
 		return nil, err
 	}
-	info, err = cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	exists, _, size, err := cs.volumeInfo(ctx, ref)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "querying expanded zvol: %v", err)
+		return nil, err
 	}
-	if !info.Exists || info.SizeBytes < uint64(capacity) {
-		return nil, status.Error(codes.Internal, "expanded zvol capacity is not yet available")
+	if !exists || size < uint64(capacity) {
+		return nil, status.Error(codes.Internal, "expanded volume capacity is not yet available")
 	}
 	return &csi.ControllerExpandVolumeResponse{
-		CapacityBytes: int64(info.SizeBytes),
+		CapacityBytes: int64(size),
 		// The filesystem still has to grow on the node.
 		NodeExpansionRequired: true,
 	}, nil
 }
 
-// Snapshot ids are "<volume_id>@<snap>" — with the id's ':' separators turned
-// back into '/', directly the zfs name.
-func (cs *ControllerServer) parseSnapshotID(id string) (dataset, snap string, err error) {
+// Snapshot ids are "<volume_id>@<snap>" — for a zvol, with the id's ':'
+// separators turned back into '/', directly the zfs name; for a thin LV, the
+// snapshot is the LV <snap> in the volume's VG. Imported volumes have none.
+func (cs *ControllerServer) parseSnapshotID(id string) (ref *volumeRef, snap string, err error) {
 	vol, snap, ok := strings.Cut(id, "@")
 	if !ok || checkVolumeName(snap) != nil {
-		return "", "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
+		return nil, "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
 	}
-	dataset, err = datasetFromID(vol)
-	if err != nil {
-		return "", "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
+	ref, err = cs.resolveVolumeID(vol)
+	if err != nil || ref.imported {
+		return nil, "", status.Errorf(codes.InvalidArgument, "invalid snapshot id %q", id)
 	}
-	return dataset, snap, nil
+	return ref, snap, nil
+}
+
+func newSnapshotResponse(vol, name string) *csi.CreateSnapshotResponse {
+	return &csi.CreateSnapshotResponse{Snapshot: &csi.Snapshot{
+		SnapshotId:     vol + "@" + name,
+		SourceVolumeId: vol,
+		CreationTime:   timestamppb.Now(),
+		ReadyToUse:     true,
+	}}
 }
 
 func (cs *ControllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateSnapshotRequest) (*csi.CreateSnapshotResponse, error) {
@@ -633,6 +705,12 @@ func (cs *ControllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateS
 	}
 	if err := checkVolumeName(name); err != nil {
 		return nil, err
+	}
+	if ref.lv != "" {
+		if err := cs.createThinSnapshot(ctx, vol, ref, name); err != nil {
+			return nil, err
+		}
+		return newSnapshotResponse(vol, name), nil
 	}
 	stream, err := cs.helper.SnapshotCreate(ctx, &helperpb.SnapshotCreate{
 		Dataset: ref.dataset, Snap: name,
@@ -652,26 +730,27 @@ func (cs *ControllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateS
 			return nil, res.Err("snapshotting " + vol)
 		}
 	}
-	return &csi.CreateSnapshotResponse{Snapshot: &csi.Snapshot{
-		SnapshotId:     vol + "@" + name,
-		SourceVolumeId: vol,
-		CreationTime:   timestamppb.Now(),
-		ReadyToUse:     true,
-	}}, nil
+	return newSnapshotResponse(vol, name), nil
 }
 
 func (cs *ControllerServer) DeleteSnapshot(ctx context.Context, req *csi.DeleteSnapshotRequest) (*csi.DeleteSnapshotResponse, error) {
 	if req.GetSnapshotId() == "" {
 		return nil, status.Error(codes.InvalidArgument, "snapshot id is required")
 	}
-	dataset, snap, err := cs.parseSnapshotID(req.GetSnapshotId())
+	ref, snap, err := cs.parseSnapshotID(req.GetSnapshotId())
 	if err != nil {
 		// A malformed id can never have been created here — per CSI,
 		// deleting a snapshot that does not exist succeeds.
 		return &csi.DeleteSnapshotResponse{}, nil
 	}
+	if ref.lv != "" {
+		if err := cs.deleteThinSnapshot(ctx, ref, snap); err != nil {
+			return nil, err
+		}
+		return &csi.DeleteSnapshotResponse{}, nil
+	}
 	stream, err := cs.helper.SnapshotDestroy(ctx, &helperpb.SnapshotDestroy{
-		Dataset: dataset, Snap: snap,
+		Dataset: ref.dataset, Snap: snap,
 	})
 	res, err := helper.RunTask("SnapshotDestroy", stream, err)
 	if err != nil {
@@ -696,11 +775,11 @@ func (cs *ControllerServer) ValidateVolumeCapabilities(ctx context.Context, req 
 	if err != nil {
 		return nil, err
 	}
-	info, err := cs.helper.ZvolInfo(ctx, &helperpb.ZvolInfo{Dataset: ref.dataset})
+	exists, _, _, err := cs.volumeInfo(ctx, ref)
 	if err != nil {
-		return nil, status.Errorf(codes.Unavailable, "querying zvol: %v", err)
+		return nil, err
 	}
-	if !info.Exists {
+	if !exists {
 		return nil, status.Errorf(codes.NotFound, "volume %s not found", req.GetVolumeId())
 	}
 	if len(req.GetVolumeCapabilities()) == 0 {

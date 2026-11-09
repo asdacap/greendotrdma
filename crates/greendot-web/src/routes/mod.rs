@@ -401,6 +401,8 @@ pub(crate) mod testutil {
             lv_shrink, LvShrinkStream, pb::LvShrink;
             lv_rename, LvRenameStream, pb::LvRename;
             lv_delete, LvDeleteStream, pb::LvDelete;
+            lv_thin_snapshot, LvThinSnapshotStream, pb::LvThinSnapshot;
+            lv_thin_clone, LvThinCloneStream, pb::LvThinClone;
             reconcile, ReconcileStream, pb::Reconcile;
             rxe_add, RxeAddStream, pb::RxeAdd;
             enable_roce, EnableRoceStream, pb::EnableRoce;
@@ -430,6 +432,7 @@ pub(crate) mod testutil {
             nic_rdma_advice, pb::Empty, pb::NicRdmaAdviceReply;
             reconcile_dry_run, pb::Empty, pb::ReconcileDryRunReply;
             zvol_info, pb::ZvolInfo, pb::ZvolInfoReply;
+            lv_info, pb::LvInfo, pb::LvInfoReply;
             pipe_access_report, pb::Empty, pb::PipeAccessReportReply;
             csi_attachment, pb::CsiNvmeDelete, pb::CsiAttachmentReply;
         }

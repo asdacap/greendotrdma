@@ -22,8 +22,10 @@ import (
 func main() {
 	var (
 		attachmentID = flag.String("attachment-id", "", "immutable direct test attachment generation (publish/unpublish)")
-		action       = flag.String("action", "", "create|publish|unpublish|delete|expand|node-stage|node-publish|node-unpublish|node-unstage|node-expand")
+		action       = flag.String("action", "", "create|publish|unpublish|delete|expand|snapshot|restore|delete-snapshot|node-stage|node-publish|node-unpublish|node-unstage|node-expand")
 		volume       = flag.String("volume", "", "volume id")
+		snapshot     = flag.String("snapshot", "", "snapshot name (snapshot/restore/delete-snapshot)")
+		source       = flag.String("source", "", "snapshotted volume id (restore)")
 		size         = flag.Int64("size", 64<<20, "capacity bytes (create/expand)")
 		hostnqn      = flag.String("hostnqn", "", "node host NQN (publish/unpublish/node-stage)")
 
@@ -44,7 +46,10 @@ func main() {
 		sshKey    = flag.String("ssh-key", "", "SSH private key path")
 		sshKnown  = flag.String("ssh-known-hosts", "", "pinned known_hosts path")
 		sshCmd    = flag.String("ssh-command", "", "remote pipe command")
-		dataset   = flag.String("dataset-parent", "tank/csi", "parent dataset")
+		backend   = flag.String("backend", "zfs", "zfs or lvm-thin")
+		dataset   = flag.String("dataset-parent", "tank/csi", "parent dataset (zfs)")
+		vg        = flag.String("volume-group", "vg0", "volume group (lvm-thin)")
+		thinPool  = flag.String("thin-pool", "pool0", "thin pool (lvm-thin)")
 		traddr    = flag.String("traddr", "", "target data address")
 		trsvcid   = flag.Uint("trsvcid", 4421, "CSI port service id")
 		transport = flag.String("transport", "rdma", "rdma or tcp")
@@ -118,11 +123,23 @@ func main() {
 	}
 
 	// The test script addresses volumes by bare leaf name; managed ids are
-	// dataset paths with ':' separators, so qualify with -dataset-parent
-	// (which in a real deployment is the StorageClass's datasetParent).
-	volID := *volume
-	if *volume != "" && !strings.Contains(*volume, ":") {
-		volID = strings.ReplaceAll(*dataset, "/", ":") + ":" + *volume
+	// dataset paths with ':' separators (or lvm1-<vg>:<lv>), so qualify with
+	// -dataset-parent or -volume-group (which in a real deployment come from
+	// the StorageClass).
+	qualify := func(name string) string {
+		switch {
+		case name == "" || strings.Contains(name, ":"):
+			return name
+		case *backend == "lvm-thin":
+			return "lvm1-" + *vg + ":" + name
+		default:
+			return strings.ReplaceAll(*dataset, "/", ":") + ":" + name
+		}
+	}
+	volID := qualify(*volume)
+	params := map[string]string{"datasetParent": *dataset}
+	if *backend == "lvm-thin" {
+		params = map[string]string{"backend": "lvm-thin", "volumeGroup": *vg, "thinPool": *thinPool}
 	}
 
 	caps := []*csi.VolumeCapability{{
@@ -133,13 +150,19 @@ func main() {
 	}}
 	ctx := context.Background()
 	switch *action {
-	case "create":
-		resp, err := cs.CreateVolume(ctx, &csi.CreateVolumeRequest{
+	case "create", "restore":
+		req := &csi.CreateVolumeRequest{
 			Name:               *volume,
-			Parameters:         map[string]string{"datasetParent": *dataset},
+			Parameters:         params,
 			CapacityRange:      &csi.CapacityRange{RequiredBytes: *size},
 			VolumeCapabilities: caps,
-		})
+		}
+		if *action == "restore" {
+			req.VolumeContentSource = &csi.VolumeContentSource{Type: &csi.VolumeContentSource_Snapshot{
+				Snapshot: &csi.VolumeContentSource_SnapshotSource{SnapshotId: qualify(*source) + "@" + *snapshot},
+			}}
+		}
+		resp, err := cs.CreateVolume(ctx, req)
 		if err != nil {
 			klog.Fatal(err)
 		}
@@ -168,6 +191,16 @@ func main() {
 		}
 	case "delete":
 		if _, err := cs.DeleteVolume(ctx, &csi.DeleteVolumeRequest{VolumeId: volID}); err != nil {
+			klog.Fatal(err)
+		}
+	case "snapshot":
+		resp, err := cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: volID, Name: *snapshot})
+		if err != nil {
+			klog.Fatal(err)
+		}
+		fmt.Printf("snapshotId=%s\n", resp.Snapshot.SnapshotId)
+	case "delete-snapshot":
+		if _, err := cs.DeleteSnapshot(ctx, &csi.DeleteSnapshotRequest{SnapshotId: volID + "@" + *snapshot}); err != nil {
 			klog.Fatal(err)
 		}
 	default:

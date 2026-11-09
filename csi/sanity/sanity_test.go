@@ -1,13 +1,14 @@
 //go:build sanity
 
 // csi-sanity conformance for the controller service, backed by a stateful
-// in-process fake helper (no SSH, no daemon). Run via `make sanity`, which
-// skips:
+// in-process fake helper (no SSH, no daemon). Run via `make sanity`, once per
+// backend (-backend=zfs, -backend=lvm-thin), which skips:
 //   - 'Node Service' — needs real fabrics/mounts; the NixOS VM e2e covers it;
-//   - 'different source volume ID' — snapshot ids here are <vol>@<snap>, so
-//     same-name-different-source snapshots are distinct zfs objects and the
-//     cluster-unique-name conflict sanity expects cannot be detected without
-//     a list rpc (documented design gap);
+//   - 'different source volume ID' (zfs only) — snapshot ids here are
+//     <vol>@<snap>, so same-name-different-source snapshots are distinct zfs
+//     objects and the cluster-unique-name conflict sanity expects cannot be
+//     detected without a list rpc (documented design gap). A thin-LVM
+//     snapshot is a VG-wide LV name, so lvm-thin detects it;
 //   - 'should fail when the node does not exist' — a node IS its host NQN
 //     here; any well-formed NQN is a grantable identity, there is no node
 //     registry to be absent from.
@@ -15,6 +16,7 @@ package sanity_test
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
 	"path/filepath"
@@ -28,6 +30,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/kubernetes-csi/csi-test/v5/pkg/sanity"
 	"google.golang.org/grpc"
+	"google.golang.org/protobuf/proto"
 )
 
 type fakeTaskStream struct {
@@ -55,13 +58,16 @@ func taskResult(errMsg string) (grpc.ServerStreamingClient[helperpb.TaskEvent], 
 	}}, nil
 }
 
-// statefulHelper emulates the daemon's zvol/snapshot/export semantics —
+var backend = flag.String("backend", "zfs", "volume backend under test: zfs or lvm-thin")
+
+// statefulHelper emulates the daemon's zvol/LV/snapshot/export semantics —
 // including the error strings the controller's idempotency mapping keys on.
 type statefulHelper struct {
 	helperpb.HelperClient
 	mu      sync.Mutex
 	zvols   map[string]uint64
 	snaps   map[string]bool
+	lvs     map[string]*helperpb.LvInfoReply // "vg/lv"
 	exports map[string]bool
 }
 
@@ -69,8 +75,104 @@ func newStateful() *statefulHelper {
 	return &statefulHelper{
 		zvols:   map[string]uint64{},
 		snaps:   map[string]bool{},
+		lvs:     map[string]*helperpb.LvInfoReply{},
 		exports: map[string]bool{},
 	}
+}
+
+// deviceExists resolves an export's device path against the emulated zvols
+// (/dev/zvol/<dataset>) and LVs (/dev/<vg>/<lv>).
+func (h *statefulHelper) deviceExists(path string) bool {
+	if dataset, ok := strings.CutPrefix(path, "/dev/zvol/"); ok {
+		_, exists := h.zvols[dataset]
+		return exists
+	}
+	return h.lvs[strings.TrimPrefix(path, "/dev/")] != nil
+}
+
+func lvMissing(vg, lv string) string {
+	return fmt.Sprintf("Failed to find logical volume \"%s/%s\"", vg, lv)
+}
+
+func lvExists(vg, lv string) string {
+	return fmt.Sprintf("Logical Volume \"%s\" already exists in volume group \"%s\"", lv, vg)
+}
+
+func (h *statefulHelper) LvInfo(ctx context.Context, in *helperpb.LvInfo, _ ...grpc.CallOption) (*helperpb.LvInfoReply, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if lv := h.lvs[in.Vg+"/"+in.Name]; lv != nil {
+		return proto.Clone(lv).(*helperpb.LvInfoReply), nil
+	}
+	return &helperpb.LvInfoReply{}, nil
+}
+
+func (h *statefulHelper) ThinLvCreate(ctx context.Context, in *helperpb.ThinLvCreate, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lvs[in.Vg+"/"+in.Name] != nil {
+		return taskResult(lvExists(in.Vg, in.Name))
+	}
+	h.lvs[in.Vg+"/"+in.Name] = &helperpb.LvInfoReply{Exists: true, SizeBytes: in.VirtualSize, Pool: in.Pool, Active: true}
+	return taskResult("")
+}
+
+// LvDelete mirrors thin LVM: snapshots survive their origin, which then
+// reads as empty.
+func (h *statefulHelper) LvDelete(ctx context.Context, in *helperpb.LvDelete, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lvs[in.Vg+"/"+in.Name] == nil {
+		return taskResult(lvMissing(in.Vg, in.Name))
+	}
+	delete(h.lvs, in.Vg+"/"+in.Name)
+	for key, lv := range h.lvs {
+		if strings.HasPrefix(key, in.Vg+"/") && lv.Origin == in.Name {
+			lv.Origin = ""
+		}
+	}
+	return taskResult("")
+}
+
+func (h *statefulHelper) LvResize(ctx context.Context, in *helperpb.LvResize, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	lv := h.lvs[in.Vg+"/"+in.Name]
+	if lv == nil {
+		return taskResult(lvMissing(in.Vg, in.Name))
+	}
+	lv.SizeBytes = max(lv.SizeBytes, in.NewSize)
+	return taskResult("")
+}
+
+func (h *statefulHelper) LvThinSnapshot(ctx context.Context, in *helperpb.LvThinSnapshot, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	origin := h.lvs[in.Vg+"/"+in.Origin]
+	if origin == nil {
+		return taskResult(lvMissing(in.Vg, in.Origin))
+	}
+	if h.lvs[in.Vg+"/"+in.Name] != nil {
+		return taskResult(lvExists(in.Vg, in.Name))
+	}
+	h.lvs[in.Vg+"/"+in.Name] = &helperpb.LvInfoReply{Exists: true, SizeBytes: origin.SizeBytes, Pool: origin.Pool, Origin: in.Origin}
+	return taskResult("")
+}
+
+func (h *statefulHelper) LvThinClone(ctx context.Context, in *helperpb.LvThinClone, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	snap := h.lvs[in.Vg+"/"+in.Snap]
+	if snap == nil {
+		return taskResult(lvMissing(in.Vg, in.Snap))
+	}
+	if h.lvs[in.Vg+"/"+in.Target] != nil {
+		return taskResult(lvExists(in.Vg, in.Target))
+	}
+	h.lvs[in.Vg+"/"+in.Target] = &helperpb.LvInfoReply{
+		Exists: true, SizeBytes: max(snap.SizeBytes, in.GetNewSize()), Pool: snap.Pool, Origin: in.Snap, Active: true,
+	}
+	return taskResult("")
 }
 
 func (h *statefulHelper) ZvolInfo(ctx context.Context, in *helperpb.ZvolInfo, _ ...grpc.CallOption) (*helperpb.ZvolInfoReply, error) {
@@ -144,8 +246,7 @@ func (h *statefulHelper) SnapshotDestroy(ctx context.Context, in *helperpb.Snaps
 func (h *statefulHelper) CsiPublish(ctx context.Context, in *helperpb.CsiPublish, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	dataset := strings.TrimPrefix(in.Export.DevicePath, "/dev/zvol/")
-	if _, ok := h.zvols[dataset]; !ok {
+	if !h.deviceExists(in.Export.DevicePath) {
 		return taskResult("backing volume does not exist")
 	}
 	h.exports[in.Export.Nqn] = true
@@ -162,7 +263,7 @@ func (h *statefulHelper) CsiUnpublish(ctx context.Context, in *helperpb.CsiUnpub
 func (h *statefulHelper) CsiNvmeApply(ctx context.Context, in *helperpb.CsiNvmeApply, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if _, ok := h.zvols[strings.TrimPrefix(in.DevicePath, "/dev/zvol/")]; !ok {
+	if !h.deviceExists(in.DevicePath) {
 		return taskResult("backing volume does not exist")
 	}
 	h.exports[in.Nqn] = true
@@ -192,8 +293,18 @@ func (h *statefulHelper) CsiHostRevoke(ctx context.Context, in *helperpb.CsiHost
 func (h *statefulHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVolumeExpand, _ ...grpc.CallOption) (grpc.ServerStreamingClient[helperpb.TaskEvent], error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	// A managed NQN token is the dataset path with ':' separators.
-	dataset := strings.ReplaceAll(strings.TrimPrefix(in.Nqn, driver.CSINQNPrefix), ":", "/")
+	// A managed NQN token is lvm1-<vg>:<lv>, or the dataset path with ':'
+	// separators.
+	token := strings.TrimPrefix(in.Nqn, driver.CSINQNPrefix)
+	if rest, ok := strings.CutPrefix(token, "lvm1-"); ok {
+		lv := h.lvs[strings.Replace(rest, ":", "/", 1)]
+		if lv == nil {
+			return taskResult("namespace is not backed by the managed volume")
+		}
+		lv.SizeBytes = max(lv.SizeBytes, in.NewSize)
+		return taskResult("")
+	}
+	dataset := strings.ReplaceAll(token, ":", "/")
 	if _, ok := h.zvols[dataset]; !ok {
 		return taskResult("subsystem has no zvol-backed namespace")
 	}
@@ -202,11 +313,14 @@ func (h *statefulHelper) CsiVolumeExpand(ctx context.Context, in *helperpb.CsiVo
 }
 
 // nqnIDs makes sanity's generated node ids valid host NQNs (the controller
-// refuses anything else — fencing needs a real identity).
-type nqnIDs struct{}
+// refuses anything else — fencing needs a real identity), and its volume ids
+// valid ids of the backend under test.
+type nqnIDs struct{ volumePrefix string }
 
-func (nqnIDs) GenerateUniqueValidVolumeID() string { return "tank:csi:sanity-" + uuid.NewString() }
-func (nqnIDs) GenerateInvalidVolumeID() string     { return "../invalid" }
+func (ids nqnIDs) GenerateUniqueValidVolumeID() string {
+	return ids.volumePrefix + "sanity-" + uuid.NewString()
+}
+func (nqnIDs) GenerateInvalidVolumeID() string { return "../invalid" }
 func (nqnIDs) GenerateUniqueValidNodeID() string {
 	return "nqn.2014-08.org.nvmexpress:uuid:" + uuid.NewString()
 }
@@ -232,9 +346,17 @@ func TestSanity(t *testing.T) {
 
 	cfg := sanity.NewTestConfig()
 	cfg.Address = endpoint
-	cfg.IDGen = nqnIDs{}
 	// The pool is a StorageClass choice; sanity's CreateVolume calls carry it
 	// the same way a real class would.
-	cfg.TestVolumeParameters = map[string]string{"datasetParent": "tank/csi"}
+	switch *backend {
+	case "zfs":
+		cfg.IDGen = nqnIDs{volumePrefix: "tank:csi:"}
+		cfg.TestVolumeParameters = map[string]string{"datasetParent": "tank/csi"}
+	case "lvm-thin":
+		cfg.IDGen = nqnIDs{volumePrefix: "lvm1-vg0:"}
+		cfg.TestVolumeParameters = map[string]string{"backend": "lvm-thin", "volumeGroup": "vg0", "thinPool": "pool0"}
+	default:
+		t.Fatalf("unknown -backend %q", *backend)
+	}
 	sanity.Test(t, cfg)
 }
