@@ -27,6 +27,11 @@ rules:
   - apiGroups: [""]
     resources: [nodes]
     verbs: [get, list, watch]
+  # csi-resizer (v1.12) watches Pods to tell whether a volume is in use;
+  # without this its informer never syncs, and no PVC is ever expanded.
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch]
   - apiGroups: [storage.k8s.io]
     resources: [storageclasses]
     verbs: [get, list, watch]
