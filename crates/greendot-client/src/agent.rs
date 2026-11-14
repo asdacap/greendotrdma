@@ -63,8 +63,14 @@ pub enum AgentOp {
 }
 
 /// Executes one op against the real system. Shared verbatim by the agent
-/// loop and the run-as-root fallback.
-pub fn execute(op: &AgentOp, paths: &PrivPaths, config_dir: &Path) -> Result<Value> {
+/// loop and the run-as-root fallback. `confined` (a non-root agent peer)
+/// keeps NFS mountpoints under [`privops::MANAGED_MOUNT_ROOT`].
+pub fn execute(
+    op: &AgentOp,
+    paths: &PrivPaths,
+    config_dir: &Path,
+    confined: bool,
+) -> Result<Value> {
     match op {
         AgentOp::Ping => Ok(json!({})),
         AgentOp::EnsureHostnqn => {
@@ -92,11 +98,11 @@ pub fn execute(op: &AgentOp, paths: &PrivPaths, config_dir: &Path) -> Result<Val
             rdma,
             port,
         } => {
-            privops::mount_nfs(host, path, mountpoint, *rdma, *port)?;
+            privops::mount_nfs(host, path, mountpoint, *rdma, *port, confined)?;
             Ok(json!({ "mountpoint": mountpoint }))
         }
         AgentOp::UnmountNfs { mountpoint } => {
-            privops::unmount_nfs(mountpoint)?;
+            privops::unmount_nfs(mountpoint, confined)?;
             Ok(json!({}))
         }
         AgentOp::AddTarget { entry } => {
@@ -154,8 +160,8 @@ pub fn serve(opts: &AgentOpts) -> Result<()> {
                 continue;
             }
         };
-        match peer_uid(&stream) {
-            Ok(uid) if peer_allowed(uid, opts.allow_uid, gid, user_groups) => {}
+        let uid = match peer_uid(&stream) {
+            Ok(uid) if peer_allowed(uid, opts.allow_uid, gid, user_groups) => uid,
             Ok(uid) => {
                 eprintln!("rejecting connection from unauthorized uid {uid}");
                 continue;
@@ -164,8 +170,8 @@ pub fn serve(opts: &AgentOpts) -> Result<()> {
                 eprintln!("could not read peer credentials: {e}");
                 continue;
             }
-        }
-        if let Err(e) = handle(stream, &opts.paths, &opts.config_dir) {
+        };
+        if let Err(e) = handle(stream, &opts.paths, &opts.config_dir, uid != 0) {
             eprintln!("request failed: {e:#}");
         }
     }
@@ -175,12 +181,12 @@ pub fn serve(opts: &AgentOpts) -> Result<()> {
 /// One request line, one reply line. Ops run synchronously — connects/mounts
 /// are seconds-long and the CLI waits anyway; a wedged NFS server can stall
 /// the agent for other callers, which is acceptable for a per-host tool.
-fn handle(stream: UnixStream, paths: &PrivPaths, config_dir: &Path) -> Result<()> {
+fn handle(stream: UnixStream, paths: &PrivPaths, config_dir: &Path, confined: bool) -> Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?).take(MAX_LINE as u64);
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let reply = match serde_json::from_str::<AgentOp>(&line) {
-        Ok(op) => match execute(&op, paths, config_dir) {
+        Ok(op) => match execute(&op, paths, config_dir, confined) {
             Ok(value) => ok_reply(value),
             Err(e) => json!({ "ok": false, "error": format!("{e:#}") }),
         },
@@ -262,7 +268,7 @@ impl Broker {
 
     pub fn call(&self, op: &AgentOp) -> Result<Value> {
         match self {
-            Broker::Direct { paths, config_dir } => execute(op, paths, config_dir),
+            Broker::Direct { paths, config_dir } => execute(op, paths, config_dir, false),
             Broker::Agent(socket) => {
                 let mut stream = UnixStream::connect(socket)
                     .with_context(|| format!("connecting {}", socket.display()))?;
