@@ -74,7 +74,7 @@ impl ExportProtocol for Iscsi {
                                         transports.push(label);
                                     }
                                 }
-                                let iqn = e.iqn();
+                                let iqn = e.iqn().map(|n| n.to_string()).unwrap_or_default();
                                 ExportRow {
                                     id: e.id,
                                     name: e.name.clone(),
@@ -183,7 +183,7 @@ fn client_instructions(e: &crate::state::IscsiExport, addrs: &[IpAddr]) -> Vec<C
         .iter()
         .find(|a| !a.is_unspecified())
         .map_or_else(|| "<server-ip>".to_owned(), ToString::to_string);
-    let iqn = e.iqn();
+    let iqn = e.iqn().map(|n| n.to_string()).unwrap_or_default();
     let mut cmds = Vec::new();
     if e.want_rdma {
         cmds.push(ClientCmd {

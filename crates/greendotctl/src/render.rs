@@ -31,23 +31,22 @@ const TRSVCID: u16 = 4420;
 
 /// Renders the desired nvmet state from the enabled NVMe-oF exports. Each export
 /// listens on its pinned interfaces' current IPs (resolved via `pci_addrs`), or
-/// `default_listen` when it pins none. `reserved_ports` holds the ids of
-/// foreign nvmet ports (see [`foreign_port_ids`]); the rendered ports skip
-/// them so the apply never re-addresses a foreign port.
+/// `default_listen` when it pins none. `actual` is the live nvmet tree, which
+/// keeps port ids stable (see [`assign_port_ids`]).
 pub fn render_nvmet(
     nvme: &[NvmeExport],
     default_listen: IpAddr,
     pci_addrs: &HashMap<String, Vec<IpAddr>>,
-    reserved_ports: &BTreeSet<u16>,
+    actual: &ActualNvmet,
 ) -> NvmetDesired {
     let enabled = || {
         nvme.iter()
-            .filter(|e| e.enabled && greendot_proto::DevicePath::new(&e.device_path).is_ok())
+            .filter(|e| e.enabled && nvme_render_error(e).is_none())
     };
     let subsystems: Vec<NvmetSubsysSpec> = enabled()
         .filter_map(|e| {
             Some(NvmetSubsysSpec {
-                nqn: e.nqn(),
+                nqn: e.nqn()?,
                 allow_any_host: e.allow_any_host,
                 allowed_hosts: e
                     .initiators
@@ -68,23 +67,21 @@ pub fn render_nvmet(
     let mut net: BTreeMap<(Transport, IpAddr), Vec<Nqn>> = BTreeMap::new();
     let mut loop_subs: Vec<Nqn> = Vec::new();
     for e in enabled() {
+        let Some(nqn) = e.nqn() else { continue };
         let addrs = listen_addrs(&e.interfaces, default_listen, pci_addrs);
         for (want, trtype) in [(e.want_rdma, Transport::Rdma), (e.want_tcp, Transport::Tcp)] {
             if want {
                 for a in &addrs {
-                    net.entry((trtype, *a)).or_default().push(e.nqn());
+                    net.entry((trtype, *a)).or_default().push(nqn.clone());
                 }
             }
         }
         if e.want_loop {
-            loop_subs.push(e.nqn());
+            loop_subs.push(nqn);
         }
     }
 
-    // Deterministic port ids from the sorted groups, skipping ids held by
-    // foreign ports: the web drift pre-check and the CLI apply render the same
-    // live input independently, so the ids must agree. The loop port (if any)
-    // comes last.
+    // One port per (trtype, address) group; the loop port (if any) comes last.
     let mut ports: Vec<NvmetPortSpec> = net
         .into_iter()
         .map(|((trtype, traddr), subsystems)| NvmetPortSpec {
@@ -104,19 +101,55 @@ pub fn render_nvmet(
             subsystems: loop_subs,
         });
     }
-    let mut next: u16 = 1;
-    for p in ports.iter_mut() {
-        while reserved_ports.contains(&next) {
-            next += 1;
-        }
-        p.id = next;
-        next += 1;
-    }
+    assign_port_ids(&mut ports, actual);
     NvmetDesired { subsystems, ports }
 }
 
+/// Gives each rendered port its id. A port already live at the same transport
+/// and address keeps its id: renumbering re-addresses live ports, dropping
+/// their connected hosts, and can bind an address another port still holds
+/// (EADDRINUSE). A new address takes the lowest id no live port uses, so the
+/// apply never re-addresses a port — foreign ones ([`foreign_port_ids`])
+/// included.
+fn assign_port_ids(ports: &mut [NvmetPortSpec], actual: &ActualNvmet) {
+    let reserved = foreign_port_ids(actual);
+    // A loop port binds no address, so its trtype alone identifies it.
+    let key = |trtype: &str, traddr: String, trsvcid: String| match trtype {
+        "loop" => (trtype.to_owned(), String::new(), String::new()),
+        _ => (trtype.to_owned(), traddr, trsvcid),
+    };
+    let live: HashMap<_, u16> = actual
+        .ports
+        .iter()
+        .filter(|p| !reserved.contains(&p.id))
+        .map(|p| (key(&p.trtype, p.traddr.clone(), p.trsvcid.clone()), p.id))
+        .collect();
+    for p in ports.iter_mut() {
+        let spec_key = key(
+            p.trtype.as_str(),
+            p.traddr.to_string(),
+            p.trsvcid.to_string(),
+        );
+        if let Some(&id) = live.get(&spec_key) {
+            p.id = id;
+        }
+    }
+    let mut taken: BTreeSet<u16> = reserved
+        .into_iter()
+        .chain(actual.ports.iter().map(|p| p.id))
+        .collect();
+    let mut next: u16 = 1;
+    for p in ports.iter_mut().filter(|p| p.id == 0) {
+        while taken.contains(&next) {
+            next += 1;
+        }
+        p.id = next;
+        taken.insert(next);
+    }
+}
+
 /// Port ids held by foreign nvmet ports — ports whose subsystem links are all
-/// non-greendot. [`render_nvmet`] skips these ids so a foreign port at a
+/// non-greendot. [`assign_port_ids`] skips these ids so a foreign port at a
 /// colliding id is neither re-addressed by the apply nor read as perpetual
 /// drift. A port with no links at all is treated as reclaimable — except the
 /// dedicated CSI port, whose id is always reserved: it sits legitimately empty
@@ -192,10 +225,14 @@ pub fn render_lio(
 ) -> LioDesired {
     let mut backstores = Vec::new();
     let mut targets = Vec::new();
-    for e in iscsi.iter().filter(|e| e.enabled) {
-        let (Ok(name), Ok(device_path)) = (
+    for e in iscsi
+        .iter()
+        .filter(|e| e.enabled && iscsi_render_error(e).is_none())
+    {
+        let (Ok(name), Ok(device_path), Some(iqn)) = (
             greendot_proto::BackstoreName::new(&e.name),
             greendot_proto::DevicePath::new(&e.device_path),
+            e.iqn(),
         ) else {
             continue;
         };
@@ -223,7 +260,7 @@ pub fn render_lio(
             }
         }
         targets.push(LioTargetSpec {
-            iqn: e.iqn(),
+            iqn,
             enabled: true,
             demo_mode: e.allow_any_host,
             luns: vec![LioLunSpec {
@@ -497,7 +534,7 @@ pub fn lio_satisfied(d: &LioDesired, a: &ActualLio) -> bool {
     true
 }
 
-fn fmt_addr(addr: IpAddr, port: u16) -> String {
+pub(crate) fn fmt_addr(addr: IpAddr, port: u16) -> String {
     match addr {
         IpAddr::V4(v4) => format!("{v4}:{port}"),
         IpAddr::V6(v6) => format!("[{v6}]:{port}"),
@@ -565,7 +602,7 @@ mod tests {
             &[nvme_export()],
             "10.0.0.5".parse().unwrap(),
             &HashMap::new(),
-            &BTreeSet::new(),
+            &ActualNvmet::default(),
         );
         assert_eq!(d.subsystems.len(), 1);
         assert_eq!(d.subsystems[0].nqn.as_str(), "nqn.2026-06.io.greendot:vm1");
@@ -585,7 +622,12 @@ mod tests {
     #[test]
     fn nvmet_satisfied_detects_match_and_drift() {
         let listen: IpAddr = "10.0.0.5".parse().unwrap();
-        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &BTreeSet::new());
+        let d = render_nvmet(
+            &[nvme_export()],
+            listen,
+            &HashMap::new(),
+            &ActualNvmet::default(),
+        );
         let actual = ActualNvmet {
             subsystems: vec![Subsys {
                 nqn: "nqn.2026-06.io.greendot:vm1".into(),
@@ -667,6 +709,15 @@ mod tests {
             )
             .is_empty()
         );
+        // A link-local IPv6 address has no scope id to bind with — skipped.
+        let with_link_local = HashMap::from([(
+            "0000:00:10.0".to_owned(),
+            vec!["fe80::1".parse().unwrap(), "fd00::1".parse().unwrap()],
+        )]);
+        assert_eq!(
+            listen_addrs(&["pci:0000:00:10.0".into()], default, &with_link_local),
+            vec!["fd00::1".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[test]
@@ -687,7 +738,7 @@ mod tests {
             &[pin(1, "a", &["pci:0000:00:10.0"])],
             default,
             &pci,
-            &BTreeSet::new(),
+            &ActualNvmet::default(),
         );
         assert_eq!(d.ports.len(), 1);
         assert_eq!(d.ports[0].trtype, Transport::Rdma);
@@ -702,7 +753,7 @@ mod tests {
             ],
             default,
             &pci,
-            &BTreeSet::new(),
+            &ActualNvmet::default(),
         );
         assert_eq!(shared.ports.len(), 1);
         assert_eq!(shared.ports[0].subsystems.len(), 2);
@@ -712,7 +763,7 @@ mod tests {
             &[pin(1, "a", &["pci:0000:00:10.0", "pci:0000:00:11.0"])],
             default,
             &pci,
-            &BTreeSet::new(),
+            &ActualNvmet::default(),
         );
         let addrs: BTreeSet<String> = multi.ports.iter().map(|p| p.traddr.to_string()).collect();
         assert_eq!(
@@ -726,7 +777,7 @@ mod tests {
             &[pin(1, "a", &["pci:0000:00:99.0"])],
             default,
             &pci,
-            &BTreeSet::new(),
+            &ActualNvmet::default(),
         );
         assert!(unresolved.ports.is_empty());
         assert_eq!(unresolved.subsystems.len(), 1);
@@ -843,7 +894,7 @@ mod tests {
         // reserved), so rendered ids start at 2…
         let reserved = foreign_port_ids(&actual);
         assert_eq!(reserved, BTreeSet::from([1, greendot_proto::CSI_PORT_ID]));
-        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &reserved);
+        let d = render_nvmet(&[nvme_export()], listen, &HashMap::new(), &actual);
         let ids: Vec<u16> = d.ports.iter().map(|p| p.id).collect();
         assert_eq!(ids, vec![2, 3]);
         // …and a satisfied tree with the foreign port present stays satisfied.
@@ -892,6 +943,83 @@ mod tests {
             foreign_port_ids(&unlinked),
             BTreeSet::from([greendot_proto::CSI_PORT_ID])
         );
+    }
+
+    #[test]
+    fn port_ids_stay_stable_across_unrelated_changes() {
+        // The live tree a rendered state leaves behind.
+        let live = |d: &NvmetDesired| ActualNvmet {
+            subsystems: vec![],
+            ports: d
+                .ports
+                .iter()
+                .map(|p| Port {
+                    id: p.id,
+                    trtype: p.trtype.as_str().into(),
+                    traddr: p.traddr.to_string(),
+                    trsvcid: p.trsvcid.to_string(),
+                    subsystems: p.subsystems.iter().map(ToString::to_string).collect(),
+                })
+                .collect(),
+        };
+        let ids = |d: &NvmetDesired| -> Vec<(Transport, String, u16)> {
+            d.ports
+                .iter()
+                .map(|p| (p.trtype, p.traddr.to_string(), p.id))
+                .collect()
+        };
+        let listen: IpAddr = "10.0.0.5".parse().unwrap();
+        let none = HashMap::new();
+
+        // Enabling RDMA sorts an rdma port first, yet the live TCP port keeps id 1.
+        let tcp_only = NvmeExport {
+            want_rdma: false,
+            ..nvme_export()
+        };
+        let before = render_nvmet(
+            std::slice::from_ref(&tcp_only),
+            listen,
+            &none,
+            &ActualNvmet::default(),
+        );
+        assert_eq!(ids(&before), [(Transport::Tcp, "10.0.0.5".into(), 1)]);
+        let both = NvmeExport {
+            want_rdma: true,
+            ..tcp_only
+        };
+        let after = render_nvmet(std::slice::from_ref(&both), listen, &none, &live(&before));
+        assert_eq!(
+            ids(&after),
+            [
+                (Transport::Rdma, "10.0.0.5".into(), 2),
+                (Transport::Tcp, "10.0.0.5".into(), 1)
+            ]
+        );
+
+        // Pinned to two addresses: when the first goes away, the ports on the
+        // second keep their ids instead of shifting onto ids still bound.
+        let pinned = NvmeExport {
+            interfaces: vec!["pci:0000:00:10.0".into()],
+            ..both
+        };
+        let addrs = |ips: &[&str]| {
+            HashMap::from([(
+                "0000:00:10.0".to_owned(),
+                ips.iter().map(|ip| ip.parse().unwrap()).collect(),
+            )])
+        };
+        let first = render_nvmet(
+            std::slice::from_ref(&pinned),
+            listen,
+            &addrs(&["10.0.0.4", "10.0.0.6"]),
+            &ActualNvmet::default(),
+        );
+        let second = render_nvmet(&[pinned], listen, &addrs(&["10.0.0.6"]), &live(&first));
+        let kept: Vec<_> = ids(&first)
+            .into_iter()
+            .filter(|(_, addr, _)| addr == "10.0.0.6")
+            .collect();
+        assert_eq!(ids(&second), kept);
     }
 
     #[test]
@@ -952,6 +1080,31 @@ mod tests {
         assert!(nvme_render_error(&nvme_export()).is_none());
         assert!(iscsi_render_error(&iscsi_export()).is_none());
         assert!(nfs_render_error(&bad_nfs).is_some());
+        // Names only a hand-edited state file can hold are reported, and the
+        // renderers skip them instead of panicking the daemon.
+        let odd_nvme = NvmeExport {
+            name: "My Vol".into(),
+            ..nvme_export()
+        };
+        let odd_iscsi = IscsiExport {
+            name: "VM_1".into(),
+            ..iscsi_export()
+        };
+        assert!(nvme_render_error(&odd_nvme).is_some());
+        assert!(iscsi_render_error(&odd_iscsi).is_some());
+        let default: IpAddr = "0.0.0.0".parse().unwrap();
+        let nvmet = render_nvmet(
+            &[odd_nvme],
+            default,
+            &HashMap::new(),
+            &ActualNvmet::default(),
+        );
+        assert!(nvmet.subsystems.is_empty() && nvmet.ports.is_empty());
+        assert!(
+            render_lio(&[odd_iscsi], default, &HashMap::new())
+                .targets
+                .is_empty()
+        );
     }
 
     #[test]

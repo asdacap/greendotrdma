@@ -9,18 +9,25 @@ pub use greendot_proto::actual::lio::*;
 
 pub fn read(root: &Path) -> ActualLio {
     let mut actual = ActualLio::default();
-    for name in dir_names(&root.join("core/iblock_0")) {
-        let dir = root.join("core/iblock_0").join(&name);
-        if !dir.is_dir() {
-            continue; // hba attribute files
+    // Each backstore sits in its own HBA (`iblock_0`, `iblock_1`, …).
+    let core = root.join("core");
+    for hba in dir_names(&core)
+        .into_iter()
+        .filter(|h| h.starts_with("iblock_"))
+    {
+        for name in dir_names(&core.join(&hba)) {
+            let dir = core.join(&hba).join(&name);
+            if !dir.is_dir() {
+                continue; // hba attribute files
+            }
+            actual.backstores.push(Backstore {
+                // `info` is authoritative on real configfs, but `control` is
+                // write-only there; we re-read what we wrote via udev_path.
+                udev_path: read_attr(&dir, "udev_path"),
+                enabled: read_attr(&dir, "enable") == "1",
+                name,
+            });
         }
-        actual.backstores.push(Backstore {
-            // `info` is authoritative on real configfs, but `control` is
-            // write-only there; we re-read what we wrote via udev_path.
-            udev_path: read_attr(&dir, "udev_path"),
-            enabled: read_attr(&dir, "enable") == "1",
-            name,
-        });
     }
     for iqn in dir_names(&root.join("iscsi")) {
         let tpg = root.join("iscsi").join(&iqn).join("tpgt_1");
@@ -35,7 +42,7 @@ pub fn read(root: &Path) -> ActualLio {
                 dir_names(&lun_dir).into_iter().filter_map(move |n| {
                     // The symlink's own name is a random rtslib alias; the
                     // backstore it maps to is the target's basename
-                    // (core/iblock_0/<name>), which is what we match on.
+                    // (core/iblock_<n>/<name>), which is what we match on.
                     let link = lun_dir.join(&n);
                     if !link.is_symlink() {
                         return None;
@@ -122,6 +129,10 @@ mod tests {
         std::fs::create_dir_all(&bs).unwrap();
         std::fs::write(bs.join("udev_path"), "/dev/zvol/tank/vm1\n").unwrap();
         std::fs::write(bs.join("enable"), "1\n").unwrap();
+        // A second backstore sits in its own HBA.
+        let bs2 = tmp.join("core/iblock_1/vm2");
+        std::fs::create_dir_all(&bs2).unwrap();
+        std::fs::write(bs2.join("udev_path"), "/dev/zvol/tank/vm2\n").unwrap();
         let tpg = tmp.join("iscsi/iqn.2026-06.io.greendot:vm1/tpgt_1");
         std::fs::create_dir_all(tpg.join("lun/lun_0")).unwrap();
         // rtslib names the LUN symlink a random alias; we match on its target.
@@ -137,11 +148,18 @@ mod tests {
         assert_eq!(
             actual,
             ActualLio {
-                backstores: vec![Backstore {
-                    name: "vm1".into(),
-                    udev_path: "/dev/zvol/tank/vm1".into(),
-                    enabled: true,
-                }],
+                backstores: vec![
+                    Backstore {
+                        name: "vm1".into(),
+                        udev_path: "/dev/zvol/tank/vm1".into(),
+                        enabled: true,
+                    },
+                    Backstore {
+                        name: "vm2".into(),
+                        udev_path: "/dev/zvol/tank/vm2".into(),
+                        enabled: false,
+                    }
+                ],
                 targets: vec![Target {
                     iqn: "iqn.2026-06.io.greendot:vm1".into(),
                     enabled: true,

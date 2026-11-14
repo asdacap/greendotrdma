@@ -355,8 +355,8 @@ pub const CSI_NQN_PREFIX: &str = "nqn.2026-06.io.greendot.csi:";
 /// never claim the port while it sits empty between CSI volumes.
 pub const CSI_PORT_ID: u16 = 61000;
 
-// ---- Desired-state documents (the helper applies NvmetDesired directly to
-// configfs; LioDesired is rendered to targetctl JSON and applied via restore) ----
+// ---- Desired-state documents (the helper applies NvmetDesired and LioDesired
+// directly to configfs) ----
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NvmetDesired {

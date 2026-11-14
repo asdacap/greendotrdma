@@ -60,7 +60,7 @@ async fn gather_connections(state: &AppState) -> ConnectionsView {
         .map(|s| {
             let export = iscsi_exports
                 .iter()
-                .find(|e| e.iqn().as_str() == s.target_iqn)
+                .find(|e| e.iqn().is_some_and(|iqn| iqn.as_str() == s.target_iqn))
                 .map_or_else(|| s.target_iqn.clone(), |e| e.name.clone());
             IscsiRow {
                 export,

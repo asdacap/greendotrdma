@@ -182,7 +182,7 @@ fn client_instructions(e: &crate::state::NvmeExport, addrs: &[IpAddr]) -> Vec<Cl
         .iter()
         .find(|a| !a.is_unspecified())
         .map_or_else(|| "<server-ip>".to_owned(), ToString::to_string);
-    let nqn = e.nqn();
+    let nqn = e.nqn().map(|n| n.to_string()).unwrap_or_default();
     // Each transport needs its own fabrics module loaded first, or the connect
     // fails with "/dev/nvme-fabrics: No such file or directory".
     [

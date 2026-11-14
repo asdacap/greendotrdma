@@ -43,9 +43,10 @@ pub struct NvmeExport {
 }
 
 impl NvmeExport {
-    pub fn nqn(&self) -> Nqn {
-        Nqn::new(format!("{OUR_NQN_PREFIX}{}", self.name))
-            .expect("validated name forms a valid NQN")
+    /// `None` when the name cannot form an NQN — only a hand-edited state file
+    /// carries one, and [`nvme_render_error`] reports it.
+    pub fn nqn(&self) -> Option<Nqn> {
+        Nqn::new(format!("{OUR_NQN_PREFIX}{}", self.name)).ok()
     }
 }
 
@@ -73,9 +74,9 @@ pub struct IscsiExport {
 }
 
 impl IscsiExport {
-    pub fn iqn(&self) -> Iqn {
-        Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name))
-            .expect("validated name forms a valid IQN")
+    /// `None` when the name cannot form an IQN (see [`NvmeExport::nqn`]).
+    pub fn iqn(&self) -> Option<Iqn> {
+        Iqn::new(format!("{OUR_IQN_PREFIX}{}", self.name)).ok()
     }
 }
 
@@ -92,7 +93,8 @@ pub fn parse_listen_iface(s: &str) -> Option<PciAddress> {
 /// current IPs, or `default` when it pins none (the unchanged behavior). A
 /// selector that resolves to no current IP — link down, no DHCP lease yet, or an
 /// unknown scheme — contributes nothing, so the export simply isn't served there
-/// until an IP appears.
+/// until an IP appears. IPv6 link-local addresses are skipped: they carry no
+/// scope id here, so the kernel cannot bind a listener to them.
 pub fn listen_addrs(
     interfaces: &[String],
     default: IpAddr,
@@ -107,6 +109,7 @@ pub fn listen_addrs(
         .filter_map(|pci| pci_addrs.get(&pci.to_string()))
         .flatten()
         .copied()
+        .filter(|a| !matches!(a, IpAddr::V6(v6) if v6.is_unicast_link_local()))
         .collect();
     addrs.sort();
     addrs.dedup();
@@ -119,6 +122,13 @@ pub fn listen_addrs(
 /// reconcile task surface these reasons so a skipped export is loud, not
 /// silently absent.
 pub fn nvme_render_error(e: &NvmeExport) -> Option<String> {
+    // A hand-edited state file can carry any name; `nqn()` assumes this check.
+    if crate::ExportName::new(&e.name).is_err() {
+        return Some(format!(
+            "invalid export name {:?} — export cannot be served",
+            e.name
+        ));
+    }
     crate::DevicePath::new(&e.device_path).is_err().then(|| {
         format!(
             "invalid device path {:?} — export cannot be served",
@@ -130,7 +140,8 @@ pub fn nvme_render_error(e: &NvmeExport) -> Option<String> {
 /// Why an enabled iSCSI export cannot be rendered at all (see
 /// [`nvme_render_error`]).
 pub fn iscsi_render_error(e: &IscsiExport) -> Option<String> {
-    if crate::BackstoreName::new(&e.name).is_err() {
+    // ExportName keeps `iqn()` valid; BackstoreName adds LIO's length limit.
+    if crate::ExportName::new(&e.name).is_err() || crate::BackstoreName::new(&e.name).is_err() {
         return Some(format!(
             "invalid export name {:?} — export cannot be served",
             e.name

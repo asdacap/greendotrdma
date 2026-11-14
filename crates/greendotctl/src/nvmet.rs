@@ -593,7 +593,7 @@ fn expand_volume(
     Ok(())
 }
 
-fn dir_entries(dir: &Path) -> Vec<String> {
+pub(crate) fn dir_entries(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
@@ -606,23 +606,23 @@ fn dir_entries(dir: &Path) -> Vec<String> {
     names
 }
 
-fn write_attr(path: &Path, value: &str) -> io::Result<()> {
+pub(crate) fn write_attr(path: &Path, value: &str) -> io::Result<()> {
     std::fs::write(path, value)
         .map_err(|e| io::Error::new(e.kind(), format!("writing {}: {e}", path.display())))
 }
 
-fn create_dir_all_ok(dir: &Path) -> io::Result<()> {
+pub(crate) fn create_dir_all_ok(dir: &Path) -> io::Result<()> {
     std::fs::create_dir_all(dir)
         .map_err(|e| io::Error::new(e.kind(), format!("creating {}: {e}", dir.display())))
 }
 
-fn symlink_ok(target: &Path, link: &Path) -> io::Result<()> {
+pub(crate) fn symlink_ok(target: &Path, link: &Path) -> io::Result<()> {
     std::os::unix::fs::symlink(target, link)
         .map_err(|e| io::Error::new(e.kind(), format!("linking {}: {e}", link.display())))
 }
 
 /// `remove_file` that treats an already-absent path as success.
-fn remove_file_ok(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_file_ok(path: &Path) -> io::Result<()> {
     match std::fs::remove_file(path) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io::Error::new(
             e.kind(),
@@ -636,7 +636,7 @@ fn remove_file_ok(path: &Path) -> io::Result<()> {
 /// attribute files and default subdirs on `rmdir`, so a bare `rmdir` always
 /// succeeds there; a plain directory (the unit test's tmpfs) still holds those
 /// files, so fall back to a recursive delete when the bare `rmdir` won't take.
-fn remove_object_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn remove_object_dir(path: &Path) -> io::Result<()> {
     match std::fs::remove_dir(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),

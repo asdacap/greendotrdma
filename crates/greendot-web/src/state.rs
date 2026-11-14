@@ -983,7 +983,7 @@ mod tests {
         );
         let vm1 = exports.iter().find(|e| e.id == id).unwrap();
         assert_eq!(vm1.initiators, ["nqn.2014-08.org.nvmexpress:host1"]);
-        assert_eq!(vm1.nqn().as_str(), "nqn.2026-06.io.greendot:vm1");
+        assert_eq!(vm1.nqn().unwrap().as_str(), "nqn.2026-06.io.greendot:vm1");
         assert!(vm1.enabled && vm1.want_rdma && vm1.want_tcp && !vm1.want_loop);
         assert_eq!(vm1.last_error, None);
 
@@ -1034,7 +1034,7 @@ mod tests {
 
         let tape = db.list_iscsi_exports().unwrap();
         let tape = tape.iter().find(|e| e.id == id).unwrap();
-        assert_eq!(tape.iqn().as_str(), "iqn.2026-06.io.greendot:tape");
+        assert_eq!(tape.iqn().unwrap().as_str(), "iqn.2026-06.io.greendot:tape");
         assert_eq!(tape.initiators, ["iqn.1993-08.org.debian:01:abc"]);
 
         db.set_iscsi_export_error(id, Some("targetctl failed"))

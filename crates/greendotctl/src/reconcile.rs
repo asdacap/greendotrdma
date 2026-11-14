@@ -8,9 +8,9 @@
 
 use crate::cmd::EventSink;
 use crate::render::{
-    NicAction, foreign_port_ids, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied,
-    nic_actions, nic_satisfied, nvme_modules, nvmet_satisfied, render_issues, render_lio,
-    render_nfs, render_nvmet,
+    NicAction, iscsi_modules, lio_satisfied, nfs_modules, nfs_satisfied, nic_actions,
+    nic_satisfied, nvme_modules, nvmet_satisfied, render_issues, render_lio, render_nfs,
+    render_nvmet,
 };
 use crate::{cmd, hardware, lio, modules, nfs, nvmet};
 use anyhow::Result;
@@ -160,7 +160,7 @@ pub fn drift(cfg_path: Option<String>) -> (bool, bool, bool, bool) {
         &desired.nvme_exports,
         desired.listen,
         &pci_addrs,
-        &foreign_port_ids(&actual_nvmet),
+        &actual_nvmet,
     );
     let nvmet_ok = nvmet_satisfied(&nvmet_desired, &actual_nvmet);
     let lio_ok = lio_satisfied(
@@ -229,7 +229,7 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
         &desired.nvme_exports,
         desired.listen,
         &pci_addrs,
-        &foreign_port_ids(&actual_nvmet),
+        &actual_nvmet,
     );
     let lio_desired = render_lio(&desired.iscsi_exports, desired.listen, &pci_addrs);
     let nfs_desired = render_nfs(&desired.nfs_exports, NFS_RDMA_PORT);
@@ -282,7 +282,7 @@ pub fn run(cfg_path: Option<String>, mutate_lock: &Mutex<()>, task: &mut Task) -
         nvmet::apply(&nvmet_desired, Path::new(nvmet::NVMET_ROOT), sub)
     })?;
     area(task, lio_ok, "Apply iSCSI configuration", |sub| {
-        cmd::run_into(sub, &lio::apply_spec(&lio_desired))
+        lio::apply(&lio_desired, &cfg.lio_root, sub)
     })?;
     area(task, nfs_ok, "Apply NFS configuration", |sub| {
         nfs::apply(

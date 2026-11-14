@@ -52,6 +52,34 @@ pub async fn reconcile_state(state: &Arc<AppState>) -> anyhow::Result<Option<i64
     // transport failure deserializes to "all drifted", so we still reconcile.
     let drift = state.helper.reconcile_dry_run().await;
     if drift.nvmet_ok && drift.lio_ok && drift.nfs_ok && drift.nic_ok {
+        // Realized, so a failure an earlier pass recorded no longer holds.
+        let stale = nvme_exports
+            .iter()
+            .any(|e| e.enabled && e.last_error.is_some())
+            || iscsi_exports
+                .iter()
+                .any(|e| e.enabled && e.last_error.is_some())
+            || nfs_exports
+                .iter()
+                .any(|e| e.enabled && e.last_error.is_some())
+            || state
+                .db
+                .get_setting(RECONCILE_ERROR_KEY)?
+                .is_some_and(|e| !e.is_empty());
+        if stale {
+            let realized = TaskOutcome {
+                ok: true,
+                error: None,
+            };
+            apply_reconcile_outcome(
+                state,
+                &nvme_exports,
+                &iscsi_exports,
+                &nfs_exports,
+                (true, true, true),
+                realized,
+            )?;
+        }
         return Ok(None); // already realized — emit no task
     }
 

@@ -235,7 +235,7 @@ async fn exports(
                 NvmeExportInfo {
                     id: e.id,
                     name: e.name.clone(),
-                    nqn: e.nqn().to_string(),
+                    nqn: e.nqn().map(|n| n.to_string()).unwrap_or_default(),
                     enabled: e.enabled,
                     allow_any_host: e.allow_any_host,
                     authorized: e.allow_any_host

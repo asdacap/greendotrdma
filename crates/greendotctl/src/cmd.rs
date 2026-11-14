@@ -45,17 +45,6 @@ impl TaskSpec {
         }
     }
 
-    /// `command <args> <tempfile>`, where the temp file holds `content`.
-    pub fn with_config_file(command: &str, args: Vec<String>, content: String) -> Self {
-        TaskSpec {
-            command: command.into(),
-            args,
-            stdin: Some(content),
-            env: Vec::new(),
-            stdin_to_file: true,
-        }
-    }
-
     pub fn env(mut self, key: &str, value: &str) -> Self {
         self.env.push((key.into(), value.into()));
         self
@@ -407,33 +396,6 @@ pub mod test {
         let spec = TaskSpec::with_stdin("cat", vec![], "hello world".into());
         let c = run_spec(&spec);
         assert_eq!(c.stdout(), "hello world");
-        assert!(matches!(
-            c.finished(),
-            TaskEvent::Finished {
-                status: SubStatus::Success,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn config_file_mode_passes_a_real_path() {
-        // `cat <tempfile>` should print the materialized content.
-        let spec = TaskSpec::with_config_file("cat", vec![], "rendered config".into());
-        let c = run_spec(&spec);
-        assert_eq!(c.stdout(), "rendered config");
-        match c.started() {
-            TaskEvent::SubtaskStarted { args, stdin, .. } => {
-                assert_eq!(args.len(), 1, "the temp path is appended as an arg");
-                assert!(args[0].contains("greendot-cat"), "{args:?}");
-                assert_eq!(
-                    stdin.as_deref(),
-                    Some("rendered config"),
-                    "content kept for display"
-                );
-            }
-            other => panic!("expected SubtaskStarted, got {other:?}"),
-        }
         assert!(matches!(
             c.finished(),
             TaskEvent::Finished {

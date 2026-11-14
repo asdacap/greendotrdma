@@ -40,7 +40,7 @@ pub fn nvme_dot(export: &NvmeExport, actual: &ActualNvmet, rdma: &[RdmaDev]) -> 
     if let Some(reason) = crate::reconcile::nvme_render_error(export) {
         return red(reason);
     }
-    let nqn = export.nqn();
+    let nqn = export.nqn().map(|n| n.to_string()).unwrap_or_default();
     let Some(subsys) = actual.subsystems.iter().find(|s| s.nqn == nqn.as_str()) else {
         return red("subsystem not configured (reconcile pending?)");
     };
@@ -110,7 +110,7 @@ pub fn iscsi_dot(export: &IscsiExport, actual: &ActualLio, rdma: &[RdmaDev]) -> 
     if let Some(reason) = crate::reconcile::iscsi_render_error(export) {
         return red(reason);
     }
-    let iqn = export.iqn();
+    let iqn = export.iqn().map(|n| n.to_string()).unwrap_or_default();
     let Some(backstore) = actual.backstores.iter().find(|b| b.name == export.name) else {
         return red("backstore not configured (reconcile pending?)");
     };
@@ -388,7 +388,7 @@ pub fn nvme_diagnostics(
     rdma: &[RdmaDev],
     capable_disabled: &[String],
 ) -> Vec<Criterion> {
-    let nqn = export.nqn();
+    let nqn = export.nqn().map(|n| n.to_string()).unwrap_or_default();
     let subsys = actual.subsystems.iter().find(|s| s.nqn == nqn.as_str());
     let ns = subsys.and_then(|s| s.namespaces.iter().find(|ns| ns.nsid == 1));
     let rdma_ports: Vec<&Port> = actual
@@ -465,7 +465,7 @@ pub fn iscsi_diagnostics(
     rdma: &[RdmaDev],
     capable_disabled: &[String],
 ) -> Vec<Criterion> {
-    let iqn = export.iqn();
+    let iqn = export.iqn().map(|n| n.to_string()).unwrap_or_default();
     let backstore = actual.backstores.iter().find(|b| b.name == export.name);
     let target = actual.targets.iter().find(|t| t.iqn == iqn.as_str());
     let iser_portals: Vec<&Portal> = target
