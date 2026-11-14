@@ -975,6 +975,21 @@ func TestThinLvDecisions(t *testing.T) {
 			},
 		},
 		{
+			name: "snapshot: csi-snapshotter's snapshot-<uuid>, a name LVM reserves, gets a prefix",
+			call: func(cs *ControllerServer) (any, error) {
+				return cs.CreateSnapshot(ctx, &csi.CreateSnapshotRequest{SourceVolumeId: "lvm1-vg0:pvc-1", Name: "snapshot-abc"})
+			},
+			wantCalls: []string{"LvInfo", "LvThinSnapshot"},
+			check: func(t *testing.T, f *fakeHelper, resp any) {
+				if name := f.reqs["LvThinSnapshot"].(*helperpb.LvThinSnapshot).Name; name != "gd-snapshot-abc" {
+					t.Fatalf("snapshot LV = %q", name)
+				}
+				if id := resp.(*csi.CreateSnapshotResponse).Snapshot.SnapshotId; id != "lvm1-vg0:pvc-1@gd-snapshot-abc" {
+					t.Fatalf("snapshot id = %q", id)
+				}
+			},
+		},
+		{
 			name: "snapshot: a retry finds it already taken from this volume",
 			lvs:  map[string]*helperpb.LvInfoReply{"vg0/snap1": thin(10*gib, "pvc-1", false)},
 			call: func(cs *ControllerServer) (any, error) {

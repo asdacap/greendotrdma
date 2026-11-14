@@ -707,10 +707,11 @@ func (cs *ControllerServer) CreateSnapshot(ctx context.Context, req *csi.CreateS
 		return nil, err
 	}
 	if ref.lv != "" {
-		if err := cs.createThinSnapshot(ctx, vol, ref, name); err != nil {
+		lv := lvSnapshotName(name)
+		if err := cs.createThinSnapshot(ctx, vol, ref, lv); err != nil {
 			return nil, err
 		}
-		return newSnapshotResponse(vol, name), nil
+		return newSnapshotResponse(vol, lv), nil
 	}
 	stream, err := cs.helper.SnapshotCreate(ctx, &helperpb.SnapshotCreate{
 		Dataset: ref.dataset, Snap: name,

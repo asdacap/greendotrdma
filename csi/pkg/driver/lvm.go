@@ -239,6 +239,17 @@ func (cs *ControllerServer) removeLv(ctx context.Context, vg, lv string) error {
 	return res.Err("deleting " + vg + "/" + lv)
 }
 
+// lvSnapshotName is the LV a CSI snapshot name becomes. LVM reserves names
+// starting "snapshot" or "pvmove" — and csi-snapshotter generates
+// snapshot-<uuid> — so those get a "gd-" prefix. The LV name rides in the
+// snapshot id, so delete and restore never re-derive it.
+func lvSnapshotName(name string) string {
+	if strings.HasPrefix(name, "snapshot") || strings.HasPrefix(name, "pvmove") {
+		return "gd-" + name
+	}
+	return name
+}
+
 // createThinSnapshot snapshots ref as the LV `name`. LV names are VG-wide, so
 // an existing LV of that name is this snapshot only if ref is its origin.
 func (cs *ControllerServer) createThinSnapshot(ctx context.Context, vol string, ref *volumeRef, name string) error {

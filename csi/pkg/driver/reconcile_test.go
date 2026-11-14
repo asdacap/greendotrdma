@@ -196,3 +196,44 @@ func TestAttachmentLookupAndDelayedDetach(t *testing.T) {
 		})
 	}
 }
+
+// One attachment's lifecycle around three hazards: a VolumeAttachment whose PV
+// is gone, a second PV sharing the volume handle, and a detach after the node
+// (and so its CSINode) was deleted.
+func TestAttachmentSurvivesDanglingSharedAndNodelessState(t *testing.T) {
+	ctx := context.Background()
+	h := newGenerationHelper()
+	cs := controllerWithHelper(t, h)
+	va := driverVA("generation", "pv", "node", true)
+	va.Annotations = map[string]string{vaNodeIDAnnotation: testHost}
+	kube := fake.NewSimpleClientset(
+		driverPV("pv", "tank:csi:volume"), driverPV("pv-shared", "tank:csi:volume"),
+		driverNode(), va, driverVA("dangling", "gone", "node", true),
+	)
+	cs.SetKubernetes(kube)
+	nqn := CSINQNPrefix + "tank:csi:volume"
+
+	// The dangling attachment does not block publish.
+	_, err := cs.ControllerPublishVolume(ctx, &csi.ControllerPublishVolumeRequest{VolumeId: "tank:csi:volume", NodeId: testHost, VolumeCapability: rwoCaps()[0]})
+	wantCode(t, err, codes.OK)
+	// pv-shared's pass sees the owner live through pv, so it does not fence it.
+	cs.reconcileOnce(ctx, kube)
+	if h.owners[nqn] == nil {
+		t.Fatal("reconcile fenced a live attachment of a PV sharing the handle")
+	}
+
+	// The node is deleted: its CSINode goes, the attachment starts deleting.
+	if err := kube.StorageV1().CSINodes().Delete(ctx, "node", metav1.DeleteOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	now := metav1.Now()
+	va.DeletionTimestamp = &now
+	if _, err := kube.StorageV1().VolumeAttachments().Update(ctx, va, metav1.UpdateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	_, err = cs.ControllerUnpublishVolume(ctx, &csi.ControllerUnpublishVolumeRequest{VolumeId: "tank:csi:volume", NodeId: testHost})
+	wantCode(t, err, codes.OK)
+	if h.owners[nqn] != nil || !h.fenced["generation"] {
+		t.Fatal("detach after node deletion did not fence the attachment")
+	}
+}

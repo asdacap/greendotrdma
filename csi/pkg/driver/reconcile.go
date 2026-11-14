@@ -35,6 +35,7 @@ func (cs *ControllerServer) reconcileOnce(ctx context.Context, kube kubernetes.I
 		klog.Errorf("export reconcile: list volumes: %v", err)
 		return
 	}
+	handles := volumeHandles(pvs.Items)
 	for _, pv := range pvs.Items {
 		if ctx.Err() != nil {
 			return
@@ -43,7 +44,7 @@ func (cs *ControllerServer) reconcileOnce(ctx context.Context, kube kubernetes.I
 			continue
 		}
 		volumeContext, cancel := context.WithTimeout(ctx, operationTimeout)
-		err := cs.reconcileVolume(volumeContext, kube, pv.Name, pv.Spec.CSI.VolumeHandle)
+		err := cs.reconcileVolume(volumeContext, kube, handles, pv.Name, pv.Spec.CSI.VolumeHandle)
 		cancel()
 		if err != nil {
 			klog.Warningf("export reconcile: %s: %v", pv.Name, err)
@@ -51,7 +52,9 @@ func (cs *ControllerServer) reconcileOnce(ctx context.Context, kube kubernetes.I
 	}
 }
 
-func (cs *ControllerServer) reconcileVolume(ctx context.Context, kube kubernetes.Interface, pvName, volume string) error {
+// handles maps every PV of this driver to its volume handle: the target owner
+// is per handle, and more than one PV can carry the same handle.
+func (cs *ControllerServer) reconcileVolume(ctx context.Context, kube kubernetes.Interface, handles map[string]string, pvName, volume string) error {
 	ref, err := cs.resolveVolumeID(volume)
 	if err != nil {
 		return err
@@ -69,7 +72,7 @@ func (cs *ControllerServer) reconcileVolume(ctx context.Context, kube kubernetes
 	}
 	ownerLive := false
 	for _, attachment := range attachments.Items {
-		if attachment.Spec.Attacher == DriverName && attachment.Spec.Source.PersistentVolumeName != nil && *attachment.Spec.Source.PersistentVolumeName == pvName && attachment.DeletionTimestamp == nil && string(attachment.UID) == owner.AttachmentId {
+		if attachment.Spec.Attacher == DriverName && attachment.Spec.Source.PersistentVolumeName != nil && handles[*attachment.Spec.Source.PersistentVolumeName] == volume && attachment.DeletionTimestamp == nil && string(attachment.UID) == owner.AttachmentId {
 			ownerLive = true
 		}
 	}
@@ -90,7 +93,7 @@ func (cs *ControllerServer) reconcileVolume(ctx context.Context, kube kubernetes
 		if uid == owner.AttachmentId && !ownerLive {
 			continue
 		} // fenced above, even if CSINode is gone
-		host := cs.nodeHostNQN(ctx, kube, attachment.Spec.NodeName)
+		host := cs.attachmentHostNQN(ctx, kube, &attachment)
 		if host == "" {
 			return fmt.Errorf("cannot resolve attachment host")
 		}
