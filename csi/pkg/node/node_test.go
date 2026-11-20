@@ -112,6 +112,49 @@ func TestBlockMountIdentity(t *testing.T) {
 	}
 }
 
+func TestNodeGetVolumeStats(t *testing.T) {
+	directory := t.TempDir()
+	// A published block volume is the device bind-mounted over a file; a
+	// regular file sizes the same way.
+	blockTarget := filepath.Join(directory, "block")
+	if err := os.WriteFile(blockTarget, make([]byte, 4096), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ns := NewNodeServer("", "", directory, "")
+	for _, tc := range []struct {
+		name, volumeID, volumePath string
+		wantCode                   codes.Code
+		wantUnits                  []csi.VolumeUsage_Unit
+		wantBytesTotal             int64 // 0: any positive total
+	}{
+		{name: "no volume id", volumePath: directory, wantCode: codes.InvalidArgument},
+		{name: "no volume path", volumeID: "tank:volume", wantCode: codes.InvalidArgument},
+		{name: "missing path", volumeID: "tank:volume", volumePath: filepath.Join(directory, "missing"), wantCode: codes.NotFound},
+		{name: "filesystem", volumeID: "tank:volume", volumePath: directory, wantUnits: []csi.VolumeUsage_Unit{csi.VolumeUsage_BYTES, csi.VolumeUsage_INODES}},
+		{name: "block", volumeID: "tank:volume", volumePath: blockTarget, wantUnits: []csi.VolumeUsage_Unit{csi.VolumeUsage_BYTES}, wantBytesTotal: 4096},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response, err := ns.NodeGetVolumeStats(context.Background(), &csi.NodeGetVolumeStatsRequest{VolumeId: tc.volumeID, VolumePath: tc.volumePath})
+			if status.Code(err) != tc.wantCode {
+				t.Fatalf("stats: got %v, want %s", err, tc.wantCode)
+			}
+			usage := response.GetUsage()
+			if len(usage) != len(tc.wantUnits) {
+				t.Fatalf("usage = %v, want units %v", usage, tc.wantUnits)
+			}
+			for index, entry := range usage {
+				if entry.GetUnit() != tc.wantUnits[index] || entry.GetUsed() < 0 || entry.GetAvailable() < 0 ||
+					entry.GetUsed()+entry.GetAvailable() > entry.GetTotal() {
+					t.Errorf("usage %d = %v", index, entry)
+				}
+			}
+			if len(usage) > 0 && (usage[0].GetTotal() <= 0 || tc.wantBytesTotal != 0 && usage[0].GetTotal() != tc.wantBytesTotal) {
+				t.Errorf("bytes total = %d, want %d", usage[0].GetTotal(), tc.wantBytesTotal)
+			}
+		})
+	}
+}
+
 func TestRescanNamespaceLayouts(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string

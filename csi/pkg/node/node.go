@@ -32,11 +32,13 @@ package node
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"slices"
 	"sync"
+	"syscall"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"google.golang.org/grpc/codes"
@@ -78,6 +80,7 @@ func (ns *NodeServer) NodeGetCapabilities(ctx context.Context, req *csi.NodeGetC
 	for _, c := range []csi.NodeServiceCapability_RPC_Type{
 		csi.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME,
 		csi.NodeServiceCapability_RPC_EXPAND_VOLUME,
+		csi.NodeServiceCapability_RPC_GET_VOLUME_STATS,
 	} {
 		caps = append(caps, &csi.NodeServiceCapability{
 			Type: &csi.NodeServiceCapability_Rpc{
@@ -321,6 +324,62 @@ func (ns *NodeServer) NodeExpandVolume(ctx context.Context, req *csi.NodeExpandV
 		return nil, status.Errorf(codes.Internal, "growing filesystem on %s: %v", devicePath, err)
 	}
 	return &csi.NodeExpandVolumeResponse{}, nil
+}
+
+// NodeGetVolumeStats feeds the kubelet's volume metrics: statfs of a published
+// filesystem, or the size of a published block volume, which is the device
+// bind-mounted over a file (so anything but a directory is sized as a device).
+func (ns *NodeServer) NodeGetVolumeStats(ctx context.Context, req *csi.NodeGetVolumeStatsRequest) (*csi.NodeGetVolumeStatsResponse, error) {
+	volID, volPath := req.GetVolumeId(), req.GetVolumePath()
+	if volID == "" || volPath == "" {
+		return nil, status.Error(codes.InvalidArgument, "volume id and volume path are required")
+	}
+	info, err := os.Stat(volPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, status.Errorf(codes.NotFound, "volume path %s does not exist", volPath)
+		}
+		return nil, status.Errorf(codes.Internal, "checking %s: %v", volPath, err)
+	}
+	if !info.IsDir() {
+		deviceBytes, err := deviceSize(volPath)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "sizing %s: %v", volPath, err)
+		}
+		return &csi.NodeGetVolumeStatsResponse{Usage: []*csi.VolumeUsage{
+			{Unit: csi.VolumeUsage_BYTES, Total: deviceBytes},
+		}}, nil
+	}
+	var filesystem syscall.Statfs_t
+	if err := syscall.Statfs(volPath, &filesystem); err != nil {
+		return nil, status.Errorf(codes.Internal, "statfs %s: %v", volPath, err)
+	}
+	blockSize := int64(filesystem.Bsize)
+	return &csi.NodeGetVolumeStatsResponse{Usage: []*csi.VolumeUsage{
+		{
+			Unit:      csi.VolumeUsage_BYTES,
+			Total:     int64(filesystem.Blocks) * blockSize,
+			Available: int64(filesystem.Bavail) * blockSize,
+			Used:      int64(filesystem.Blocks-filesystem.Bfree) * blockSize,
+		},
+		{
+			Unit:      csi.VolumeUsage_INODES,
+			Total:     int64(filesystem.Files),
+			Available: int64(filesystem.Ffree),
+			Used:      int64(filesystem.Files - filesystem.Ffree),
+		},
+	}}, nil
+}
+
+// deviceSize seeks to the end: a block device reports its size that way,
+// without an ioctl.
+func deviceSize(path string) (int64, error) {
+	device, err := os.Open(path)
+	if err != nil {
+		return 0, err
+	}
+	defer device.Close()
+	return device.Seek(0, io.SeekEnd)
 }
 
 // rescanController follows sysfs membership instead of inferring controller
